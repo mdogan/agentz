@@ -44,6 +44,21 @@ impl Project {
     }
 }
 
+/// The folder new sessions start in: the top of the git worktree `dir` is
+/// in, or `dir` itself outside a repo.
+pub fn root_of(dir: &Path) -> PathBuf {
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| dir.to_path_buf(), PathBuf::from)
+}
+
 fn git_worktrees(dir: &Path) -> Option<Vec<PathBuf>> {
     let out = Command::new("git")
         .arg("-C")

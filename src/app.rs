@@ -16,7 +16,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::AppEvent;
-use crate::project::Project;
+use crate::project::{self, Project};
 use crate::sessions::{Agent, Session, SessionKey};
 use crate::term::{self, Term};
 
@@ -152,7 +152,8 @@ pub struct App {
     shell_pids: Arc<Mutex<Vec<u32>>>,
     next_term_id: u64,
     next_new_id: u64,
-    launch_cwd: PathBuf,
+    /// Where new sessions start: the project root, see `project::root_of`.
+    root: PathBuf,
     started: Instant,
     pub quit: bool,
 }
@@ -190,7 +191,7 @@ impl App {
             shell_pids,
             next_term_id: 1,
             next_new_id: 1,
-            launch_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            root: project::root_of(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
             started: Instant::now(),
             quit: false,
         }
@@ -402,7 +403,7 @@ impl App {
 
     fn new_session(&mut self, agent: Agent) {
         self.prune(None);
-        let cwd = self.launch_cwd.clone();
+        let cwd = self.root.clone();
         let title = match agent {
             Agent::Shell => shell_name(),
             _ => format!("New {} session", agent.name()),

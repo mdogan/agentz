@@ -22,7 +22,7 @@ In the sidebar:
 | --- | --- |
 | `↑` `↓` / `j` `k` | move |
 | `Enter` / click | open: switch to it if it is running, otherwise resume it |
-| `n` / `N` | new Claude / Codex session in the folder you started agentz from |
+| `n` / `N` | new Claude / Codex session in the project root (the top of the git repo you started agentz in, or that folder outside a repo) |
 | `t` | new plain shell (no agent) in the same folder, like a terminal tab |
 | `/` | filter by title or folder (`Esc` clears) |
 | `a` | show sessions from all repos / only this repo |
