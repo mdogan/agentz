@@ -24,7 +24,7 @@ In the sidebar:
 | --- | --- |
 | `↑` `↓` / `j` `k` | move |
 | `Enter` / click | open: switch to it if it is running, otherwise resume it |
-| `n` / `N` | new Claude / Codex session in the project root (the top of the git repo you started agentz in, or that folder outside a repo) |
+| `n` / `N` | new Claude / Codex session in the active shell's folder if it is idle; otherwise in the project root (the top of the git repo you started agentz in, or that folder outside a repo) |
 | `t` | new plain shell (no agent) in the same folder, like a terminal tab |
 | `/` | filter by title or folder (`Esc` clears) |
 | `a` | show sessions from all repos / only this repo |
@@ -66,6 +66,8 @@ The first number is the 5-hour window and when it starts over. The second is the
 - Claude only gives its limits to its status line command. So agentz starts `claude` with `--settings` that sets the status line to `agentz statusline`. That command saves the limits to `~/Library/Caches/agentz/claude-rate-limits.json` (`~/.cache/agentz` on Linux), then runs your own status line command with the same input, if you have one in `~/.claude/settings.json` or the project's `.claude/settings.json` / `settings.local.json`. The limits are only there with a Claude subscription, and only after Claude's first reply. A `claude` you start by hand in a shell tab does not update them.
 
 A shell tab follows `cd`: its folder in the sidebar, and the folder `t` opens a new shell in, is the one the shell reports (OSC 7). fish does this by default; zsh and bash on macOS don't, so their tabs keep the folder they started in.
+
+Starting a new Claude or Codex session, or resuming one from the list, replaces the shell shown in the right pane if that shell is idle. A new session starts in the shell's current folder, even if the shell did not report its `cd` to the sidebar. A resumed session starts in its own folder. A shell running a command stays open.
 
 When the agent you are looking at exits, agentz opens a plain shell in its folder, so you can start `claude` or `codex` by hand. If you switch to another session before typing anything in that shell, the shell is closed and removed from the list. Typing `exit` in a shell closes it, like a terminal tab.
 

@@ -16,6 +16,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::AppEvent;
+use crate::procs;
 use crate::project::{self, Project};
 use crate::sessions::{Agent, Session, SessionKey};
 use crate::term::{self, Term};
@@ -455,15 +456,16 @@ impl App {
     /// Shows the session. If its agent is already running we just switch to
     /// it; otherwise we resume it in a new PTY.
     fn open(&mut self, key: SessionKey) {
-        self.prune(Some(&key));
-
-        if let Some(i) = self.running.iter().position(|r| r.is(&key)) {
-            if self.running[i].term.is_running() {
-                self.current = Some(self.running[i].key.clone());
-                self.focus = Focus::Terminal;
-                return;
-            }
-            self.running.remove(i);
+        if let Some(r) = self
+            .running
+            .iter()
+            .find(|r| r.is(&key) && r.term.is_running())
+        {
+            let shown = r.key.clone();
+            self.prune(Some(&key));
+            self.current = Some(shown);
+            self.focus = Focus::Terminal;
+            return;
         }
 
         let Some(row) = self.rows.iter().find(|r| r.key == key) else {
@@ -472,20 +474,68 @@ impl App {
         let (cwd, title) = (row.cwd.clone(), row.title.clone());
         if key.1.starts_with("new-") {
             // A Codex session that never got a transcript; start fresh.
-            self.start(key.0, None, cwd, title);
+            self.start_from_active_shell(key.0, None, cwd, false, title);
         } else {
-            self.start(key.0, Some(key.1.clone()), cwd, title);
+            self.start_from_active_shell(key.0, Some(key.1.clone()), cwd, false, title);
         }
     }
 
     fn new_session(&mut self, agent: Agent) {
-        self.prune(None);
         let cwd = self.root.clone();
         let title = match agent {
             Agent::Shell => shell_name(),
             _ => format!("New {} session", agent.name()),
         };
-        self.start(agent, None, cwd, title);
+        self.start_from_active_shell(agent, None, cwd, true, title);
+    }
+
+    /// The shell shown in the pane can be replaced only when it is at its
+    /// prompt. Read its real cwd because not every shell reports OSC 7.
+    fn active_idle_shell(&self) -> Option<(SessionKey, PathBuf)> {
+        let r = self.current_running()?;
+        if r.key.0 != Agent::Shell
+            || !r.term.is_running()
+            || r.linked.is_some()
+            || r.term.has_foreground_job()
+        {
+            return None;
+        }
+        let cwd = r
+            .term
+            .pid
+            .and_then(procs::working_dir)
+            .unwrap_or_else(|| r.cwd.clone());
+        Some((r.key.clone(), cwd))
+    }
+
+    /// Starts an agent in place of the idle shell shown in the pane, if
+    /// there is one. With `shell_cwd` it starts in the shell's folder.
+    fn start_from_active_shell(
+        &mut self,
+        agent: Agent,
+        resume: Option<String>,
+        cwd: PathBuf,
+        shell_cwd: bool,
+        title: String,
+    ) {
+        let shell = (agent != Agent::Shell)
+            .then(|| self.active_idle_shell())
+            .flatten();
+        self.prune(shell.as_ref().map(|(key, _)| key));
+        // A session opened from the list keeps its own folder: Claude finds
+        // its transcript by folder, and Codex would carry on in another repo.
+        let cwd = match &shell {
+            Some((_, dir)) if shell_cwd => dir.clone(),
+            _ => cwd,
+        };
+        if self.start(agent, resume, cwd, title)
+            && let Some((key, _)) = shell
+            && let Some(i) = self.running.iter().position(|r| r.key == key)
+        {
+            self.running[i].term.kill();
+            self.running.remove(i);
+            self.rebuild_rows();
+        }
     }
 
     /// Finished processes are only kept around so their last output stays
@@ -1422,6 +1472,7 @@ fn pad(s: &str, width: usize) -> String {
 mod tests {
     use super::*;
     use crate::usage::Window;
+    use std::sync::mpsc::channel;
 
     fn text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -1453,5 +1504,52 @@ mod tests {
             text(&usage_line(Agent::Codex, &week_only, now, 41)),
             " ◆ week 88% left · resets 3d0h"
         );
+    }
+
+    #[test]
+    fn active_idle_shell_uses_its_real_cwd_and_skips_foreground_jobs() {
+        let (tx, _) = channel();
+        let redraw = Arc::new(AtomicBool::new(false));
+        let mut app = App::new(tx.clone(), redraw.clone(), Arc::new(Mutex::new(Vec::new())));
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.arg("-i");
+        cmd.cwd(&app.root);
+        let term = Term::spawn(1, cmd, 24, 80, tx, redraw).unwrap();
+        let key = (Agent::Shell, "shell-test".to_string());
+        app.running.push(Running {
+            key: key.clone(),
+            term,
+            cwd: app.root.clone(),
+            spawned_at: SystemTime::now(),
+            fallback_title: "sh".into(),
+            placeholder: false,
+            linked: None,
+        });
+        app.current = Some(key.clone());
+
+        app.running[0].term.write(b"cd /\n");
+        let start = Instant::now();
+        while app
+            .active_idle_shell()
+            .as_ref()
+            .map(|(_, cwd)| cwd.as_path())
+            != Some(Path::new("/"))
+        {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            app.active_idle_shell(),
+            Some((key.clone(), PathBuf::from("/")))
+        );
+
+        app.running[0].term.write(b"sleep 5\n");
+        let start = Instant::now();
+        while !app.running[0].term.has_foreground_job() {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(app.active_idle_shell(), None);
+        app.running[0].term.kill();
     }
 }

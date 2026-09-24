@@ -118,6 +118,41 @@ fn open_files(pid: u32) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The process's current directory, even when its shell does not send OSC 7.
+#[cfg(target_os = "macos")]
+pub fn working_dir(pid: u32) -> Option<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: proc_vnodepathinfo is plain data; all zeros is a valid value.
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    // SAFETY: the buffer is `size` bytes and lives across the call.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        )
+    };
+    if n != size {
+        return None;
+    }
+    let path = info.pvi_cdir.vip_path.as_flattened();
+    // SAFETY: c_char and u8 have the same size and alignment.
+    let bytes = unsafe { std::slice::from_raw_parts(path.as_ptr().cast::<u8>(), path.len()) };
+    let path = CStr::from_bytes_until_nul(bytes).ok()?.to_bytes();
+    (!path.is_empty()).then(|| PathBuf::from(OsStr::from_bytes(path)))
+}
+
+/// The process's current directory, even when its shell does not send OSC 7.
+#[cfg(not(target_os = "macos"))]
+pub fn working_dir(pid: u32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
