@@ -28,7 +28,7 @@ In the sidebar:
 | `t` | new plain shell (no agent) in the same folder, like a terminal tab |
 | `/` | filter by title or folder (`Esc` clears) |
 | `a` | show sessions from all repos / only this repo |
-| `i` | hide / show inactive sessions (those with no running agent or shell) |
+| `i` | show / hide inactive sessions (those with no running agent or shell). Hidden at start. |
 | `x` | stop the selected agent or shell |
 | `q` | quit. Refused while an agent is working (wait, or stop it with `x`). Press twice if an agent is idle or a shell is running a command. Quits at once if only idle shells are open. |
 

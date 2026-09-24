@@ -176,7 +176,7 @@ impl App {
             loaded: false,
             project: None,
             all_repos: false,
-            hide_inactive: false,
+            hide_inactive: true,
             running: Vec::new(),
             rows: Vec::new(),
             cursor: 0,
@@ -1174,7 +1174,7 @@ impl App {
             let lines = vec![
                 Line::raw(""),
                 Line::styled(
-                    "  Pick a session on the left to resume it.",
+                    "  Pick a session on the left to resume it. Press i to show inactive ones.",
                     Style::default().fg(theme().muted),
                 ),
                 Line::styled(
