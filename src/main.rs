@@ -1,5 +1,6 @@
 mod app;
 mod procs;
+mod project;
 mod sessions;
 mod term;
 
@@ -18,6 +19,7 @@ use crossterm::execute;
 use crossterm::terminal::supports_keyboard_enhancement;
 
 use crate::app::App;
+use crate::project::Project;
 use crate::sessions::{Scanner, Session, SessionKey};
 
 pub enum AppEvent {
@@ -26,9 +28,9 @@ pub enum AppEvent {
     Redraw,
     /// The agent in the terminal with this id exited.
     Exited(u64),
-    /// All sessions, and for each of our shells (by pid) the session of the
+    /// All sessions, the project agentz was started in, and for each of our shells (by pid) the session of the
     /// agent running inside it.
-    Sessions(Vec<Session>, Vec<(u32, SessionKey)>),
+    Sessions(Vec<Session>, Project, Vec<(u32, SessionKey)>),
 }
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(3);
@@ -38,7 +40,10 @@ const SYNC_WAIT: Duration = Duration::from_millis(50);
 
 fn main() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("--list") {
-        for s in Scanner::default().scan() {
+        let project = Project::detect(&std::env::current_dir()?);
+        let mut sessions = Scanner::default().scan();
+        sessions.retain(|s| project.contains(&s.cwd));
+        for s in sessions {
             println!(
                 "{}\t{}\t{}\t{}",
                 s.agent.name(),
@@ -99,11 +104,17 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         let tx = tx.clone();
         let shell_pids = shell_pids.clone();
         std::thread::spawn(move || {
+            let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
             let mut scanner = Scanner::default();
             loop {
+                let sessions = scanner.scan();
+                let project = Project::detect(&dir);
                 let pids = shell_pids.lock().unwrap().clone();
                 let links = procs::agents_in_shells(&pids);
-                if tx.send(AppEvent::Sessions(scanner.scan(), links)).is_err() {
+                if tx
+                    .send(AppEvent::Sessions(sessions, project, links))
+                    .is_err()
+                {
                     break;
                 }
                 std::thread::sleep(SCAN_INTERVAL);

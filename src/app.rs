@@ -16,6 +16,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::AppEvent;
+use crate::project::Project;
 use crate::sessions::{Agent, Session, SessionKey};
 use crate::term::Term;
 
@@ -66,6 +67,11 @@ struct Row {
 pub struct App {
     sessions: Vec<Session>,
     loaded: bool,
+    project: Option<Project>,
+    /// Show sessions from other repos too (`a`).
+    all_repos: bool,
+    /// Show only sessions with a running agent or shell (`i`).
+    hide_inactive: bool,
     running: Vec<Running>,
     rows: Vec<Row>,
     cursor: usize,
@@ -100,6 +106,9 @@ impl App {
         App {
             sessions: Vec::new(),
             loaded: false,
+            project: None,
+            all_repos: false,
+            hide_inactive: false,
             running: Vec::new(),
             rows: Vec::new(),
             cursor: 0,
@@ -154,8 +163,9 @@ impl App {
                     self.replace_with_shell(i);
                 }
             }
-            AppEvent::Sessions(list, links) => {
+            AppEvent::Sessions(list, project, links) => {
                 self.sessions = list;
+                self.project = Some(project);
                 self.loaded = true;
                 self.link_shells(&links);
                 self.bind_new_codex_sessions();
@@ -249,6 +259,14 @@ impl App {
                 });
             }
         }
+        // Rows with a process of ours stay visible either way, so a running
+        // agent can't get lost behind a hidden row.
+        rows.retain(|row| {
+            let active = self.running.iter().any(|r| r.is(&row.key));
+            let in_project =
+                self.all_repos || self.project.as_ref().is_none_or(|p| p.contains(&row.cwd));
+            active || (in_project && !self.hide_inactive)
+        });
         if !self.filter.is_empty() {
             let q = self.filter.to_lowercase();
             rows.retain(|row| {
@@ -540,6 +558,24 @@ impl App {
             KeyCode::Char('n') => self.new_session(Agent::Claude),
             KeyCode::Char('N') => self.new_session(Agent::Codex),
             KeyCode::Char('t') => self.new_session(Agent::Shell),
+            KeyCode::Char('a') => {
+                self.all_repos = !self.all_repos;
+                self.rebuild_rows();
+                self.set_status(if self.all_repos {
+                    "Showing sessions from all repos"
+                } else {
+                    "Showing sessions from this repo only"
+                });
+            }
+            KeyCode::Char('i') => {
+                self.hide_inactive = !self.hide_inactive;
+                self.rebuild_rows();
+                self.set_status(if self.hide_inactive {
+                    "Hiding inactive sessions"
+                } else {
+                    "Showing inactive sessions"
+                });
+            }
             KeyCode::Char('x') => {
                 if let Some(key) = self.cursor_key.clone() {
                     self.stop(&key);
@@ -678,7 +714,7 @@ impl App {
         f.render_widget(Paragraph::new(header_line), header);
 
         // Footer: status message or key hints.
-        let footer_h = 2;
+        let footer_h = 3;
         let footer = Rect::new(area.x, area.y + area.height - footer_h, inner_w, footer_h);
         let status = self
             .status
@@ -702,6 +738,24 @@ impl App {
                     ("x", "stop"),
                     ("q", "quit"),
                     ("C-\\", "agent"),
+                ]),
+                hint_line(&[
+                    (
+                        "a",
+                        if self.all_repos {
+                            "this repo"
+                        } else {
+                            "all repos"
+                        },
+                    ),
+                    (
+                        "i",
+                        if self.hide_inactive {
+                            "show inactive"
+                        } else {
+                            "hide inactive"
+                        },
+                    ),
                 ]),
             ]
         } else {
@@ -735,6 +789,10 @@ impl App {
         if self.rows.is_empty() {
             let msg = if !self.loaded {
                 " Loading sessions…"
+            } else if self.hide_inactive {
+                " No running sessions (i shows all)"
+            } else if !self.all_repos {
+                " No sessions here (a shows all repos)"
             } else {
                 " No sessions"
             };

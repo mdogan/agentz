@@ -2,7 +2,7 @@
 
 A terminal UI that holds your Claude Code and Codex sessions in one place.
 
-- The left sidebar lists sessions from both agents, newest first.
+- The left sidebar lists sessions from both agents, newest first. By default it only shows sessions of the project you started agentz in: in a git repo, that is the main checkout and all its worktrees (and their subfolders). Outside a repo, it is only that exact folder. Press `a` to see sessions from all repos.
 - Clicking a session (or pressing Enter) resumes it in the right pane with the right agent.
 - Every agent runs in its own PTY. When you switch to another session, the previous agent keeps running in the background.
 - Selecting a session that is already running just switches to it. It is not restarted.
@@ -25,6 +25,8 @@ In the sidebar:
 | `n` / `N` | new Claude / Codex session in the folder you started agentz from |
 | `t` | new plain shell (no agent) in the same folder, like a terminal tab |
 | `/` | filter by title or folder (`Esc` clears) |
+| `a` | show sessions from all repos / only this repo |
+| `i` | hide / show inactive sessions (those with no running agent or shell) |
 | `x` | stop the selected agent or shell |
 | `q` | quit. Refused while an agent is running (stop it with `x` first). Press twice if only shells are open. |
 
@@ -34,6 +36,8 @@ Anywhere:
 | --- | --- |
 | `Ctrl+\` | toggle focus between the sidebar and the agent |
 | mouse wheel over the agent | scroll back through its output |
+
+Sessions with a running agent or shell always stay in the list, even when `a` or `i` would hide them, so a running agent can't get lost.
 
 In the sidebar, a green `●` means the agent is running and waiting for you. A spinner means it is working right now.
 
