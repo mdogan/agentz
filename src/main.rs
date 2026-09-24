@@ -5,6 +5,7 @@ mod procs;
 mod project;
 mod sessions;
 mod term;
+mod usage;
 
 use std::io::{Write, stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +35,8 @@ pub enum AppEvent {
     /// All sessions, the project agentz was started in, and for each of our shells (by pid) the session of the
     /// agent running inside it.
     Sessions(Vec<Session>, Project, Vec<(u32, SessionKey)>),
+    /// What is left of Claude's and Codex's rate limits.
+    Limits(usage::Limits),
 }
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(3);
@@ -42,6 +45,9 @@ const TICK: Duration = Duration::from_millis(150);
 const SYNC_WAIT: Duration = Duration::from_millis(50);
 
 fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("statusline") {
+        return usage::status_line();
+    }
     if std::env::args().nth(1).as_deref() == Some("--list") {
         let project = Project::detect(&std::env::current_dir()?);
         let mut sessions = Scanner::default().scan();
@@ -156,6 +162,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         std::thread::spawn(move || {
             let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
             let mut scanner = Scanner::default();
+            let mut codex = usage::CodexReader::default();
             loop {
                 let sessions = scanner.scan();
                 let project = Project::detect(&dir);
@@ -165,6 +172,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                     .send(AppEvent::Sessions(sessions, project, links))
                     .is_err()
                 {
+                    break;
+                }
+                let limits = usage::Limits {
+                    claude: usage::claude(),
+                    codex: codex.read(scanner.codex_files()),
+                };
+                if tx.send(AppEvent::Limits(limits)).is_err() {
                     break;
                 }
                 std::thread::sleep(SCAN_INTERVAL);

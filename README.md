@@ -51,6 +51,20 @@ agentz knows an agent is working because the agent says so:
 - Codex shows a spinner in the window title while it works. agentz also tells Codex when you look away (focus reporting), and then Codex sends a notification when it is done.
 - For anything else, "working" means it kept printing for at least 3 seconds after your last key press, so typing and short redraws don't count.
 
+## Rate limits
+
+While a Claude or Codex agent is running, the bottom of the sidebar shows how much of your plan's limits is left, one line per agent:
+
+```
+ ✻ 58% left · resets 2h10m · week 88%
+ ◆ 75% left · resets 4h02m · week 96%
+```
+
+The first number is the 5-hour window and when it starts over. The second is the weekly window. The numbers turn yellow below 20%.
+
+- Codex writes its limits into the rollout file after each turn. agentz reads the newest one.
+- Claude only gives its limits to its status line command. So agentz starts `claude` with `--settings` that sets the status line to `agentz statusline`. That command saves the limits to `~/Library/Caches/agentz/claude-rate-limits.json` (`~/.cache/agentz` on Linux), then runs your own status line command with the same input, if you have one in `~/.claude/settings.json` or the project's `.claude/settings.json` / `settings.local.json`. The limits are only there with a Claude subscription, and only after Claude's first reply. A `claude` you start by hand in a shell tab does not update them.
+
 A shell tab follows `cd`: its folder in the sidebar, and the folder `t` opens a new shell in, is the one the shell reports (OSC 7). fish does this by default; zsh and bash on macOS don't, so their tabs keep the folder they started in.
 
 When the agent you are looking at exits, agentz opens a plain shell in its folder, so you can start `claude` or `codex` by hand. If you switch to another session before typing anything in that shell, the shell is closed and removed from the list. Typing `exit` in a shell closes it, like a terminal tab.

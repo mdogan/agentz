@@ -72,6 +72,8 @@ struct CacheEntry {
 #[derive(Default)]
 pub struct Scanner {
     cache: HashMap<PathBuf, CacheEntry>,
+    /// Codex rollout files from the last scan, newest first.
+    codex_files: Vec<PathBuf>,
 }
 
 impl Scanner {
@@ -92,6 +94,7 @@ impl Scanner {
             let names = codex_thread_names(&home.join("session_index.jsonl"));
             let mut files = Vec::new();
             walk_jsonl(&home.join("sessions"), &mut files);
+            let mut by_mtime = Vec::new();
             for path in files {
                 if let Some(mut s) = self.visit(&path, Agent::Codex) {
                     if let Some(name) = names.get(&s.id) {
@@ -99,8 +102,13 @@ impl Scanner {
                     }
                     out.push(s);
                 }
+                if let Some(e) = self.cache.get(&path) {
+                    by_mtime.push((e.mtime, path.clone()));
+                }
                 seen.push(path);
             }
+            by_mtime.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+            self.codex_files = by_mtime.into_iter().map(|(_, p)| p).collect();
         }
 
         let seen: std::collections::HashSet<_> = seen.into_iter().collect();
@@ -108,6 +116,11 @@ impl Scanner {
 
         out.sort_by_key(|s| std::cmp::Reverse(s.updated));
         out
+    }
+
+    /// Codex rollout files from the last scan, newest first.
+    pub fn codex_files(&self) -> &[PathBuf] {
+        &self.codex_files
     }
 
     fn visit(&mut self, path: &Path, agent: Agent) -> Option<Session> {

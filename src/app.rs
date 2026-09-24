@@ -19,6 +19,7 @@ use crate::AppEvent;
 use crate::project::{self, Project};
 use crate::sessions::{Agent, Session, SessionKey};
 use crate::term::{self, Term};
+use crate::usage::{self, Limits, Usage};
 
 const SIDEBAR_WIDTH: u16 = 42;
 const MIN_SIDEBAR_WIDTH: u16 = 20;
@@ -142,6 +143,7 @@ pub struct App {
     filter: String,
     filtering: bool,
     status: Option<(String, Instant)>,
+    limits: Limits,
     confirm_quit: bool,
     /// Sidebar width the user picked by dragging the separator.
     sidebar_width: u16,
@@ -185,6 +187,7 @@ impl App {
             filter: String::new(),
             filtering: false,
             status: None,
+            limits: Limits::default(),
             confirm_quit: false,
             sidebar_width: SIDEBAR_WIDTH,
             resizing: false,
@@ -293,6 +296,7 @@ impl App {
                 self.bind_new_codex_sessions();
                 self.rebuild_rows();
             }
+            AppEvent::Limits(limits) => self.limits = limits,
         }
         *self.shell_pids.lock().unwrap() = self
             .running
@@ -433,6 +437,15 @@ impl App {
         self.running.iter_mut().find(|r| &r.key == key)
     }
 
+    /// True if `agent` runs in one of our terminals, on its own or started
+    /// by hand in a shell.
+    fn agent_running(&self, agent: Agent) -> bool {
+        self.running.iter().any(|r| {
+            r.term.is_running()
+                && (r.key.0 == agent || r.linked.as_ref().is_some_and(|k| k.0 == agent))
+        })
+    }
+
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status = Some((msg.into(), Instant::now()));
     }
@@ -511,7 +524,7 @@ impl App {
             self.set_status(format!("Folder no longer exists: {}", cwd.display()));
             return false;
         }
-        let (key, args): (SessionKey, Vec<String>) = match (agent, resume) {
+        let (key, mut args): (SessionKey, Vec<String>) = match (agent, resume) {
             (Agent::Claude, Some(id)) => ((agent, id.clone()), vec!["--resume".into(), id]),
             (Agent::Claude, None) => {
                 let id = uuid::Uuid::new_v4().to_string();
@@ -530,7 +543,20 @@ impl App {
             }
         };
 
-        let cmd = build_command(agent, &args, &cwd);
+        // Claude only tells its status line how much of the rate limits is
+        // left, so we put ours in front of the user's.
+        let mut user_status_line = None;
+        if agent == Agent::Claude
+            && let Some((settings, theirs)) = usage::claude_settings(&cwd)
+        {
+            args.push("--settings".into());
+            args.push(settings);
+            user_status_line = theirs;
+        }
+        let mut cmd = build_command(agent, &args, &cwd);
+        if let Some(theirs) = user_status_line {
+            cmd.env(usage::USER_STATUS_LINE_VAR, theirs);
+        }
         let (rows, cols) = self.term_size();
         let id = self.next_term_id;
         self.next_term_id += 1;
@@ -888,14 +914,24 @@ impl App {
         };
         f.render_widget(Paragraph::new(header_line), header);
 
-        // Footer: status message or key hints.
-        let footer_h = 3;
+        // Footer: what is left of the rate limits of each running agent,
+        // then a status message or key hints.
+        let now = usage::now();
+        let mut footer_lines: Vec<Line> = [
+            (Agent::Claude, self.limits.claude),
+            (Agent::Codex, self.limits.codex),
+        ]
+        .into_iter()
+        .filter(|(agent, _)| self.agent_running(*agent))
+        .filter_map(|(agent, u)| Some(usage_line(agent, &u?, now, inner_w as usize)))
+        .collect();
+        let footer_h = 3 + footer_lines.len() as u16;
         let footer = Rect::new(area.x, area.y + area.height - footer_h, inner_w, footer_h);
         let status = self
             .status
             .as_ref()
             .filter(|(_, t)| t.elapsed() < Duration::from_secs(6));
-        let footer_lines = if let Some((msg, _)) = status {
+        footer_lines.extend(if let Some((msg, _)) = status {
             vec![Line::styled(
                 format!(" {msg}"),
                 Style::default().fg(theme().warn),
@@ -935,7 +971,7 @@ impl App {
             ]
         } else {
             vec![hint_line(&[("C-\\", "sessions"), ("click", "switch")])]
-        };
+        });
         f.render_widget(
             Paragraph::new(footer_lines).wrap(ratatui::widgets::Wrap { trim: false }),
             footer,
@@ -1213,6 +1249,7 @@ pub fn build_command(agent: Agent, args: &[String], cwd: &Path) -> CommandBuilde
         "CLAUDE_CODE_SESSION_ATTENDED",
         "CLAUDE_CODE_MESSAGING_SOCKET",
         "CLAUDE_CODE_MESSAGING_TOKEN",
+        usage::USER_STATUS_LINE_VAR,
     ] {
         cmd.env_remove(var);
     }
@@ -1248,6 +1285,65 @@ fn hint_line(items: &[(&str, &str)]) -> Line<'static> {
         ));
     }
     Line::from(spans)
+}
+
+/// E.g. ` ✻ 58% left · resets 2h10m · week 88%`: the 5-hour window first,
+/// then the weekly one. Drops the reset time if it does not fit in `max`.
+fn usage_line(agent: Agent, u: &Usage, now: u64, max: usize) -> Line<'static> {
+    let muted = Style::default().fg(theme().muted);
+    let pct = |left: f64| {
+        let style = if left < 20.0 {
+            Style::default().fg(theme().warn)
+        } else {
+            Style::default()
+        };
+        Span::styled(format!("{left:.0}%"), style)
+    };
+    let (icon, color) = agent_icon(agent);
+    let lead = vec![
+        Span::raw(" "),
+        Span::styled(icon, Style::default().fg(color)),
+        Span::raw(" "),
+    ];
+    // The window shown first, and the reset time, which only makes sense
+    // for a window that has not started over yet.
+    let (main, label, other) = match (u.session, u.week) {
+        (Some(s), week) => (s, "", week),
+        (None, Some(w)) => (w, "week ", None),
+        (None, None) => return Line::default(),
+    };
+    let mut first = vec![
+        Span::styled(label, muted),
+        pct(main.left(now)),
+        Span::styled(" left", muted),
+    ];
+    let reset = (main.resets_at > now)
+        .then(|| Span::styled(format!(" · resets {}", until(main.resets_at - now)), muted));
+    let mut rest = Vec::new();
+    if let Some(w) = other {
+        rest.push(Span::styled(" · week ", muted));
+        rest.push(pct(w.left(now)));
+    }
+    let width = |spans: &[Span]| spans.iter().map(|s| s.content.width()).sum::<usize>();
+    let fits = width(&lead)
+        + width(&first)
+        + reset.as_ref().map_or(0, |r| r.content.width())
+        + width(&rest)
+        <= max;
+    if fits && let Some(r) = reset {
+        first.push(r);
+    }
+    Line::from([lead, first, rest].concat())
+}
+
+/// A time span like `42m`, `2h10m` or `3d4h`.
+fn until(secs: u64) -> String {
+    let m = secs.div_ceil(60);
+    match m {
+        0..60 => format!("{m}m"),
+        60..1440 => format!("{}h{:02}m", m / 60, m % 60),
+        _ => format!("{}d{}h", m / 1440, m % 1440 / 60),
+    }
 }
 
 fn age(now: SystemTime, t: SystemTime) -> String {
@@ -1295,5 +1391,43 @@ fn pad(s: &str, width: usize) -> String {
         s.to_string()
     } else {
         format!("{s}{}", " ".repeat(width - w))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usage::Window;
+
+    fn text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn usage_line_shows_what_is_left() {
+        let now = 1_000_000;
+        let u = Usage {
+            session: Some(Window {
+                used: 42.0,
+                resets_at: now + 2 * 3600 + 10 * 60,
+            }),
+            week: Some(Window {
+                used: 12.5,
+                resets_at: now + 3 * 86400,
+            }),
+        };
+        assert_eq!(
+            text(&usage_line(Agent::Claude, &u, now, 41)),
+            " ✻ 58% left · resets 2h10m · week 88%"
+        );
+        assert_eq!(
+            text(&usage_line(Agent::Claude, &u, now, 30)),
+            " ✻ 58% left · week 88%"
+        );
+        let week_only = Usage { session: None, ..u };
+        assert_eq!(
+            text(&usage_line(Agent::Codex, &week_only, now, 41)),
+            " ◆ week 88% left · resets 3d0h"
+        );
     }
 }
