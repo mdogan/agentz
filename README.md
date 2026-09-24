@@ -41,6 +41,8 @@ Sessions with a running agent or shell always stay in the list, even when `a` or
 
 In the sidebar, a green `●` means the agent is running and waiting for you. A spinner means it is working right now.
 
+When an agent stops working after you asked it something (it finished, or it waits at a permission prompt), agentz shows a desktop notification with the session title. It does this only when you are not looking at that agent: the terminal window is in the background, or another session is shown. The notification uses OSC 777, which Ghostty supports. "Working" means the agent kept printing for at least 3 seconds after your last key press, so typing and short redraws don't trigger it.
+
 When the agent you are looking at exits, agentz opens a plain shell in its folder, so you can start `claude` or `codex` by hand. If you switch to another session before typing anything in that shell, the shell is closed and removed from the list. Typing `exit` in a shell closes it, like a terminal tab.
 
 If you start `claude` or `codex` by hand in a shell, agentz links the shell to that session within a few seconds. The session's row shows as running, clicking it switches to the shell (no second copy is started), and the shell's own row is hidden until the agent exits. agentz finds the session from `~/.claude/sessions/<pid>.json` for Claude, and from the rollout file Codex keeps open for Codex (via `lsof` on macOS, `/proc` on Linux). A new Codex session is only linked after its first message, since Codex creates the file then.

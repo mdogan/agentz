@@ -23,6 +23,8 @@ use crate::term::{self, Term};
 const SIDEBAR_WIDTH: u16 = 42;
 const MIN_SIDEBAR_WIDTH: u16 = 20;
 const MIN_PANE_WIDTH: u16 = 20;
+/// Lines per session in the list: two lines of text and a blank gap.
+const ROW_HEIGHT: u16 = 3;
 /// The UI colors. The light set is used when the outer terminal reports a
 /// light background.
 struct Theme {
@@ -135,6 +137,8 @@ pub struct App {
     list_offset: usize,
     current: Option<SessionKey>,
     focus: Focus,
+    /// False while the outer terminal window is in the background.
+    window_focused: bool,
     filter: String,
     filtering: bool,
     status: Option<(String, Instant)>,
@@ -177,6 +181,7 @@ impl App {
             list_offset: 0,
             current: None,
             focus: Focus::Sidebar,
+            window_focused: true,
             filter: String::new(),
             filtering: false,
             status: None,
@@ -201,6 +206,38 @@ impl App {
     pub fn current_synchronized(&self) -> bool {
         self.current_running()
             .is_some_and(|r| r.term.synchronized())
+    }
+
+    /// Agents that just finished working while the user was not looking at
+    /// them, as (agent, session title). Looking means the window is focused
+    /// and the agent is the one shown in the pane.
+    pub fn finished_unseen(&mut self) -> Vec<(Agent, String)> {
+        let mut done = Vec::new();
+        for r in &mut self.running {
+            // Poll every process so each one's busy state stays current.
+            if !r.term.finished_work() {
+                continue;
+            }
+            if self.window_focused && self.current.as_ref() == Some(&r.key) {
+                continue;
+            }
+            // A plain shell only counts while an agent runs inside it.
+            let key = if r.key.0 == Agent::Shell {
+                r.linked.as_ref()
+            } else {
+                Some(&r.key)
+            };
+            let Some(key) = key else {
+                continue;
+            };
+            let title = self
+                .sessions
+                .iter()
+                .find(|s| &s.key() == key)
+                .map_or_else(|| r.fallback_title.clone(), |s| s.title.clone());
+            done.push((key.0, title));
+        }
+        done
     }
 
     pub fn handle(&mut self, ev: AppEvent) {
@@ -533,6 +570,8 @@ impl App {
                 }
             }
             Event::Mouse(m) => self.on_mouse(m),
+            Event::FocusGained => self.window_focused = true,
+            Event::FocusLost => self.window_focused = false,
             _ => {}
         }
     }
@@ -593,7 +632,7 @@ impl App {
     }
 
     fn on_sidebar_key(&mut self, k: KeyEvent) {
-        let page = (self.list_area.height / 2).max(1) as isize;
+        let page = (self.list_area.height / ROW_HEIGHT).max(1) as isize;
         if k.code != KeyCode::Char('q') {
             self.confirm_quit = false;
         }
@@ -703,8 +742,11 @@ impl App {
         if self.list_area.contains(pos) {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    let i = self.list_offset + ((m.row - self.list_area.y) / 2) as usize;
-                    if let Some(row) = self.rows.get(i) {
+                    let dy = m.row - self.list_area.y;
+                    let i = self.list_offset + (dy / ROW_HEIGHT) as usize;
+                    // Clicks on the gap between sessions do nothing.
+                    let on_gap = dy % ROW_HEIGHT == ROW_HEIGHT - 1;
+                    if let Some(row) = self.rows.get(i).filter(|_| !on_gap) {
                         let key = row.key.clone();
                         self.cursor = i;
                         self.cursor_key = Some(key.clone());
@@ -861,14 +903,15 @@ impl App {
             footer,
         );
 
-        // The list, two lines per session.
+        // The list, two lines per session and a blank line between them.
         self.list_area = Rect::new(
             area.x,
             area.y + 2,
             inner_w,
             area.height.saturating_sub(2 + footer_h + 1),
         );
-        let visible = (self.list_area.height / 2) as usize;
+        // The last session needs no gap below it.
+        let visible = ((self.list_area.height + 1) / ROW_HEIGHT) as usize;
         if visible == 0 {
             return;
         }
@@ -907,7 +950,7 @@ impl App {
             .skip(self.list_offset)
             .take(visible)
         {
-            let y = self.list_area.y + ((i - self.list_offset) * 2) as u16;
+            let y = self.list_area.y + (i - self.list_offset) as u16 * ROW_HEIGHT;
             let rect = Rect::new(self.list_area.x, y, inner_w, 2);
             let is_cursor = i == self.cursor;
             let is_current = self.current_running().is_some_and(|r| r.is(&row.key));

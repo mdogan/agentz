@@ -6,7 +6,7 @@ mod project;
 mod sessions;
 mod term;
 
-use std::io::stdout;
+use std::io::{Write, stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -14,15 +14,16 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::supports_keyboard_enhancement;
 
 use crate::app::App;
 use crate::project::Project;
-use crate::sessions::{Scanner, Session, SessionKey};
+use crate::sessions::{Agent, Scanner, Session, SessionKey};
 
 pub enum AppEvent {
     Input(Event),
@@ -60,7 +61,12 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     term::query_outer_colors();
     let kitty = matches!(supports_keyboard_enhancement(), Ok(true));
-    execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout(),
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        EnableFocusChange
+    )?;
     if kitty {
         // Lets us tell Shift+Enter apart from Enter.
         execute!(
@@ -85,7 +91,37 @@ fn restore_modes(kitty: bool) {
     if kitty {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     }
-    let _ = execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
+    let _ = execute!(
+        stdout(),
+        DisableFocusChange,
+        DisableBracketedPaste,
+        DisableMouseCapture
+    );
+}
+
+/// Shows a desktop notification through the outer terminal (OSC 777,
+/// supported by Ghostty and others). Call it between frames only, so the
+/// sequence does not land in the middle of one.
+fn notify(agent: Agent, session: &str) {
+    let agent = match agent {
+        Agent::Claude => "Claude",
+        Agent::Codex => "Codex",
+        Agent::Shell => "Shell",
+    };
+    // The fields are separated by `;`, and control characters could end
+    // the sequence early.
+    let clean = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_control() || c == ';' { ' ' } else { c })
+            .collect()
+    };
+    let seq = format!(
+        "\x1b]777;notify;{agent} is waiting;{}\x1b\\",
+        clean(session)
+    );
+    let mut out = stdout().lock();
+    let _ = out.write_all(seq.as_bytes());
+    let _ = out.flush();
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
@@ -141,6 +177,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         }
         if app.quit {
             break;
+        }
+        for (agent, title) in app.finished_unseen() {
+            notify(agent, &title);
         }
         redraw.store(false, Ordering::Release);
 

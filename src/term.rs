@@ -199,6 +199,10 @@ pub struct Term {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     last_output_ms: Arc<AtomicU64>,
+    /// When we last sent the agent input from the user. 0 means never.
+    last_input_ms: AtomicU64,
+    /// When the current stretch of output started, or None while quiet.
+    busy_since_ms: Option<u64>,
     pub exit_code: Option<u32>,
 }
 
@@ -274,6 +278,8 @@ impl Term {
             master: pair.master,
             child,
             last_output_ms,
+            last_input_ms: AtomicU64::new(0),
+            busy_since_ms: None,
             exit_code: None,
         })
     }
@@ -298,6 +304,28 @@ impl Term {
     pub fn is_busy(&self) -> bool {
         let last = self.last_output_ms.load(Ordering::Relaxed);
         self.is_running() && now_ms().saturating_sub(last) < 1500
+    }
+
+    /// Call on every tick. True once when the agent goes quiet after
+    /// working on something the user asked for, e.g. it finished a task or
+    /// stopped at a permission prompt.
+    pub fn finished_work(&mut self) -> bool {
+        match (self.is_busy(), self.busy_since_ms) {
+            (true, None) => {
+                self.busy_since_ms = Some(now_ms());
+                false
+            }
+            (false, Some(start)) => {
+                self.busy_since_ms = None;
+                self.is_running()
+                    && is_real_work(
+                        start,
+                        self.last_input_ms.load(Ordering::Relaxed),
+                        self.last_output_ms.load(Ordering::Relaxed),
+                    )
+            }
+            _ => false,
+        }
     }
 
     pub fn synchronized(&self) -> bool {
@@ -325,6 +353,7 @@ impl Term {
         if bytes.is_empty() || !self.is_running() {
             return;
         }
+        self.last_input_ms.store(now_ms(), Ordering::Relaxed);
         let mut w = self.writer.lock().unwrap();
         let _ = w.write_all(bytes);
         let _ = w.flush();
@@ -458,6 +487,17 @@ impl Drop for Term {
     fn drop(&mut self) {
         self.kill();
     }
+}
+
+/// How long an agent must keep printing after the user's last input for
+/// the stretch to count as work.
+const MIN_WORK_MS: u64 = 3000;
+
+/// True if output from `start` to `last_output` was real work: it went on
+/// for a while after the user's last input. This skips echoed typing and
+/// short redraws. No input at all means the agent was only starting up.
+fn is_real_work(start: u64, last_input: u64, last_output: u64) -> bool {
+    last_input > 0 && last_output.saturating_sub(start.max(last_input)) >= MIN_WORK_MS
 }
 
 fn now_ms() -> u64 {
@@ -660,6 +700,18 @@ fn encode_mouse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn real_work_needs_output_long_after_input() {
+        // Enter at 10s, agent prints until 25s.
+        assert!(is_real_work(9_000, 10_000, 25_000));
+        // Echoed typing: output stops right after the last key.
+        assert!(!is_real_work(5_000, 10_000, 10_050));
+        // A short redraw long after the last input.
+        assert!(!is_real_work(60_000, 10_000, 60_200));
+        // Startup output before the user typed anything.
+        assert!(!is_real_work(0, 0, 8_000));
+    }
 
     #[test]
     fn parses_outer_terminal_replies() {
