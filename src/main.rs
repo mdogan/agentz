@@ -1,11 +1,12 @@
 mod app;
+mod procs;
 mod sessions;
 mod term;
 
 use std::io::stdout;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -17,7 +18,7 @@ use crossterm::execute;
 use crossterm::terminal::supports_keyboard_enhancement;
 
 use crate::app::App;
-use crate::sessions::{Scanner, Session};
+use crate::sessions::{Scanner, Session, SessionKey};
 
 pub enum AppEvent {
     Input(Event),
@@ -25,7 +26,9 @@ pub enum AppEvent {
     Redraw,
     /// The agent in the terminal with this id exited.
     Exited(u64),
-    Sessions(Vec<Session>),
+    /// All sessions, and for each of our shells (by pid) the session of the
+    /// agent running inside it.
+    Sessions(Vec<Session>, Vec<(u32, SessionKey)>),
 }
 
 const SCAN_INTERVAL: Duration = Duration::from_secs(3);
@@ -80,6 +83,7 @@ fn restore_modes(kitty: bool) {
 fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let redraw = Arc::new(AtomicBool::new(false));
+    let shell_pids = Arc::new(Mutex::new(Vec::new()));
 
     {
         let tx = tx.clone();
@@ -93,10 +97,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     }
     {
         let tx = tx.clone();
+        let shell_pids = shell_pids.clone();
         std::thread::spawn(move || {
             let mut scanner = Scanner::default();
             loop {
-                if tx.send(AppEvent::Sessions(scanner.scan())).is_err() {
+                let pids = shell_pids.lock().unwrap().clone();
+                let links = procs::agents_in_shells(&pids);
+                if tx.send(AppEvent::Sessions(scanner.scan(), links)).is_err() {
                     break;
                 }
                 std::thread::sleep(SCAN_INTERVAL);
@@ -104,7 +111,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         });
     }
 
-    let mut app = App::new(tx, redraw.clone());
+    let mut app = App::new(tx, redraw.clone(), shell_pids);
     let mut sync_since: Option<Instant> = None;
     terminal.draw(|f| app.draw(f))?;
 

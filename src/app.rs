@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{
@@ -22,6 +22,7 @@ use crate::term::Term;
 const SIDEBAR_WIDTH: u16 = 42;
 const CLAUDE_COLOR: Color = Color::Rgb(217, 119, 87);
 const CODEX_COLOR: Color = Color::Rgb(120, 160, 255);
+const SHELL_COLOR: Color = Color::Rgb(190, 190, 200);
 const ACCENT: Color = Color::Rgb(120, 200, 140);
 const MUTED: Color = Color::Rgb(120, 120, 130);
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
@@ -39,6 +40,19 @@ struct Running {
     cwd: PathBuf,
     spawned_at: SystemTime,
     fallback_title: String,
+    /// A shell we opened by ourselves after an agent quit, and that the user
+    /// has not typed into yet. It is closed when the user switches away.
+    placeholder: bool,
+    /// For a shell: the session of the agent the user started inside it.
+    linked: Option<SessionKey>,
+}
+
+impl Running {
+    /// True if this process shows `key`: its own session, or the session of
+    /// the agent running inside it.
+    fn is(&self, key: &SessionKey) -> bool {
+        &self.key == key || self.linked.as_ref() == Some(key)
+    }
 }
 
 /// One row in the sidebar.
@@ -68,6 +82,8 @@ pub struct App {
     pane: Rect,
     events: Sender<AppEvent>,
     redraw: Arc<AtomicBool>,
+    /// Pids of our running shells, read by the session scanner.
+    shell_pids: Arc<Mutex<Vec<u32>>>,
     next_term_id: u64,
     next_new_id: u64,
     launch_cwd: PathBuf,
@@ -76,7 +92,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(events: Sender<AppEvent>, redraw: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        events: Sender<AppEvent>,
+        redraw: Arc<AtomicBool>,
+        shell_pids: Arc<Mutex<Vec<u32>>>,
+    ) -> Self {
         App {
             sessions: Vec::new(),
             loaded: false,
@@ -96,6 +116,7 @@ impl App {
             pane: Rect::default(),
             events,
             redraw,
+            shell_pids,
             next_term_id: 1,
             next_new_id: 1,
             launch_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -113,26 +134,69 @@ impl App {
     pub fn handle(&mut self, ev: AppEvent) {
         match ev {
             AppEvent::Input(e) => self.on_input(e),
-            AppEvent::Redraw => {}
+            AppEvent::Redraw => return,
             AppEvent::Exited(id) => {
-                if let Some(r) = self.running.iter_mut().find(|r| r.term.id == id) {
-                    r.term.mark_exited();
-                    if self.current.as_ref() != Some(&r.key) {
-                        let key = r.key.clone();
-                        self.running.retain(|r| r.key != key);
-                    }
+                let Some(i) = self.running.iter().position(|r| r.term.id == id) else {
+                    return;
+                };
+                self.running[i].term.mark_exited();
+                let key = self.running[i].key.clone();
+                if self.current.as_ref() != Some(&key) {
+                    self.running.remove(i);
+                    self.rebuild_rows();
+                } else if key.0 == Agent::Shell {
+                    // Like closing a terminal tab.
+                    self.running.remove(i);
+                    self.current = None;
+                    self.focus = Focus::Sidebar;
+                    self.rebuild_rows();
+                } else {
+                    self.replace_with_shell(i);
                 }
             }
-            AppEvent::Sessions(list) => {
+            AppEvent::Sessions(list, links) => {
                 self.sessions = list;
                 self.loaded = true;
+                self.link_shells(&links);
                 self.bind_new_codex_sessions();
                 self.rebuild_rows();
             }
         }
+        *self.shell_pids.lock().unwrap() = self
+            .running
+            .iter()
+            .filter(|r| r.key.0 == Agent::Shell && r.term.is_running())
+            .filter_map(|r| r.term.pid)
+            .collect();
     }
 
     // ---------- sessions & rows ----------
+
+    /// Attaches each shell to the session of the agent the user started in
+    /// it, so that session's row opens the shell instead of a second copy.
+    fn link_shells(&mut self, links: &[(u32, SessionKey)]) {
+        for r in &mut self.running {
+            if r.key.0 != Agent::Shell {
+                continue;
+            }
+            let linked = links
+                .iter()
+                .find(|(pid, _)| Some(*pid) == r.term.pid)
+                .map(|(_, key)| key.clone());
+            if linked.is_some() {
+                // The shell's row is about to be hidden behind the session's.
+                if self.cursor_key.as_ref() == Some(&r.key) {
+                    self.cursor_key = linked.clone();
+                }
+                r.placeholder = false;
+            } else if let Some(old) = &r.linked
+                && self.cursor_key.as_ref() == Some(old)
+            {
+                self.cursor_key = Some(r.key.clone());
+            }
+            r.linked = linked;
+        }
+    }
 
     /// Codex does not let us choose the id of a new session. Once its
     /// transcript shows up, attach it to the process we started.
@@ -147,7 +211,7 @@ impl App {
                 .sessions
                 .iter()
                 .filter(|s| s.agent == Agent::Codex && s.cwd == r.cwd && s.created >= since)
-                .filter(|s| !self.running.iter().any(|o| o.key == s.key()))
+                .filter(|s| !self.running.iter().any(|o| o.is(&s.key())))
                 .min_by_key(|s| s.created)
                 .map(|s| s.key());
             if let Some(key) = found {
@@ -173,9 +237,10 @@ impl App {
                 updated: s.updated,
             })
             .collect();
-        // Sessions we started that have no transcript yet.
+        // Sessions we started that have no transcript yet, and shells. A
+        // shell running an agent is shown as that agent's session.
         for r in &self.running {
-            if !rows.iter().any(|row| row.key == r.key) {
+            if !rows.iter().any(|row| r.is(&row.key)) {
                 rows.push(Row {
                     key: r.key.clone(),
                     title: r.fallback_title.clone(),
@@ -218,6 +283,11 @@ impl App {
         self.running.iter().find(|r| &r.key == key)
     }
 
+    fn current_running_mut(&mut self) -> Option<&mut Running> {
+        let key = self.current.as_ref()?;
+        self.running.iter_mut().find(|r| &r.key == key)
+    }
+
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status = Some((msg.into(), Instant::now()));
     }
@@ -227,13 +297,11 @@ impl App {
     /// Shows the session. If its agent is already running we just switch to
     /// it; otherwise we resume it in a new PTY.
     fn open(&mut self, key: SessionKey) {
-        // Finished processes are only kept around so their last output stays
-        // visible; drop them once the user moves on.
-        self.running.retain(|r| r.term.is_running() || r.key == key);
+        self.prune(Some(&key));
 
-        if let Some(i) = self.running.iter().position(|r| r.key == key) {
+        if let Some(i) = self.running.iter().position(|r| r.is(&key)) {
             if self.running[i].term.is_running() {
-                self.current = Some(key);
+                self.current = Some(self.running[i].key.clone());
                 self.focus = Focus::Terminal;
                 return;
             }
@@ -253,17 +321,50 @@ impl App {
     }
 
     fn new_session(&mut self, agent: Agent) {
+        self.prune(None);
         let cwd = self.launch_cwd.clone();
-        let title = format!("New {} session", agent.name());
+        let title = match agent {
+            Agent::Shell => shell_name(),
+            _ => format!("New {} session", agent.name()),
+        };
         self.start(agent, None, cwd, title);
     }
 
-    /// Spawns an agent. `resume` is the session id to resume, or `None` for a
-    /// new session.
-    fn start(&mut self, agent: Agent, resume: Option<String>, cwd: PathBuf, title: String) {
+    /// Finished processes are only kept around so their last output stays
+    /// visible, and placeholder shells only until the user moves on. Drops
+    /// both, except `keep`.
+    fn prune(&mut self, keep: Option<&SessionKey>) {
+        self.running
+            .retain(|r| keep.is_some_and(|k| r.is(k)) || (r.term.is_running() && !r.placeholder));
+    }
+
+    /// The shown agent quit. Puts a fresh shell in its place, in the same
+    /// folder, so the user can start `claude` or `codex` by hand.
+    fn replace_with_shell(&mut self, i: usize) {
+        let r = &self.running[i];
+        let (key, cwd, code) = (r.key.clone(), r.cwd.clone(), r.term.exit_code);
+        let focus = self.focus;
+        if !self.start(Agent::Shell, None, cwd, shell_name()) {
+            // Keep the agent's last screen; Enter resumes it.
+            return;
+        }
+        if let Some(shell) = self.running.last_mut() {
+            shell.placeholder = true;
+        }
+        self.running.retain(|r| r.key != key);
+        self.focus = focus;
+        self.rebuild_rows();
+        if let Some(code) = code.filter(|c| *c != 0) {
+            self.set_status(format!("{} exited ({code})", key.0.name()));
+        }
+    }
+
+    /// Spawns an agent or shell. `resume` is the session id to resume, or
+    /// `None` for a new session. Returns false if it could not start.
+    fn start(&mut self, agent: Agent, resume: Option<String>, cwd: PathBuf, title: String) -> bool {
         if !cwd.is_dir() {
             self.set_status(format!("Folder no longer exists: {}", cwd.display()));
-            return;
+            return false;
         }
         let (key, args): (SessionKey, Vec<String>) = match (agent, resume) {
             (Agent::Claude, Some(id)) => ((agent, id.clone()), vec!["--resume".into(), id]),
@@ -274,6 +375,11 @@ impl App {
             (Agent::Codex, Some(id)) => ((agent, id.clone()), vec!["resume".into(), id]),
             (Agent::Codex, None) => {
                 let id = format!("new-{}", self.next_new_id);
+                self.next_new_id += 1;
+                ((agent, id), vec![])
+            }
+            (Agent::Shell, _) => {
+                let id = format!("shell-{}", self.next_new_id);
                 self.next_new_id += 1;
                 ((agent, id), vec![])
             }
@@ -298,18 +404,24 @@ impl App {
                     cwd,
                     spawned_at: SystemTime::now(),
                     fallback_title: title,
+                    placeholder: false,
+                    linked: None,
                 });
                 self.current = Some(key.clone());
                 self.cursor_key = Some(key);
                 self.focus = Focus::Terminal;
                 self.rebuild_rows();
+                true
             }
-            Err(e) => self.set_status(format!("Could not start {}: {e:#}", agent.name())),
+            Err(e) => {
+                self.set_status(format!("Could not start {}: {e:#}", agent.name()));
+                false
+            }
         }
     }
 
     fn stop(&mut self, key: &SessionKey) {
-        if let Some(r) = self.running.iter_mut().find(|r| &r.key == key) {
+        if let Some(r) = self.running.iter_mut().find(|r| r.is(key)) {
             r.term.kill();
         }
     }
@@ -333,8 +445,9 @@ impl App {
                     self.filter.push_str(&text);
                     self.rebuild_rows();
                 } else if self.focus == Focus::Terminal
-                    && let Some(r) = self.current_running()
+                    && let Some(r) = self.current_running_mut()
                 {
+                    r.placeholder = false;
                     r.term.paste(&text);
                 }
             }
@@ -363,11 +476,12 @@ impl App {
     }
 
     fn on_terminal_key(&mut self, k: KeyEvent) {
-        let Some(r) = self.current_running() else {
+        let Some(r) = self.current_running_mut() else {
             self.focus = Focus::Sidebar;
             return;
         };
         if r.term.is_running() {
+            r.placeholder = false;
             r.term.send_key(k);
         } else if k.code == KeyCode::Enter {
             let key = r.key.clone();
@@ -425,19 +539,35 @@ impl App {
             KeyCode::Char('/') => self.filtering = true,
             KeyCode::Char('n') => self.new_session(Agent::Claude),
             KeyCode::Char('N') => self.new_session(Agent::Codex),
+            KeyCode::Char('t') => self.new_session(Agent::Shell),
             KeyCode::Char('x') => {
                 if let Some(key) = self.cursor_key.clone() {
                     self.stop(&key);
                 }
             }
             KeyCode::Char('q') => {
-                let n = self.running.iter().filter(|r| r.term.is_running()).count();
-                if n == 0 || self.confirm_quit {
+                // Agents (also those started by hand in a shell) block quitting;
+                // plain shells only need a second q.
+                let live: Vec<&Running> = self
+                    .running
+                    .iter()
+                    .filter(|r| r.term.is_running() && !r.placeholder)
+                    .collect();
+                let agents = live
+                    .iter()
+                    .filter(|r| r.key.0 != Agent::Shell || r.linked.is_some())
+                    .count();
+                let shells = live.len() - agents;
+                if agents > 0 {
+                    self.set_status(format!(
+                        "{agents} agent(s) running. Stop them with x before quitting."
+                    ));
+                } else if shells == 0 || self.confirm_quit {
                     self.quit = true;
                 } else {
                     self.confirm_quit = true;
                     self.set_status(format!(
-                        "{n} agent(s) running. Press q again to stop them and quit."
+                        "{shells} shell(s) open. Press q again to close them and quit."
                     ));
                 }
             }
@@ -567,7 +697,12 @@ impl App {
                     ("N", "codex"),
                     ("/", "filter"),
                 ]),
-                hint_line(&[("x", "stop"), ("q", "quit"), ("C-\\", "agent")]),
+                hint_line(&[
+                    ("t", "shell"),
+                    ("x", "stop"),
+                    ("q", "quit"),
+                    ("C-\\", "agent"),
+                ]),
             ]
         } else {
             vec![hint_line(&[("C-\\", "sessions"), ("click", "switch")])]
@@ -622,11 +757,11 @@ impl App {
             let y = self.list_area.y + ((i - self.list_offset) * 2) as u16;
             let rect = Rect::new(self.list_area.x, y, inner_w, 2);
             let is_cursor = i == self.cursor;
-            let is_current = self.current.as_ref() == Some(&row.key);
+            let is_current = self.current_running().is_some_and(|r| r.is(&row.key));
             let running = self
                 .running
                 .iter()
-                .find(|r| r.key == row.key && r.term.is_running());
+                .find(|r| r.is(&row.key) && r.term.is_running());
 
             let bg = match (is_cursor, focused) {
                 (true, true) => Color::Rgb(45, 50, 65),
@@ -707,6 +842,7 @@ impl App {
                     "  Press n for a new Claude session, N for a new Codex session.",
                     Style::default().fg(MUTED),
                 ),
+                Line::styled("  Press t for a plain shell.", Style::default().fg(MUTED)),
                 Line::styled(
                     "  Ctrl+\\ switches between the list and the agent.",
                     Style::default().fg(MUTED),
@@ -716,11 +852,13 @@ impl App {
             return;
         };
 
-        let row = self.rows.iter().find(|row| row.key == r.key);
-        let title = row
-            .map(|row| row.title.clone())
-            .unwrap_or_else(|| r.fallback_title.clone());
-        let (icon, icon_color) = agent_icon(r.key.0);
+        // A shell running an agent shows that agent's session.
+        let row = self.rows.iter().find(|row| r.is(&row.key));
+        let (agent, title, cwd) = match row {
+            Some(row) => (row.key.0, row.title.clone(), &row.cwd),
+            None => (r.key.0, r.fallback_title.clone(), &r.cwd),
+        };
+        let (icon, icon_color) = agent_icon(agent);
         let state = if let Some(code) = r.term.exit_code {
             Span::styled(
                 format!(" exited ({code}) · Enter to resume "),
@@ -734,10 +872,10 @@ impl App {
         } else {
             Span::raw("")
         };
-        let cwd = tilde(&r.cwd);
+        let cwd = tilde(cwd);
         let left_w = (area.width as usize).saturating_sub(state.width() + 1);
         let header_text = truncate(
-            &format!(" {icon} {} · {title} · {cwd}", r.key.0.name()),
+            &format!(" {icon} {} · {title} · {cwd}", agent.name()),
             left_w,
         );
         let focused = self.focus == Focus::Terminal;
@@ -773,14 +911,32 @@ fn pane_body(pane: Rect) -> Rect {
     )
 }
 
+/// The user's login shell, or `/bin/sh`.
+fn shell_program() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into())
+}
+
+/// The shell's name, e.g. "fish", used as its title.
+fn shell_name() -> String {
+    let program = shell_program();
+    Path::new(&program)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or(program)
+}
+
 fn build_command(agent: Agent, args: &[String], cwd: &Path) -> CommandBuilder {
     let (program, extra_var) = match agent {
-        Agent::Claude => ("claude", "AGENTZ_CLAUDE_ARGS"),
-        Agent::Codex => ("codex", "AGENTZ_CODEX_ARGS"),
+        Agent::Claude => ("claude".to_string(), Some("AGENTZ_CLAUDE_ARGS")),
+        Agent::Codex => ("codex".to_string(), Some("AGENTZ_CODEX_ARGS")),
+        Agent::Shell => (shell_program(), None),
     };
     let mut cmd = CommandBuilder::new(program);
     // Extra flags go first so they also apply to `codex resume`.
-    if let Ok(extra) = std::env::var(extra_var) {
+    if let Some(extra) = extra_var.and_then(|v| std::env::var(v).ok()) {
         let extra: Vec<&str> = extra.split_whitespace().collect();
         if agent == Agent::Codex && args.first().map(String::as_str) == Some("resume") {
             cmd.arg("resume");
@@ -828,6 +984,7 @@ fn agent_icon(agent: Agent) -> (&'static str, Color) {
     match agent {
         Agent::Claude => ("✻", CLAUDE_COLOR),
         Agent::Codex => ("◆", CODEX_COLOR),
+        Agent::Shell => ("❯", SHELL_COLOR),
     }
 }
 

@@ -57,6 +57,8 @@ impl vt100::Callbacks for Callbacks {
 
 pub struct Term {
     pub id: u64,
+    /// The child's process id.
+    pub pid: Option<u32>,
     parser: Arc<Mutex<vt100::Parser<Callbacks>>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
@@ -131,6 +133,7 @@ impl Term {
 
         Ok(Term {
             id,
+            pid: child.process_id(),
             parser,
             writer,
             master: pair.master,

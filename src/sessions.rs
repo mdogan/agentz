@@ -16,6 +16,8 @@ use serde_json::Value;
 pub enum Agent {
     Claude,
     Codex,
+    /// A plain shell started from agentz. It has no transcript.
+    Shell,
 }
 
 impl Agent {
@@ -23,6 +25,7 @@ impl Agent {
         match self {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
+            Agent::Shell => "shell",
         }
     }
 }
@@ -175,6 +178,7 @@ fn parse(path: &Path, agent: Agent, prev: Parsed) -> Parsed {
                 parse_codex(path)
             }
         }
+        Agent::Shell => prev,
     }
 }
 
@@ -317,11 +321,15 @@ fn clean_prompt(text: String) -> Option<String> {
     Some(first.chars().take(200).collect())
 }
 
-fn claude_projects_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("CLAUDE_CONFIG_DIR")
+/// `$CLAUDE_CONFIG_DIR` or `~/.claude`.
+pub fn claude_dir() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))?;
-    Some(base.join("projects"))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+}
+
+fn claude_projects_dir() -> Option<PathBuf> {
+    Some(claude_dir()?.join("projects"))
 }
 
 fn codex_home() -> Option<PathBuf> {
