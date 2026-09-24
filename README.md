@@ -40,6 +40,8 @@ Anywhere:
 | `Ctrl+T` | new plain shell, same as `t`, without going back to the sidebar first |
 | mouse wheel over the agent | scroll back through its output |
 
+Double-click blank space in the sidebar session list to open a new plain shell.
+
 Sessions with a running agent or shell always stay in the list, even when `a` or `i` would hide them, so a running agent can't get lost.
 
 In the sidebar, a green `●` means the agent is running and waiting for you. A spinner means it is working right now.

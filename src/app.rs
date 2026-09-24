@@ -27,6 +27,7 @@ const MIN_SIDEBAR_WIDTH: u16 = 20;
 const MIN_PANE_WIDTH: u16 = 20;
 /// Lines per session in the list: two lines of text and a blank gap.
 const ROW_HEIGHT: u16 = 3;
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 /// The UI colors. The light set is used when the outer terminal reports a
 /// light background.
 struct Theme {
@@ -150,6 +151,8 @@ pub struct App {
     sidebar_width: u16,
     /// True while the user drags the separator.
     resizing: bool,
+    /// The last click on blank space in the session list.
+    last_empty_click: Option<(Position, Instant)>,
     sidebar: Rect,
     list_area: Rect,
     pane: Rect,
@@ -192,6 +195,7 @@ impl App {
             confirm_quit: false,
             sidebar_width: SIDEBAR_WIDTH,
             resizing: false,
+            last_empty_click: None,
             sidebar: Rect::default(),
             list_area: Rect::default(),
             pane: Rect::default(),
@@ -680,6 +684,7 @@ impl App {
     }
 
     fn on_key(&mut self, k: KeyEvent) {
+        self.last_empty_click = None;
         // Ctrl+\ always toggles between the list and the agent. Legacy
         // terminals report it as Ctrl+4.
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -853,6 +858,7 @@ impl App {
             && m.column == separator
             && m.kind == MouseEventKind::Down(MouseButton::Left)
         {
+            self.last_empty_click = None;
             // Start from the width on screen, which may be clamped.
             self.sidebar_width = self.sidebar.width;
             self.resizing = true;
@@ -863,20 +869,36 @@ impl App {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let dy = m.row - self.list_area.y;
                     let i = self.list_offset + (dy / ROW_HEIGHT) as usize;
-                    // Clicks on the gap between sessions do nothing.
                     let on_gap = dy % ROW_HEIGHT == ROW_HEIGHT - 1;
                     if let Some(row) = self.rows.get(i).filter(|_| !on_gap) {
+                        self.last_empty_click = None;
                         let key = row.key.clone();
                         self.cursor = i;
                         self.cursor_key = Some(key.clone());
                         self.open(key);
+                    } else if self.last_empty_click.take().is_some_and(|(previous, at)| {
+                        previous == pos && at.elapsed() <= DOUBLE_CLICK_INTERVAL
+                    }) {
+                        self.new_session(Agent::Shell);
+                    } else {
+                        self.last_empty_click = Some((pos, Instant::now()));
                     }
                 }
-                MouseEventKind::ScrollUp => self.move_cursor(-3),
-                MouseEventKind::ScrollDown => self.move_cursor(3),
+                MouseEventKind::ScrollUp => {
+                    self.last_empty_click = None;
+                    self.move_cursor(-3);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.last_empty_click = None;
+                    self.move_cursor(3);
+                }
+                MouseEventKind::Down(_) => self.last_empty_click = None,
                 _ => {}
             }
             return;
+        }
+        if matches!(m.kind, MouseEventKind::Down(_)) {
+            self.last_empty_click = None;
         }
         if self.sidebar.contains(pos) {
             if matches!(m.kind, MouseEventKind::Down(_)) {
