@@ -1,0 +1,892 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant, SystemTime};
+
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use portable_pty::CommandBuilder;
+use ratatui::Frame;
+use ratatui::layout::{Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::AppEvent;
+use crate::sessions::{Agent, Session, SessionKey};
+use crate::term::Term;
+
+const SIDEBAR_WIDTH: u16 = 42;
+const CLAUDE_COLOR: Color = Color::Rgb(217, 119, 87);
+const CODEX_COLOR: Color = Color::Rgb(120, 160, 255);
+const ACCENT: Color = Color::Rgb(120, 200, 140);
+const MUTED: Color = Color::Rgb(120, 120, 130);
+const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Focus {
+    Sidebar,
+    Terminal,
+}
+
+/// An agent process we started, keyed by the session it belongs to.
+struct Running {
+    key: SessionKey,
+    term: Term,
+    cwd: PathBuf,
+    spawned_at: SystemTime,
+    fallback_title: String,
+}
+
+/// One row in the sidebar.
+struct Row {
+    key: SessionKey,
+    title: String,
+    cwd: PathBuf,
+    updated: SystemTime,
+}
+
+pub struct App {
+    sessions: Vec<Session>,
+    loaded: bool,
+    running: Vec<Running>,
+    rows: Vec<Row>,
+    cursor: usize,
+    cursor_key: Option<SessionKey>,
+    list_offset: usize,
+    current: Option<SessionKey>,
+    focus: Focus,
+    filter: String,
+    filtering: bool,
+    status: Option<(String, Instant)>,
+    confirm_quit: bool,
+    sidebar: Rect,
+    list_area: Rect,
+    pane: Rect,
+    events: Sender<AppEvent>,
+    redraw: Arc<AtomicBool>,
+    next_term_id: u64,
+    next_new_id: u64,
+    launch_cwd: PathBuf,
+    started: Instant,
+    pub quit: bool,
+}
+
+impl App {
+    pub fn new(events: Sender<AppEvent>, redraw: Arc<AtomicBool>) -> Self {
+        App {
+            sessions: Vec::new(),
+            loaded: false,
+            running: Vec::new(),
+            rows: Vec::new(),
+            cursor: 0,
+            cursor_key: None,
+            list_offset: 0,
+            current: None,
+            focus: Focus::Sidebar,
+            filter: String::new(),
+            filtering: false,
+            status: None,
+            confirm_quit: false,
+            sidebar: Rect::default(),
+            list_area: Rect::default(),
+            pane: Rect::default(),
+            events,
+            redraw,
+            next_term_id: 1,
+            next_new_id: 1,
+            launch_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            started: Instant::now(),
+            quit: false,
+        }
+    }
+
+    /// True while the shown agent is in the middle of drawing a frame.
+    pub fn current_synchronized(&self) -> bool {
+        self.current_running()
+            .is_some_and(|r| r.term.synchronized())
+    }
+
+    pub fn handle(&mut self, ev: AppEvent) {
+        match ev {
+            AppEvent::Input(e) => self.on_input(e),
+            AppEvent::Redraw => {}
+            AppEvent::Exited(id) => {
+                if let Some(r) = self.running.iter_mut().find(|r| r.term.id == id) {
+                    r.term.mark_exited();
+                    if self.current.as_ref() != Some(&r.key) {
+                        let key = r.key.clone();
+                        self.running.retain(|r| r.key != key);
+                    }
+                }
+            }
+            AppEvent::Sessions(list) => {
+                self.sessions = list;
+                self.loaded = true;
+                self.bind_new_codex_sessions();
+                self.rebuild_rows();
+            }
+        }
+    }
+
+    // ---------- sessions & rows ----------
+
+    /// Codex does not let us choose the id of a new session. Once its
+    /// transcript shows up, attach it to the process we started.
+    fn bind_new_codex_sessions(&mut self) {
+        for i in 0..self.running.len() {
+            let r = &self.running[i];
+            if r.key.0 != Agent::Codex || !r.key.1.starts_with("new-") {
+                continue;
+            }
+            let since = r.spawned_at - Duration::from_secs(5);
+            let found = self
+                .sessions
+                .iter()
+                .filter(|s| s.agent == Agent::Codex && s.cwd == r.cwd && s.created >= since)
+                .filter(|s| !self.running.iter().any(|o| o.key == s.key()))
+                .min_by_key(|s| s.created)
+                .map(|s| s.key());
+            if let Some(key) = found {
+                let old = std::mem::replace(&mut self.running[i].key, key.clone());
+                if self.current.as_ref() == Some(&old) {
+                    self.current = Some(key.clone());
+                }
+                if self.cursor_key.as_ref() == Some(&old) {
+                    self.cursor_key = Some(key);
+                }
+            }
+        }
+    }
+
+    fn rebuild_rows(&mut self) {
+        let mut rows: Vec<Row> = self
+            .sessions
+            .iter()
+            .map(|s| Row {
+                key: s.key(),
+                title: s.title.clone(),
+                cwd: s.cwd.clone(),
+                updated: s.updated,
+            })
+            .collect();
+        // Sessions we started that have no transcript yet.
+        for r in &self.running {
+            if !rows.iter().any(|row| row.key == r.key) {
+                rows.push(Row {
+                    key: r.key.clone(),
+                    title: r.fallback_title.clone(),
+                    cwd: r.cwd.clone(),
+                    updated: r.spawned_at,
+                });
+            }
+        }
+        if !self.filter.is_empty() {
+            let q = self.filter.to_lowercase();
+            rows.retain(|row| {
+                row.title.to_lowercase().contains(&q)
+                    || row.cwd.to_string_lossy().to_lowercase().contains(&q)
+                    || row.key.0.name().contains(&q)
+            });
+        }
+        rows.sort_by_key(|r| std::cmp::Reverse(r.updated));
+        self.rows = rows;
+
+        // Keep the cursor on the same session even if the order changed.
+        self.cursor = self
+            .cursor_key
+            .as_ref()
+            .and_then(|k| self.rows.iter().position(|r| &r.key == k))
+            .unwrap_or(self.cursor.min(self.rows.len().saturating_sub(1)));
+        self.cursor_key = self.rows.get(self.cursor).map(|r| r.key.clone());
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let max = self.rows.len() as isize - 1;
+        self.cursor = (self.cursor as isize + delta).clamp(0, max) as usize;
+        self.cursor_key = Some(self.rows[self.cursor].key.clone());
+    }
+
+    fn current_running(&self) -> Option<&Running> {
+        let key = self.current.as_ref()?;
+        self.running.iter().find(|r| &r.key == key)
+    }
+
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = Some((msg.into(), Instant::now()));
+    }
+
+    // ---------- starting and switching ----------
+
+    /// Shows the session. If its agent is already running we just switch to
+    /// it; otherwise we resume it in a new PTY.
+    fn open(&mut self, key: SessionKey) {
+        // Finished processes are only kept around so their last output stays
+        // visible; drop them once the user moves on.
+        self.running.retain(|r| r.term.is_running() || r.key == key);
+
+        if let Some(i) = self.running.iter().position(|r| r.key == key) {
+            if self.running[i].term.is_running() {
+                self.current = Some(key);
+                self.focus = Focus::Terminal;
+                return;
+            }
+            self.running.remove(i);
+        }
+
+        let Some(row) = self.rows.iter().find(|r| r.key == key) else {
+            return;
+        };
+        let (cwd, title) = (row.cwd.clone(), row.title.clone());
+        if key.1.starts_with("new-") {
+            // A Codex session that never got a transcript; start fresh.
+            self.start(key.0, None, cwd, title);
+        } else {
+            self.start(key.0, Some(key.1.clone()), cwd, title);
+        }
+    }
+
+    fn new_session(&mut self, agent: Agent) {
+        let cwd = self.launch_cwd.clone();
+        let title = format!("New {} session", agent.name());
+        self.start(agent, None, cwd, title);
+    }
+
+    /// Spawns an agent. `resume` is the session id to resume, or `None` for a
+    /// new session.
+    fn start(&mut self, agent: Agent, resume: Option<String>, cwd: PathBuf, title: String) {
+        if !cwd.is_dir() {
+            self.set_status(format!("Folder no longer exists: {}", cwd.display()));
+            return;
+        }
+        let (key, args): (SessionKey, Vec<String>) = match (agent, resume) {
+            (Agent::Claude, Some(id)) => ((agent, id.clone()), vec!["--resume".into(), id]),
+            (Agent::Claude, None) => {
+                let id = uuid::Uuid::new_v4().to_string();
+                ((agent, id.clone()), vec!["--session-id".into(), id])
+            }
+            (Agent::Codex, Some(id)) => ((agent, id.clone()), vec!["resume".into(), id]),
+            (Agent::Codex, None) => {
+                let id = format!("new-{}", self.next_new_id);
+                self.next_new_id += 1;
+                ((agent, id), vec![])
+            }
+        };
+
+        let cmd = build_command(agent, &args, &cwd);
+        let (rows, cols) = self.term_size();
+        let id = self.next_term_id;
+        self.next_term_id += 1;
+        match Term::spawn(
+            id,
+            cmd,
+            rows,
+            cols,
+            self.events.clone(),
+            self.redraw.clone(),
+        ) {
+            Ok(term) => {
+                self.running.push(Running {
+                    key: key.clone(),
+                    term,
+                    cwd,
+                    spawned_at: SystemTime::now(),
+                    fallback_title: title,
+                });
+                self.current = Some(key.clone());
+                self.cursor_key = Some(key);
+                self.focus = Focus::Terminal;
+                self.rebuild_rows();
+            }
+            Err(e) => self.set_status(format!("Could not start {}: {e:#}", agent.name())),
+        }
+    }
+
+    fn stop(&mut self, key: &SessionKey) {
+        if let Some(r) = self.running.iter_mut().find(|r| &r.key == key) {
+            r.term.kill();
+        }
+    }
+
+    fn term_size(&self) -> (u16, u16) {
+        let area = pane_body(self.pane);
+        if area.height == 0 {
+            (24, 80)
+        } else {
+            (area.height, area.width)
+        }
+    }
+
+    // ---------- input ----------
+
+    fn on_input(&mut self, ev: Event) {
+        match ev {
+            Event::Key(k) if k.kind != KeyEventKind::Release => self.on_key(k),
+            Event::Paste(text) => {
+                if self.filtering {
+                    self.filter.push_str(&text);
+                    self.rebuild_rows();
+                } else if self.focus == Focus::Terminal
+                    && let Some(r) = self.current_running()
+                {
+                    r.term.paste(&text);
+                }
+            }
+            Event::Mouse(m) => self.on_mouse(m),
+            _ => {}
+        }
+    }
+
+    fn on_key(&mut self, k: KeyEvent) {
+        // Ctrl+\ always toggles between the list and the agent. Legacy
+        // terminals report it as Ctrl+4.
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4')) {
+            self.focus = match self.focus {
+                Focus::Terminal => Focus::Sidebar,
+                Focus::Sidebar if self.current_running().is_some() => Focus::Terminal,
+                Focus::Sidebar => Focus::Sidebar,
+            };
+            return;
+        }
+        match self.focus {
+            Focus::Terminal => self.on_terminal_key(k),
+            Focus::Sidebar if self.filtering => self.on_filter_key(k),
+            Focus::Sidebar => self.on_sidebar_key(k),
+        }
+    }
+
+    fn on_terminal_key(&mut self, k: KeyEvent) {
+        let Some(r) = self.current_running() else {
+            self.focus = Focus::Sidebar;
+            return;
+        };
+        if r.term.is_running() {
+            r.term.send_key(k);
+        } else if k.code == KeyCode::Enter {
+            let key = r.key.clone();
+            self.open(key);
+        } else if k.code == KeyCode::Esc {
+            self.focus = Focus::Sidebar;
+        }
+    }
+
+    fn on_filter_key(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Esc => {
+                self.filtering = false;
+                self.filter.clear();
+            }
+            KeyCode::Enter => self.filtering = false,
+            KeyCode::Backspace => {
+                self.filter.pop();
+            }
+            KeyCode::Up => self.move_cursor(-1),
+            KeyCode::Down => self.move_cursor(1),
+            KeyCode::Char(c) if !k.modifiers.contains(KeyModifiers::CONTROL) => self.filter.push(c),
+            _ => return,
+        }
+        self.cursor = 0;
+        self.cursor_key = None;
+        self.rebuild_rows();
+    }
+
+    fn on_sidebar_key(&mut self, k: KeyEvent) {
+        let page = (self.list_area.height / 2).max(1) as isize;
+        if k.code != KeyCode::Char('q') {
+            self.confirm_quit = false;
+        }
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => self.move_cursor(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_cursor(1),
+            KeyCode::PageUp => self.move_cursor(-page),
+            KeyCode::PageDown => self.move_cursor(page),
+            KeyCode::Home | KeyCode::Char('g') => self.move_cursor(-(self.rows.len() as isize)),
+            KeyCode::End | KeyCode::Char('G') => self.move_cursor(self.rows.len() as isize),
+            KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                if let Some(key) = self.cursor_key.clone() {
+                    self.open(key);
+                }
+            }
+            KeyCode::Esc => {
+                if !self.filter.is_empty() {
+                    self.filter.clear();
+                    self.rebuild_rows();
+                } else if self.current_running().is_some() {
+                    self.focus = Focus::Terminal;
+                }
+            }
+            KeyCode::Char('/') => self.filtering = true,
+            KeyCode::Char('n') => self.new_session(Agent::Claude),
+            KeyCode::Char('N') => self.new_session(Agent::Codex),
+            KeyCode::Char('x') => {
+                if let Some(key) = self.cursor_key.clone() {
+                    self.stop(&key);
+                }
+            }
+            KeyCode::Char('q') => {
+                let n = self.running.iter().filter(|r| r.term.is_running()).count();
+                if n == 0 || self.confirm_quit {
+                    self.quit = true;
+                } else {
+                    self.confirm_quit = true;
+                    self.set_status(format!(
+                        "{n} agent(s) running. Press q again to stop them and quit."
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_mouse(&mut self, m: MouseEvent) {
+        let pos = Position::new(m.column, m.row);
+        if self.list_area.contains(pos) {
+            match m.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let i = self.list_offset + ((m.row - self.list_area.y) / 2) as usize;
+                    if let Some(row) = self.rows.get(i) {
+                        let key = row.key.clone();
+                        self.cursor = i;
+                        self.cursor_key = Some(key.clone());
+                        self.open(key);
+                    }
+                }
+                MouseEventKind::ScrollUp => self.move_cursor(-3),
+                MouseEventKind::ScrollDown => self.move_cursor(3),
+                _ => {}
+            }
+            return;
+        }
+        if self.sidebar.contains(pos) {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.focus = Focus::Sidebar;
+            }
+            return;
+        }
+        let body = pane_body(self.pane);
+        if body.contains(pos) {
+            if matches!(m.kind, MouseEventKind::Down(_)) && self.current_running().is_some() {
+                self.focus = Focus::Terminal;
+            }
+            if let Some(r) = self.current_running() {
+                r.term.mouse(m, m.column - body.x, m.row - body.y);
+            }
+        }
+    }
+
+    // ---------- drawing ----------
+
+    pub fn draw(&mut self, f: &mut Frame) {
+        let area = f.area();
+        let side_w = SIDEBAR_WIDTH.min(area.width / 2);
+        self.sidebar = Rect::new(area.x, area.y, side_w, area.height);
+        self.pane = Rect::new(area.x + side_w, area.y, area.width - side_w, area.height);
+
+        // All agents share the pane size, so switching never needs a resize.
+        let body = pane_body(self.pane);
+        for r in &self.running {
+            r.term.resize(body.height, body.width);
+        }
+
+        self.draw_sidebar(f);
+        self.draw_pane(f);
+    }
+
+    fn draw_sidebar(&mut self, f: &mut Frame) {
+        let area = self.sidebar;
+        if area.width < 4 || area.height < 4 {
+            return;
+        }
+        let focused = self.focus == Focus::Sidebar;
+        let inner_w = area.width - 1; // last column is the separator
+
+        // Separator line.
+        let sep_style = Style::default().fg(if focused {
+            ACCENT
+        } else {
+            Color::Rgb(60, 60, 70)
+        });
+        for y in area.y..area.y + area.height {
+            if let Some(c) = f.buffer_mut().cell_mut((area.x + inner_w, y)) {
+                c.set_symbol("│").set_style(sep_style);
+            }
+        }
+
+        // Header: name and counts, or the filter input.
+        let header = Rect::new(area.x, area.y, inner_w, 1);
+        let header_line = if self.filtering || !self.filter.is_empty() {
+            let cursor = if self.filtering { "▏" } else { "" };
+            Line::from(vec![
+                Span::styled(
+                    " / ",
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("{}{cursor}", self.filter)),
+            ])
+        } else {
+            let n_run = self.running.iter().filter(|r| r.term.is_running()).count();
+            let title_style = if focused {
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            };
+            Line::from(vec![
+                Span::styled(" agentz", title_style),
+                Span::styled(
+                    format!("  {} sessions · {n_run} running", self.rows.len()),
+                    Style::default().fg(MUTED),
+                ),
+            ])
+        };
+        f.render_widget(Paragraph::new(header_line), header);
+
+        // Footer: status message or key hints.
+        let footer_h = 2;
+        let footer = Rect::new(area.x, area.y + area.height - footer_h, inner_w, footer_h);
+        let status = self
+            .status
+            .as_ref()
+            .filter(|(_, t)| t.elapsed() < Duration::from_secs(6));
+        let footer_lines = if let Some((msg, _)) = status {
+            vec![Line::styled(
+                format!(" {msg}"),
+                Style::default().fg(Color::Yellow),
+            )]
+        } else if focused {
+            vec![
+                hint_line(&[
+                    ("↵", "open"),
+                    ("n", "claude"),
+                    ("N", "codex"),
+                    ("/", "filter"),
+                ]),
+                hint_line(&[("x", "stop"), ("q", "quit"), ("C-\\", "agent")]),
+            ]
+        } else {
+            vec![hint_line(&[("C-\\", "sessions"), ("click", "switch")])]
+        };
+        f.render_widget(
+            Paragraph::new(footer_lines).wrap(ratatui::widgets::Wrap { trim: false }),
+            footer,
+        );
+
+        // The list, two lines per session.
+        self.list_area = Rect::new(
+            area.x,
+            area.y + 2,
+            inner_w,
+            area.height.saturating_sub(2 + footer_h + 1),
+        );
+        let visible = (self.list_area.height / 2) as usize;
+        if visible == 0 {
+            return;
+        }
+        if self.cursor < self.list_offset {
+            self.list_offset = self.cursor;
+        } else if self.cursor >= self.list_offset + visible {
+            self.list_offset = self.cursor + 1 - visible;
+        }
+        self.list_offset = self
+            .list_offset
+            .min(self.rows.len().saturating_sub(visible));
+
+        if self.rows.is_empty() {
+            let msg = if !self.loaded {
+                " Loading sessions…"
+            } else {
+                " No sessions"
+            };
+            f.render_widget(
+                Paragraph::new(Line::styled(msg, Style::default().fg(MUTED))),
+                self.list_area,
+            );
+            return;
+        }
+
+        let now = SystemTime::now();
+        let tick = (self.started.elapsed().as_millis() / 150) as usize;
+        for (i, row) in self
+            .rows
+            .iter()
+            .enumerate()
+            .skip(self.list_offset)
+            .take(visible)
+        {
+            let y = self.list_area.y + ((i - self.list_offset) * 2) as u16;
+            let rect = Rect::new(self.list_area.x, y, inner_w, 2);
+            let is_cursor = i == self.cursor;
+            let is_current = self.current.as_ref() == Some(&row.key);
+            let running = self
+                .running
+                .iter()
+                .find(|r| r.key == row.key && r.term.is_running());
+
+            let bg = match (is_cursor, focused) {
+                (true, true) => Color::Rgb(45, 50, 65),
+                (true, false) => Color::Rgb(35, 37, 45),
+                _ => Color::Reset,
+            };
+            let (icon, icon_color) = agent_icon(row.key.0);
+            let bar = if is_current {
+                Span::styled("▌", Style::default().fg(ACCENT))
+            } else {
+                Span::raw(" ")
+            };
+
+            // Line 1: bar, icon, title, run state.
+            let marker = match running {
+                Some(r) if r.term.is_busy() => Span::styled(
+                    SPINNER[tick % SPINNER.len()],
+                    Style::default().fg(Color::Yellow),
+                ),
+                Some(_) => Span::styled("●", Style::default().fg(ACCENT)),
+                None => Span::raw(" "),
+            };
+            let title_w = (inner_w as usize).saturating_sub(6);
+            let title_style = if is_current || is_cursor {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let line1 = Line::from(vec![
+                bar.clone(),
+                Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
+                Span::styled(pad(&truncate(&row.title, title_w), title_w), title_style),
+                Span::raw(" "),
+                marker,
+            ]);
+
+            // Line 2: project folder, agent, age.
+            let project = row
+                .cwd
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let meta = format!("{} · {}", row.key.0.name(), age(now, row.updated));
+            let proj_w = (inner_w as usize).saturating_sub(4 + meta.width() + 3);
+            let line2 = Line::from(vec![
+                bar,
+                Span::raw("  "),
+                Span::styled(
+                    truncate(&project, proj_w),
+                    Style::default().fg(Color::Rgb(160, 160, 175)),
+                ),
+                Span::styled(format!(" · {meta}"), Style::default().fg(MUTED)),
+            ]);
+
+            f.render_widget(
+                Paragraph::new(vec![line1, line2]).style(Style::default().bg(bg)),
+                rect,
+            );
+        }
+    }
+
+    fn draw_pane(&mut self, f: &mut Frame) {
+        let area = self.pane;
+        if area.width == 0 || area.height < 2 {
+            return;
+        }
+        let header = Rect::new(area.x, area.y, area.width, 1);
+        let body = pane_body(area);
+
+        let Some(r) = self.current_running() else {
+            let lines = vec![
+                Line::raw(""),
+                Line::styled(
+                    "  Pick a session on the left to resume it.",
+                    Style::default().fg(MUTED),
+                ),
+                Line::styled(
+                    "  Press n for a new Claude session, N for a new Codex session.",
+                    Style::default().fg(MUTED),
+                ),
+                Line::styled(
+                    "  Ctrl+\\ switches between the list and the agent.",
+                    Style::default().fg(MUTED),
+                ),
+            ];
+            f.render_widget(Paragraph::new(lines), body);
+            return;
+        };
+
+        let row = self.rows.iter().find(|row| row.key == r.key);
+        let title = row
+            .map(|row| row.title.clone())
+            .unwrap_or_else(|| r.fallback_title.clone());
+        let (icon, icon_color) = agent_icon(r.key.0);
+        let state = if let Some(code) = r.term.exit_code {
+            Span::styled(
+                format!(" exited ({code}) · Enter to resume "),
+                Style::default().fg(Color::Black).bg(Color::Yellow),
+            )
+        } else if r.term.scrollback() > 0 {
+            Span::styled(
+                format!(" scrolled ↑{} ", r.term.scrollback()),
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            )
+        } else {
+            Span::raw("")
+        };
+        let cwd = tilde(&r.cwd);
+        let left_w = (area.width as usize).saturating_sub(state.width() + 1);
+        let header_text = truncate(
+            &format!(" {icon} {} · {title} · {cwd}", r.key.0.name()),
+            left_w,
+        );
+        let focused = self.focus == Focus::Terminal;
+        let header_style = if focused {
+            Style::default().bg(Color::Rgb(40, 44, 58))
+        } else {
+            Style::default().bg(Color::Rgb(30, 30, 36)).fg(MUTED)
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                pad(&header_text, left_w),
+                Style::default().fg(if focused { icon_color } else { MUTED }),
+            ),
+            Span::raw(" "),
+            state,
+        ]);
+        f.render_widget(Paragraph::new(line).style(header_style), header);
+
+        let cursor = r.term.render(body, f.buffer_mut());
+        if focused && let Some((x, y)) = cursor {
+            f.set_cursor_position((x, y));
+        }
+    }
+}
+
+/// The part of the pane that holds the agent's screen (below the header).
+fn pane_body(pane: Rect) -> Rect {
+    Rect::new(
+        pane.x,
+        pane.y + 1,
+        pane.width,
+        pane.height.saturating_sub(1),
+    )
+}
+
+fn build_command(agent: Agent, args: &[String], cwd: &Path) -> CommandBuilder {
+    let (program, extra_var) = match agent {
+        Agent::Claude => ("claude", "AGENTZ_CLAUDE_ARGS"),
+        Agent::Codex => ("codex", "AGENTZ_CODEX_ARGS"),
+    };
+    let mut cmd = CommandBuilder::new(program);
+    // Extra flags go first so they also apply to `codex resume`.
+    if let Ok(extra) = std::env::var(extra_var) {
+        let extra: Vec<&str> = extra.split_whitespace().collect();
+        if agent == Agent::Codex && args.first().map(String::as_str) == Some("resume") {
+            cmd.arg("resume");
+            cmd.args(&extra);
+            cmd.args(&args[1..]);
+        } else {
+            cmd.args(&extra);
+            cmd.args(args);
+        }
+    } else {
+        cmd.args(args);
+    }
+    cmd.cwd(cwd);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    // The agent talks to our emulator, not the outer terminal, so hide the
+    // outer terminal's identity. Also hide that we may run inside Claude Code.
+    for var in [
+        "TERM_PROGRAM",
+        "TERM_PROGRAM_VERSION",
+        "LC_TERMINAL",
+        "LC_TERMINAL_VERSION",
+        "ITERM_SESSION_ID",
+        "KITTY_WINDOW_ID",
+        "WEZTERM_PANE",
+        "GHOSTTY_RESOURCES_DIR",
+        "TMUX",
+        "CLAUDECODE",
+        "CLAUDE_PID",
+        "CLAUDE_EFFORT",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_SESSION_ATTENDED",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
+fn agent_icon(agent: Agent) -> (&'static str, Color) {
+    match agent {
+        Agent::Claude => ("✻", CLAUDE_COLOR),
+        Agent::Codex => ("◆", CODEX_COLOR),
+    }
+}
+
+fn hint_line(items: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ")];
+    for (k, label) in items {
+        spans.push(Span::styled(k.to_string(), Style::default().fg(ACCENT)));
+        spans.push(Span::styled(
+            format!(" {label}  "),
+            Style::default().fg(MUTED),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn age(now: SystemTime, t: SystemTime) -> String {
+    let s = now.duration_since(t).unwrap_or_default().as_secs();
+    match s {
+        0..60 => "now".into(),
+        60..3600 => format!("{}m ago", s / 60),
+        3600..86400 => format!("{}h ago", s / 3600),
+        86400..2_592_000 => format!("{}d ago", s / 86400),
+        _ => format!("{}mo ago", s / 2_592_000),
+    }
+}
+
+fn tilde(p: &Path) -> String {
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = p.strip_prefix(&home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    p.display().to_string()
+}
+
+/// Cuts `s` to at most `max` display columns, adding "…" if cut.
+fn truncate(s: &str, max: usize) -> String {
+    if s.width() <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(0);
+        if w + cw + 1 > max {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+fn pad(s: &str, width: usize) -> String {
+    let w = s.width();
+    if w >= width {
+        s.to_string()
+    } else {
+        format!("{s}{}", " ".repeat(width - w))
+    }
+}
