@@ -21,7 +21,7 @@ pub const USER_STATUS_LINE_VAR: &str = "AGENTZ_USER_STATUS_LINE";
 
 /// Codex rollout files can be large; the last turn is near the end.
 const CODEX_TAIL: u64 = 1024 * 1024;
-/// How many of the newest rollout files to try before giving up.
+/// How many of the most recently changed rollout files to look at.
 const CODEX_FILES: usize = 5;
 
 /// One rate limit window.
@@ -175,37 +175,45 @@ fn shell_quote(s: &str) -> String {
 /// again on every scan.
 #[derive(Default)]
 pub struct CodexReader {
-    cache: HashMap<PathBuf, (u64, Option<Usage>)>,
+    cache: HashMap<PathBuf, (u64, Option<(String, Usage)>)>,
 }
 
 impl CodexReader {
-    /// The limits from the newest rollout file that has any. The limits are
-    /// per account, so any session's file will do. `files` is newest first.
+    /// The most recent limits in the rollout files that changed last. The
+    /// limits are per account, so any session's file will do. A file can
+    /// change without a new turn, e.g. when an old session is resumed, so
+    /// the newest file may hold old limits: compare when they were written.
+    /// `files` is newest first.
     pub fn read(&mut self, files: &[PathBuf]) -> Option<Usage> {
         let files = &files[..files.len().min(CODEX_FILES)];
         self.cache.retain(|p, _| files.contains(p));
+        let mut newest: Option<(String, Usage)> = None;
         for path in files {
             let Ok(len) = fs::metadata(path).map(|m| m.len()) else {
                 continue;
             };
-            let usage = match self.cache.get(path) {
-                Some((l, u)) if *l == len => *u,
+            let found = match self.cache.get(path) {
+                Some((l, found)) if *l == len => found.clone(),
                 _ => {
-                    let u = codex_tail(path, len);
-                    self.cache.insert(path.clone(), (len, u));
-                    u
+                    let found = codex_tail(path, len);
+                    self.cache.insert(path.clone(), (len, found.clone()));
+                    found
                 }
             };
-            if usage.is_some() {
-                return usage;
+            // RFC 3339 times in UTC sort as strings.
+            if let Some((time, usage)) = found
+                && newest.as_ref().is_none_or(|(t, _)| time > *t)
+            {
+                newest = Some((time, usage));
             }
         }
-        None
+        newest.map(|(_, usage)| usage)
     }
 }
 
-/// The last `rate_limits` in the end of a rollout file.
-fn codex_tail(path: &Path, len: u64) -> Option<Usage> {
+/// The last `rate_limits` in the end of a rollout file, and when it was
+/// written.
+fn codex_tail(path: &Path, len: u64) -> Option<(String, Usage)> {
     let mut file = File::open(path).ok()?;
     let start = len.saturating_sub(CODEX_TAIL);
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -216,7 +224,10 @@ fn codex_tail(path: &Path, len: u64) -> Option<Usage> {
         .rev()
         .filter(|l| l.contains("\"rate_limits\""))
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find_map(|v| parse_codex(&v["payload"]["rate_limits"]))
+        .find_map(|v| {
+            let usage = parse_codex(&v["payload"]["rate_limits"])?;
+            Some((v["timestamp"].as_str()?.to_string(), usage))
+        })
 }
 
 /// `{"limit_id": "codex", "primary": {"used_percent", "window_minutes",
@@ -259,15 +270,23 @@ mod tests {
         fs::write(
             &path,
             r#"{"type":"session_meta","payload":{"id":"x"}}
-{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":10.0,"window_minutes":300,"resets_at":100},"secondary":{"used_percent":1.0,"window_minutes":10080,"resets_at":200}}}}
-{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":25.0,"window_minutes":300,"resets_at":1790011725},"secondary":{"used_percent":4.0,"window_minutes":10080,"resets_at":1790598525}}}}
-{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_other","primary":{"used_percent":90.0,"window_minutes":300,"resets_at":5}}}}
-{"type":"event_msg","payload":{"type":"token_count","rate_limits":null}}
+{"timestamp":"2026-09-24T10:00:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":10.0,"window_minutes":300,"resets_at":100},"secondary":{"used_percent":1.0,"window_minutes":10080,"resets_at":200}}}}
+{"timestamp":"2026-09-24T10:01:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":25.0,"window_minutes":300,"resets_at":1790011725},"secondary":{"used_percent":4.0,"window_minutes":10080,"resets_at":1790598525}}}}
+{"timestamp":"2026-09-24T10:02:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_other","primary":{"used_percent":90.0,"window_minutes":300,"resets_at":5}}}}
+{"timestamp":"2026-09-24T10:03:00.000Z","type":"event_msg","payload":{"type":"token_count","rate_limits":null}}
+"#,
+        )
+        .unwrap();
+        // A file that changed later but has older limits.
+        let old = path.with_extension("old.jsonl");
+        fs::write(
+            &old,
+            r#"{"timestamp":"2026-09-21T13:32:25.051Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":99.0,"window_minutes":300,"resets_at":1}}}}
 "#,
         )
         .unwrap();
         let usage = CodexReader::default()
-            .read(std::slice::from_ref(&path))
+            .read(&[old.clone(), path.clone()])
             .unwrap();
         assert_eq!(
             usage.session,
@@ -284,6 +303,7 @@ mod tests {
             })
         );
         fs::remove_file(path).unwrap();
+        fs::remove_file(old).unwrap();
     }
 
     #[test]

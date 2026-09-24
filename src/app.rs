@@ -915,9 +915,9 @@ impl App {
         f.render_widget(Paragraph::new(header_line), header);
 
         // Footer: what is left of the rate limits of each running agent,
-        // then a status message or key hints.
+        // then a status message or key hints, each below a line.
         let now = usage::now();
-        let mut footer_lines: Vec<Line> = [
+        let usage_lines: Vec<Line> = [
             (Agent::Claude, self.limits.claude),
             (Agent::Codex, self.limits.codex),
         ]
@@ -925,13 +925,23 @@ impl App {
         .filter(|(agent, _)| self.agent_running(*agent))
         .filter_map(|(agent, u)| Some(usage_line(agent, &u?, now, inner_w as usize)))
         .collect();
-        let footer_h = 3 + footer_lines.len() as u16;
-        let footer = Rect::new(area.x, area.y + area.height - footer_h, inner_w, footer_h);
+        let hints_h = 3;
+        let hints_area = Rect::new(area.x, area.y + area.height - hints_h, inner_w, hints_h);
+        let mut footer_y = hints_area.y;
+        if !usage_lines.is_empty() {
+            let h = usage_lines.len() as u16;
+            footer_y = footer_y.saturating_sub(h + 1);
+            let usage_area = Rect::new(area.x, footer_y, inner_w, h);
+            f.render_widget(Paragraph::new(usage_lines), usage_area);
+            draw_hline(f, area.x, hints_area.y - 1, inner_w, sep_style);
+        }
+        footer_y = footer_y.saturating_sub(1);
+        draw_hline(f, area.x, footer_y, inner_w, sep_style);
         let status = self
             .status
             .as_ref()
             .filter(|(_, t)| t.elapsed() < Duration::from_secs(6));
-        footer_lines.extend(if let Some((msg, _)) = status {
+        let hint_lines = if let Some((msg, _)) = status {
             vec![Line::styled(
                 format!(" {msg}"),
                 Style::default().fg(theme().warn),
@@ -971,10 +981,10 @@ impl App {
             ]
         } else {
             vec![hint_line(&[("C-\\", "sessions"), ("click", "switch")])]
-        });
+        };
         f.render_widget(
-            Paragraph::new(footer_lines).wrap(ratatui::widgets::Wrap { trim: false }),
-            footer,
+            Paragraph::new(hint_lines).wrap(ratatui::widgets::Wrap { trim: false }),
+            hints_area,
         );
 
         // The list, two lines per session and a blank line between them.
@@ -982,7 +992,7 @@ impl App {
             area.x,
             area.y + 2,
             inner_w,
-            area.height.saturating_sub(2 + footer_h + 1),
+            footer_y.saturating_sub(area.y + 2),
         );
         // The last session needs no gap below it.
         let visible = ((self.list_area.height + 1) / ROW_HEIGHT) as usize;
@@ -1269,6 +1279,20 @@ fn agent_icon(agent: Agent) -> (&'static str, Color) {
         Agent::Claude => ("✻", theme().claude),
         Agent::Codex => ("◆", theme().codex),
         Agent::Shell => ("❯", theme().shell),
+    }
+}
+
+/// A horizontal line across the sidebar at row `y`, joined to the
+/// separator on its right.
+fn draw_hline(f: &mut Frame, x: u16, y: u16, width: u16, sep_style: Style) {
+    let buf = f.buffer_mut();
+    for cx in x..x + width {
+        if let Some(c) = buf.cell_mut((cx, y)) {
+            c.set_symbol("─").set_fg(theme().separator);
+        }
+    }
+    if let Some(c) = buf.cell_mut((x + width, y)) {
+        c.set_symbol("┤").set_style(sep_style);
     }
 }
 
