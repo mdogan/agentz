@@ -13,20 +13,66 @@ use serde_json::Value;
 
 use crate::sessions::{Agent, SessionKey, claude_dir};
 
+/// What is running under one of our interactive shells.
+pub struct ShellProcess {
+    pub pid: u32,
+    pub agent: Option<SessionKey>,
+    /// The foreground process group and its first process under the shell.
+    pub foreground: Option<(u32, String)>,
+}
+
+struct Process {
+    ppid: u32,
+    pgid: u32,
+    tpgid: Option<u32>,
+    argv0: String,
+}
+
 /// For each shell pid, the session of the agent running under it, if any.
+#[cfg(test)]
 pub fn agents_in_shells(shells: &[u32]) -> Vec<(u32, SessionKey)> {
+    shell_processes(shells)
+        .into_iter()
+        .filter_map(|s| s.agent.map(|agent| (s.pid, agent)))
+        .collect()
+}
+
+/// Finds the foreground command and any linked agent for each shell.
+pub fn shell_processes(shells: &[u32]) -> Vec<ShellProcess> {
     if shells.is_empty() {
         return Vec::new();
     }
     let procs = process_table();
+    shell_processes_from_table(
+        shells,
+        &procs,
+        claude_dir().map(|d| d.join("sessions")).as_deref(),
+    )
+}
+
+fn shell_processes_from_table(
+    shells: &[u32],
+    procs: &HashMap<u32, Process>,
+    claude_sessions: Option<&Path>,
+) -> Vec<ShellProcess> {
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (&pid, (ppid, _)) in &procs {
-        children.entry(*ppid).or_default().push(pid);
+    for (&pid, proc) in procs {
+        children.entry(proc.ppid).or_default().push(pid);
     }
-    let claude_sessions = claude_dir().map(|d| d.join("sessions"));
+    for pids in children.values_mut() {
+        pids.sort_unstable();
+    }
 
     let mut out = Vec::new();
     for &shell in shells {
+        let foreground_group = procs
+            .get(&shell)
+            .and_then(|p| p.tpgid.filter(|group| *group != p.pgid));
+        let mut state = ShellProcess {
+            pid: shell,
+            agent: None,
+            foreground: None,
+        };
         // Breadth-first, so the agent the user started wins over anything
         // that agent started itself.
         let mut queue: Vec<u32> = children.get(&shell).cloned().unwrap_or_default();
@@ -34,43 +80,62 @@ pub fn agents_in_shells(shells: &[u32]) -> Vec<(u32, SessionKey)> {
         while i < queue.len() {
             let pid = queue[i];
             i += 1;
+            let Some(proc) = procs.get(&pid) else {
+                continue;
+            };
+            if state.foreground.is_none() && foreground_group == Some(proc.pgid) {
+                state.foreground = Some((proc.pgid, basename(&proc.argv0).to_string()));
+            }
             let found = claude_sessions
-                .as_deref()
                 .and_then(|dir| claude_session(dir, pid))
                 .map(|id| (Agent::Claude, id))
                 .or_else(|| {
-                    let argv0 = procs.get(&pid).map(|(_, a)| a.as_str()).unwrap_or("");
-                    (basename(argv0) == "codex")
+                    (basename(&proc.argv0) == "codex")
                         .then(|| codex_session(pid))
                         .flatten()
                         .map(|id| (Agent::Codex, id))
                 });
             if let Some(key) = found {
-                out.push((shell, key));
+                state.agent = Some(key);
                 break;
             }
             queue.extend(children.get(&pid).into_iter().flatten());
         }
+        out.push(state);
     }
     out
 }
 
-/// pid -> (parent pid, argv[0]) for every process.
-fn process_table() -> HashMap<u32, (u32, String)> {
+/// pid -> parent, process group, terminal foreground group, argv[0].
+fn process_table() -> HashMap<u32, Process> {
     let mut out = HashMap::new();
     let Ok(res) = Command::new("ps")
-        .args(["-eo", "pid=,ppid=,args="])
+        .args(["-eo", "pid=,ppid=,pgid=,tpgid=,args="])
         .output()
     else {
         return out;
     };
     for line in String::from_utf8_lossy(&res.stdout).lines() {
         let mut parts = line.split_whitespace();
-        let (Some(pid), Some(ppid)) = (parts.next(), parts.next()) else {
+        let (Some(pid), Some(ppid), Some(pgid), Some(tpgid), Some(argv0)) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
             continue;
         };
-        if let (Ok(pid), Ok(ppid)) = (pid.parse(), ppid.parse()) {
-            out.insert(pid, (ppid, parts.next().unwrap_or("").to_string()));
+        if let (Ok(pid), Ok(ppid), Ok(pgid)) = (pid.parse(), ppid.parse(), pgid.parse()) {
+            out.insert(
+                pid,
+                Process {
+                    ppid,
+                    pgid,
+                    tpgid: tpgid.parse().ok(),
+                    argv0: argv0.to_string(),
+                },
+            );
         }
     }
     out
@@ -155,4 +220,37 @@ pub fn working_dir(pid: u32) -> Option<PathBuf> {
 
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreground_command_ignores_background_and_unrelated_processes() {
+        let mut procs = HashMap::new();
+        let mut add = |pid, ppid, pgid, tpgid, argv0: &str| {
+            procs.insert(
+                pid,
+                Process {
+                    ppid,
+                    pgid,
+                    tpgid,
+                    argv0: argv0.into(),
+                },
+            );
+        };
+        add(10, 1, 10, Some(30), "/bin/fish");
+        add(20, 10, 20, Some(30), "/bin/long-background-job");
+        add(30, 10, 30, Some(30), "/usr/bin/sleep");
+        add(31, 30, 30, Some(30), "/usr/bin/cat");
+        add(40, 1, 30, Some(30), "/usr/bin/unrelated");
+
+        let found = shell_processes_from_table(&[10], &procs, None);
+        assert_eq!(found[0].foreground, Some((30, "sleep".into())));
+
+        procs.get_mut(&10).unwrap().tpgid = Some(10);
+        let found = shell_processes_from_table(&[10], &procs, None);
+        assert_eq!(found[0].foreground, None);
+    }
 }

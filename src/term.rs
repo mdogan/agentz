@@ -653,19 +653,23 @@ impl Term {
             })
     }
 
+    /// The process group that currently owns this terminal.
+    pub fn foreground_process_group(&self) -> Option<u32> {
+        #[cfg(unix)]
+        if self.is_running() {
+            return self.master.process_group_leader().map(|group| group as u32);
+        }
+        None
+    }
+
     /// True if the program started another one in the foreground, like a
     /// shell running a command: then the terminal belongs to another
     /// process group.
     pub fn has_foreground_job(&self) -> bool {
-        #[cfg(unix)]
-        if let (true, Some(pid), Some(group)) = (
-            self.is_running(),
-            self.pid,
-            self.master.process_group_leader(),
-        ) {
-            return group as u32 != pid;
-        }
-        false
+        self.pid.is_some_and(|pid| {
+            self.foreground_process_group()
+                .is_some_and(|group| group != pid)
+        })
     }
 
     /// Forgets what the program said about being busy, e.g. when the agent

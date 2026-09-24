@@ -107,6 +107,8 @@ struct Running {
     placeholder: bool,
     /// For a shell: the session of the agent the user started inside it.
     linked: Option<SessionKey>,
+    /// Last scanned foreground job: process group and command name.
+    foreground: Option<(u32, String)>,
 }
 
 impl Running {
@@ -114,6 +116,16 @@ impl Running {
     /// the agent running inside it.
     fn is(&self, key: &SessionKey) -> bool {
         &self.key == key || self.linked.as_ref() == Some(key)
+    }
+
+    fn title(&self) -> &str {
+        if self.key.0 == Agent::Shell
+            && let Some((group, name)) = &self.foreground
+            && self.term.foreground_process_group() == Some(*group)
+        {
+            return name;
+        }
+        &self.fallback_title
     }
 }
 
@@ -264,7 +276,15 @@ impl App {
                 .map_or_else(|| r.fallback_title.clone(), |s| s.title.clone());
             out.push((key.0, title, message));
         }
-        if cwd_changed {
+        let title_changed = self.running.iter().any(|r| {
+            r.key.0 == Agent::Shell
+                && r.linked.is_none()
+                && self
+                    .rows
+                    .iter()
+                    .any(|row| row.key == r.key && row.title != r.title())
+        });
+        if cwd_changed || title_changed {
             self.rebuild_rows();
         }
         out
@@ -315,15 +335,14 @@ impl App {
 
     /// Attaches each shell to the session of the agent the user started in
     /// it, so that session's row opens the shell instead of a second copy.
-    fn link_shells(&mut self, links: &[(u32, SessionKey)]) {
+    fn link_shells(&mut self, links: &[procs::ShellProcess]) {
         for r in &mut self.running {
             if r.key.0 != Agent::Shell {
                 continue;
             }
-            let linked = links
-                .iter()
-                .find(|(pid, _)| Some(*pid) == r.term.pid)
-                .map(|(_, key)| key.clone());
+            let linked = links.iter().find(|s| Some(s.pid) == r.term.pid);
+            r.foreground = linked.and_then(|s| s.foreground.clone());
+            let linked = linked.and_then(|s| s.agent.clone());
             if linked.is_some() {
                 // The shell's row is about to be hidden behind the session's.
                 if self.cursor_key.as_ref() == Some(&r.key) {
@@ -389,7 +408,7 @@ impl App {
             if !rows.iter().any(|row| r.is(&row.key)) {
                 rows.push(Row {
                     key: r.key.clone(),
-                    title: r.fallback_title.clone(),
+                    title: r.title().to_string(),
                     cwd: r.cwd.clone(),
                     updated: r.spawned_at,
                 });
@@ -631,6 +650,7 @@ impl App {
                     fallback_title: title,
                     placeholder: false,
                     linked: None,
+                    foreground: None,
                 });
                 self.current = Some(key.clone());
                 self.cursor_key = Some(key);
@@ -1220,7 +1240,7 @@ impl App {
         let row = self.rows.iter().find(|row| r.is(&row.key));
         let (agent, title, cwd) = match row {
             Some(row) => (row.key.0, row.title.clone(), &row.cwd),
-            None => (r.key.0, r.fallback_title.clone(), &r.cwd),
+            None => (r.key.0, r.title().to_string(), &r.cwd),
         };
         let (icon, icon_color) = agent_icon(agent);
         let state = if let Some(code) = r.term.exit_code {
@@ -1555,8 +1575,10 @@ mod tests {
             fallback_title: "sh".into(),
             placeholder: false,
             linked: None,
+            foreground: None,
         });
         app.current = Some(key.clone());
+        app.rebuild_rows();
 
         app.running[0].term.write(b"cd /\n");
         let start = Instant::now();
@@ -1574,13 +1596,28 @@ mod tests {
             Some((key.clone(), PathBuf::from("/")))
         );
 
-        app.running[0].term.write(b"sleep 5\n");
+        app.running[0].term.write(b"sleep 10\n");
         let start = Instant::now();
         while !app.running[0].term.has_foreground_job() {
             assert!(start.elapsed() < Duration::from_secs(5));
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(app.active_idle_shell(), None);
+        let group = app.running[0].term.foreground_process_group().unwrap();
+        let shell_pid = app.running[0].term.pid.unwrap();
+        let found = procs::shell_processes(&[shell_pid]);
+        assert_eq!(found[0].foreground, Some((group, "sleep".into())));
+        app.running[0].foreground = found.into_iter().next().unwrap().foreground;
+        app.attention();
+        assert_eq!(app.rows[0].title, "sleep");
+        app.running[0].term.write(b"\x03");
+        let start = Instant::now();
+        while app.running[0].term.has_foreground_job() {
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        app.attention();
+        assert_eq!(app.rows[0].title, "sh");
         app.running[0].term.kill();
     }
 }

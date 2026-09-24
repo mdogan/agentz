@@ -24,7 +24,7 @@ use crossterm::terminal::supports_keyboard_enhancement;
 
 use crate::app::App;
 use crate::project::Project;
-use crate::sessions::{Agent, Scanner, Session, SessionKey};
+use crate::sessions::{Agent, Scanner, Session};
 
 pub enum AppEvent {
     Input(Event),
@@ -32,9 +32,8 @@ pub enum AppEvent {
     Redraw,
     /// The agent in the terminal with this id exited.
     Exited(u64),
-    /// All sessions, the project agentz was started in, and for each of our shells (by pid) the session of the
-    /// agent running inside it.
-    Sessions(Vec<Session>, Project, Vec<(u32, SessionKey)>),
+    /// All sessions, the project, and the processes inside our shells.
+    Sessions(Vec<Session>, Project, Vec<procs::ShellProcess>),
     /// What is left of Claude's and Codex's rate limits.
     Limits(usage::Limits),
 }
@@ -167,7 +166,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                 let sessions = scanner.scan();
                 let project = Project::detect(&dir);
                 let pids = shell_pids.lock().unwrap().clone();
-                let links = procs::agents_in_shells(&pids);
+                let links = procs::shell_processes(&pids);
                 if tx
                     .send(AppEvent::Sessions(sessions, project, links))
                     .is_err()
