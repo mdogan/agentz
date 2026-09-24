@@ -37,6 +37,7 @@ Anywhere:
 | Key | Action |
 | --- | --- |
 | `Ctrl+\` | toggle focus between the sidebar and the agent |
+| `Ctrl+T` | new plain shell, same as `t`, without going back to the sidebar first |
 | mouse wheel over the agent | scroll back through its output |
 
 Sessions with a running agent or shell always stay in the list, even when `a` or `i` would hide them, so a running agent can't get lost.

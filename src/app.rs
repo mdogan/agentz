@@ -691,6 +691,11 @@ impl App {
             };
             return;
         }
+        // Ctrl+T opens a new shell from anywhere, like a terminal tab.
+        if ctrl && k.code == KeyCode::Char('t') {
+            self.new_session(Agent::Shell);
+            return;
+        }
         match self.focus {
             Focus::Terminal => self.on_terminal_key(k),
             Focus::Sidebar if self.filtering => self.on_filter_key(k),
@@ -1030,7 +1035,11 @@ impl App {
                 ]),
             ]
         } else {
-            vec![hint_line(&[("C-\\", "sessions"), ("click", "switch")])]
+            vec![hint_line(&[
+                ("C-\\", "sessions"),
+                ("C-t", "shell"),
+                ("click", "switch"),
+            ])]
         };
         f.render_widget(
             Paragraph::new(hint_lines).wrap(ratatui::widgets::Wrap { trim: false }),
@@ -1173,7 +1182,7 @@ impl App {
                     Style::default().fg(theme().muted),
                 ),
                 Line::styled(
-                    "  Press t for a plain shell.",
+                    "  Press t (or Ctrl+T anywhere) for a plain shell.",
                     Style::default().fg(theme().muted),
                 ),
                 Line::styled(
