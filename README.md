@@ -43,7 +43,15 @@ Sessions with a running agent or shell always stay in the list, even when `a` or
 
 In the sidebar, a green `●` means the agent is running and waiting for you. A spinner means it is working right now.
 
-When an agent stops working after you asked it something (it finished, or it waits at a permission prompt), agentz shows a desktop notification with the session title. It does this only when you are not looking at that agent: the terminal window is in the background, or another session is shown. The notification uses OSC 777, which Ghostty supports. "Working" means the agent kept printing for at least 3 seconds after your last key press, so typing and short redraws don't trigger it.
+When an agent stops working after you asked it something (it finished, or it waits at a permission prompt), agentz shows a desktop notification with the session title. If the agent sent its own notification, its text is added, e.g. Codex's last reply. You get at most one notification per question, and only when you are not looking at that agent: the terminal window is in the background, or another session is shown. The notification uses OSC 777, which Ghostty supports.
+
+agentz knows an agent is working because the agent says so:
+
+- Claude reports progress (OSC 9;4) while it works. It does this because agentz runs it with `TERM_PROGRAM=ghostty`, which is true: the emulator is Ghostty's.
+- Codex shows a spinner in the window title while it works. agentz also tells Codex when you look away (focus reporting), and then Codex sends a notification when it is done.
+- For anything else, "working" means it kept printing for at least 3 seconds after your last key press, so typing and short redraws don't count.
+
+A shell tab follows `cd`: its folder in the sidebar, and the folder `t` opens a new shell in, is the one the shell reports (OSC 7). fish does this by default; zsh and bash on macOS don't, so their tabs keep the folder they started in.
 
 When the agent you are looking at exits, agentz opens a plain shell in its folder, so you can start `claude` or `codex` by hand. If you switch to another session before typing anything in that shell, the shell is closed and removed from the list. Typing `exit` in a shell closes it, like a terminal tab.
 

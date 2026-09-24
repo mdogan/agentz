@@ -8,6 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -21,7 +22,10 @@ use crossterm::event::{
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::screen::{CellContentTag, CellWide, Screen};
 use libghostty_vt::style::{RgbColor, StyleColor, Underline};
-use libghostty_vt::terminal::{ColorScheme, Mode, ScrollViewport, SizeReportSize};
+use libghostty_vt::terminal::{
+    ColorScheme, DesktopNotification, Mode, ProgressReport, ProgressState, ScrollViewport,
+    SizeReportSize,
+};
 use libghostty_vt::{RenderState, Terminal, key};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::buffer::Buffer;
@@ -148,6 +152,22 @@ fn rgb8(s: &str) -> Option<RgbColor> {
     })
 }
 
+/// Something the program told the terminal through an escape sequence,
+/// other than drawing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// BEL.
+    Bell,
+    /// OSC 9 or OSC 777: show a desktop notification.
+    Notify { title: String, body: String },
+    /// OSC 9;4: show or hide a progress indicator.
+    Progress(ProgressState),
+    /// OSC 7 and friends: the working directory changed.
+    PwdChanged,
+    /// OSC 0/2: the window title changed.
+    TitleChanged,
+}
+
 /// The emulator and the objects it needs to read its screen and encode
 /// keys. Everything here lives on the main thread.
 struct Emu {
@@ -160,6 +180,7 @@ struct Emu {
     /// Answers to queries (cursor position, colors, ...) that go back to
     /// the agent.
     replies: Rc<RefCell<Vec<u8>>>,
+    signals: Rc<RefCell<Vec<Signal>>>,
 }
 
 impl Emu {
@@ -205,6 +226,34 @@ impl Emu {
         .map_err(ghostty)?;
         term.on_xtversion(|_| Some(concat!("agentz ", env!("CARGO_PKG_VERSION"))))
             .map_err(ghostty)?;
+        let signals = Rc::new(RefCell::new(Vec::new()));
+        let push = |signals: &Rc<RefCell<Vec<Signal>>>| {
+            let signals = signals.clone();
+            move |s: Signal| signals.borrow_mut().push(s)
+        };
+        let send = push(&signals);
+        term.on_bell(move |_| send(Signal::Bell)).map_err(ghostty)?;
+        let send = push(&signals);
+        term.on_desktop_notification(move |_, n: DesktopNotification<'_>| {
+            send(Signal::Notify {
+                title: n.title().to_string(),
+                body: n.body().to_string(),
+            })
+        })
+        .map_err(ghostty)?;
+        let send = push(&signals);
+        term.on_progress_report(move |_, p: ProgressReport<'_>| {
+            if let Ok(state) = p.state() {
+                send(Signal::Progress(state));
+            }
+        })
+        .map_err(ghostty)?;
+        let send = push(&signals);
+        term.on_pwd_changed(move |_| send(Signal::PwdChanged))
+            .map_err(ghostty)?;
+        let send = push(&signals);
+        term.on_title_changed(move |_| send(Signal::TitleChanged))
+            .map_err(ghostty)?;
         Ok(Emu {
             term,
             render: RenderState::new().map_err(ghostty)?,
@@ -213,6 +262,7 @@ impl Emu {
             keys: key::Encoder::new().map_err(ghostty)?,
             key_event: key::Event::new().map_err(ghostty)?,
             replies,
+            signals,
         })
     }
 
@@ -376,6 +426,16 @@ impl Emu {
     }
 }
 
+/// What `Term::update` found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Update {
+    /// Tell the user the agent wants attention, with the agent's own
+    /// message if it sent one (OSC 9/777).
+    pub notice: Option<Option<String>>,
+    /// The new working directory the program reported (OSC 7).
+    pub cwd: Option<PathBuf>,
+}
+
 pub struct Term {
     pub id: u64,
     /// The child's process id.
@@ -389,8 +449,18 @@ pub struct Term {
     last_output_ms: Arc<AtomicU64>,
     /// When we last sent the agent input from the user. 0 means never.
     last_input_ms: Cell<u64>,
-    /// When the current stretch of output started, or None while quiet.
-    busy_since_ms: Option<u64>,
+    /// Whether the program says it is working, from progress reports
+    /// (OSC 9;4) or a spinner in its title. None until it tells us.
+    reported_busy: Option<bool>,
+    /// Once a program sent a progress report, we ignore its title.
+    has_progress: bool,
+    was_busy: bool,
+    /// When the current stretch of work started.
+    busy_since_ms: u64,
+    /// True once the user heard about the current turn.
+    notified: Cell<bool>,
+    /// The focus state we last reported to the program.
+    focus_sent: Cell<Option<bool>>,
     pub exit_code: Option<u32>,
 }
 
@@ -454,7 +524,12 @@ impl Term {
             child,
             last_output_ms,
             last_input_ms: Cell::new(0),
-            busy_since_ms: None,
+            reported_busy: None,
+            has_progress: false,
+            was_busy: false,
+            busy_since_ms: 0,
+            notified: Cell::new(false),
+            focus_sent: Cell::new(None),
             exit_code: None,
         })
     }
@@ -476,6 +551,13 @@ impl Term {
         }
     }
 
+    /// The window title the program last set (OSC 0/2).
+    pub fn title(&self) -> Option<String> {
+        let emu = self.emu.borrow();
+        let title = emu.term.title().ok()?;
+        (!title.is_empty()).then(|| title.to_string())
+    }
+
     pub fn is_running(&self) -> bool {
         self.exit_code.is_none()
     }
@@ -493,32 +575,100 @@ impl Term {
         }
     }
 
-    /// True if the agent printed something recently, i.e. it is working.
+    /// True if the program is working. We trust what it tells us (progress
+    /// reports or a title spinner). If it never told us, it is working
+    /// while it prints.
     pub fn is_busy(&self) -> bool {
-        let last = self.last_output_ms.load(Ordering::Relaxed);
-        self.is_running() && now_ms().saturating_sub(last) < 1500
+        self.is_running()
+            && self.reported_busy.unwrap_or_else(|| {
+                let last = self.last_output_ms.load(Ordering::Relaxed);
+                now_ms().saturating_sub(last) < 1500
+            })
     }
 
-    /// Call on every tick. True once when the agent goes quiet after
-    /// working on something the user asked for, e.g. it finished a task or
-    /// stopped at a permission prompt.
-    pub fn finished_work(&mut self) -> bool {
-        match (self.is_busy(), self.busy_since_ms) {
-            (true, None) => {
-                self.busy_since_ms = Some(now_ms());
+    /// Forgets what the program said about being busy, e.g. when the agent
+    /// in a shell exits and the shell is left.
+    pub fn forget_reported_busy(&mut self) {
+        self.reported_busy = None;
+        self.has_progress = false;
+    }
+
+    /// Call after `pump`, on every tick. Reads what the program signaled
+    /// and tells whether the user should hear about it.
+    pub fn update(&mut self) -> Update {
+        let mut update = Update::default();
+        let mut agent_notice = None;
+        let signals = self.emu.borrow().signals.take();
+        for signal in signals {
+            match signal {
+                Signal::Progress(state) => {
+                    self.has_progress = true;
+                    self.reported_busy = Some(matches!(
+                        state,
+                        ProgressState::Set | ProgressState::Indeterminate
+                    ));
+                }
+                Signal::TitleChanged if !self.has_progress => {
+                    let title = self.title().unwrap_or_default();
+                    if let Some(busy) = title_busy(&title, self.reported_busy.is_some()) {
+                        self.reported_busy = Some(busy);
+                    }
+                }
+                Signal::Notify { title, body } => {
+                    let text = if body.is_empty() { title } else { body };
+                    agent_notice = Some(text.trim().to_string());
+                }
+                Signal::PwdChanged => {
+                    let pwd = self.emu.borrow().term.pwd().map(pwd_path);
+                    update.cwd = pwd.ok().flatten();
+                }
+                _ => {}
+            }
+        }
+
+        let busy = self.is_busy();
+        let finished = match (self.was_busy, busy) {
+            (false, true) => {
+                self.busy_since_ms = now_ms();
                 false
             }
-            (false, Some(start)) => {
-                self.busy_since_ms = None;
-                self.is_running()
-                    && is_real_work(
-                        start,
-                        self.last_input_ms.get(),
-                        self.last_output_ms.load(Ordering::Relaxed),
-                    )
+            (true, false) => {
+                let (start, input) = (self.busy_since_ms, self.last_input_ms.get());
+                if self.reported_busy.is_some() {
+                    input > 0
+                } else {
+                    let output = self.last_output_ms.load(Ordering::Relaxed);
+                    is_real_work(start, input, output)
+                }
             }
             _ => false,
+        };
+        self.was_busy = busy;
+
+        // One notice per turn, and none before the user asked anything.
+        if self.is_running() && self.last_input_ms.get() > 0 && !self.notified.get() {
+            if let Some(text) = agent_notice {
+                update.notice = Some((!text.is_empty()).then_some(text));
+            } else if finished {
+                update.notice = Some(None);
+            }
+            self.notified.set(update.notice.is_some());
         }
+        update
+    }
+
+    /// Tells the program whether the user is looking at it (DEC mode
+    /// 1004), if it asked to know. Codex only sends its notifications
+    /// while it is not looked at.
+    pub fn set_focused(&self, focused: bool) {
+        if self.focus_sent.get() == Some(focused)
+            || !self.is_running()
+            || !self.emu.borrow().mode(Mode::FOCUS_EVENT)
+        {
+            return;
+        }
+        self.focus_sent.set(Some(focused));
+        self.write_raw(if focused { b"\x1b[I" } else { b"\x1b[O" });
     }
 
     /// DEC mode 2026: the app is in the middle of drawing a frame.
@@ -544,11 +694,18 @@ impl Term {
         });
     }
 
+    /// Sends input from the user. It starts a new turn: the agent may
+    /// notify again when it is done.
     pub fn write(&self, bytes: &[u8]) {
         if bytes.is_empty() || !self.is_running() {
             return;
         }
         self.last_input_ms.set(now_ms());
+        self.notified.set(false);
+        self.write_raw(bytes);
+    }
+
+    fn write_raw(&self, bytes: &[u8]) {
         let mut w = self.writer.borrow_mut();
         let _ = w.write_all(bytes);
         let _ = w.flush();
@@ -701,6 +858,46 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_millis() as u64
+}
+
+/// Whether a window title says the program is working. Claude shows a
+/// half-filled circle while working and `✳` when idle; Codex shows a
+/// braille spinner while working and nothing when idle. `known` is true
+/// once the program's titles told us something, so a plain title then
+/// means idle.
+fn title_busy(title: &str, known: bool) -> Option<bool> {
+    let first = title.chars().next();
+    match first {
+        Some('\u{2801}'..='\u{28ff}' | '◐' | '◓' | '◑' | '◒') => Some(true),
+        Some('✳') => Some(false),
+        _ => known.then_some(false),
+    }
+}
+
+/// The path in an OSC 7 working directory like `file://host/Users/me/a%20b`.
+fn pwd_path(pwd: &str) -> Option<PathBuf> {
+    let path = match pwd.split_once("://") {
+        Some((_, rest)) => &rest[rest.find('/')?..],
+        None => pwd,
+    };
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut it = path.bytes();
+    while let Some(b) = it.next() {
+        let hex = |b: Option<u8>| (b? as char).to_digit(16);
+        if b == b'%' {
+            let mut peek = it.clone();
+            if let (Some(h), Some(l)) = (hex(peek.next()), hex(peek.next())) {
+                bytes.push((h * 16 + l) as u8);
+                it = peek;
+                continue;
+            }
+        }
+        bytes.push(b);
+    }
+    Some(PathBuf::from(String::from_utf8(bytes).ok()?))
 }
 
 /// Keeps palette colors as palette indices, so they use the outer
@@ -984,6 +1181,81 @@ mod tests {
         assert_eq!(keys(kitty, KeyCode::Enter, shift), "\x1b[13;2u");
         assert_eq!(keys(kitty, KeyCode::Char('c'), ctrl), "\x1b[99;5u");
         assert_eq!(keys(kitty, KeyCode::Esc, KeyModifiers::NONE), "\x1b[27u");
+    }
+
+    #[test]
+    fn reads_busy_from_titles() {
+        assert_eq!(title_busy("◐ Fix the bug", false), Some(true));
+        assert_eq!(title_busy("✳ Fix the bug", false), Some(false));
+        assert_eq!(title_busy("⠋ my-repo", false), Some(true));
+        assert_eq!(title_busy("⠸ ⠸ | my-repo", true), Some(true));
+        // Codex's idle title is plain, which only counts once we know it.
+        assert_eq!(title_busy("Fix the bug | my-repo", true), Some(false));
+        assert_eq!(title_busy("fish /Users/me", false), None);
+        assert_eq!(title_busy("", false), None);
+    }
+
+    #[test]
+    fn parses_pwd() {
+        let p = |s| pwd_path(s).map(|p| p.display().to_string());
+        assert_eq!(
+            p("file://host/Users/me/a%20b").as_deref(),
+            Some("/Users/me/a b")
+        );
+        assert_eq!(p("file:///tmp").as_deref(), Some("/tmp"));
+        assert_eq!(p("kitty-shell-cwd://host/tmp/x").as_deref(), Some("/tmp/x"));
+        assert_eq!(p("/plain/path").as_deref(), Some("/plain/path"));
+        assert_eq!(p("100%/x%zz").as_deref(), None);
+    }
+
+    /// Runs `script` in `sh` and calls `update` until `until` says stop.
+    fn run_script(script: &str, input: bool, until: impl Fn(&Update) -> bool) -> (Term, Update) {
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", script]);
+        let (tx, _) = channel();
+        let mut term = Term::spawn(0, cmd, 24, 80, tx, Arc::new(AtomicBool::new(false))).unwrap();
+        if input {
+            // The user asked something; `sh` ignores it.
+            term.write(b"\x1b");
+        }
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            term.pump();
+            let update = term.update();
+            if until(&update) {
+                return (term, update);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("script did not signal in time");
+    }
+
+    #[test]
+    fn progress_end_is_a_notice() {
+        let script = r"printf '\033]9;4;3\007'; sleep 0.2; printf '\033]9;4;0\007'; sleep 5";
+        let (term, update) = run_script(script, true, |u| u.notice.is_some());
+        assert_eq!(update.notice, Some(None));
+        assert!(!term.is_busy());
+    }
+
+    #[test]
+    fn forwards_agent_notification_once() {
+        let script = r"printf '\033]9;4;3\007\033]777;notify;Codex;Done: OK\033\\'; sleep 0.2; printf '\033]9;4;0\007'; sleep 5";
+        let (mut term, update) = run_script(script, true, |u| u.notice.is_some());
+        assert_eq!(update.notice, Some(Some("Done: OK".into())));
+        // The progress end right after is the same turn.
+        std::thread::sleep(Duration::from_millis(400));
+        term.pump();
+        assert_eq!(term.update().notice, None);
+        assert!(!term.is_busy());
+    }
+
+    #[test]
+    fn no_notice_before_the_user_typed() {
+        let script = r"printf '\033]9;4;3\007'; sleep 0.2; printf '\033]9;4;0\007'; sleep 1; printf '\033]7;file://h/done\007'; sleep 5";
+        let (_, update) = run_script(script, false, |u| u.cwd.is_some() || u.notice.is_some());
+        assert_eq!(update.notice, None);
+        assert_eq!(update.cwd, Some(PathBuf::from("/done")));
     }
 
     #[test]

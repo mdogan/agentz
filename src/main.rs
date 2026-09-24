@@ -101,8 +101,9 @@ fn restore_modes(kitty: bool) {
 
 /// Shows a desktop notification through the outer terminal (OSC 777,
 /// supported by Ghostty and others). Call it between frames only, so the
-/// sequence does not land in the middle of one.
-fn notify(agent: Agent, session: &str) {
+/// sequence does not land in the middle of one. `message` is what the
+/// agent itself said, e.g. Codex's last reply.
+fn notify(agent: Agent, session: &str, message: Option<&str>) {
     let agent = match agent {
         Agent::Claude => "Claude",
         Agent::Codex => "Codex",
@@ -115,13 +116,23 @@ fn notify(agent: Agent, session: &str) {
             .map(|c| if c.is_control() || c == ';' { ' ' } else { c })
             .collect()
     };
-    let seq = format!(
-        "\x1b]777;notify;{agent} is waiting;{}\x1b\\",
-        clean(session)
-    );
+    let body = match message {
+        Some(m) => format!("{session}: {}", short(m, 120)),
+        None => session.to_string(),
+    };
+    let seq = format!("\x1b]777;notify;{agent} is waiting;{}\x1b\\", clean(&body));
     let mut out = stdout().lock();
     let _ = out.write_all(seq.as_bytes());
     let _ = out.flush();
+}
+
+/// `s` cut to at most `max` characters, with `…` if it was cut.
+fn short(s: &str, max: usize) -> String {
+    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    match s.char_indices().nth(max) {
+        Some((i, _)) => format!("{}…", &s[..i]),
+        None => s,
+    }
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
@@ -182,8 +193,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         // sends a new Redraw, so it is never left waiting for the next tick.
         redraw.store(false, Ordering::Release);
         app.pump();
-        for (agent, title) in app.finished_unseen() {
-            notify(agent, &title);
+        for (agent, title, message) in app.attention() {
+            notify(agent, &title, message.as_deref());
         }
 
         // Don't show half-drawn frames, but never wait for long.

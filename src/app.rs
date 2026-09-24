@@ -215,17 +215,29 @@ impl App {
             .is_some_and(|r| r.term.synchronized())
     }
 
-    /// Agents that just finished working while the user was not looking at
-    /// them, as (agent, session title). Looking means the window is focused
-    /// and the agent is the one shown in the pane.
-    pub fn finished_unseen(&mut self) -> Vec<(Agent, String)> {
-        let mut done = Vec::new();
+    /// Reads what every process signaled since the last tick. Returns the
+    /// agents that want attention while the user is not looking at them,
+    /// as (agent, session title, the agent's own message). Looking means
+    /// the window is focused and the agent is the one shown in the pane.
+    pub fn attention(&mut self) -> Vec<(Agent, String, Option<String>)> {
+        let mut out = Vec::new();
+        let mut cwd_changed = false;
         for r in &mut self.running {
+            let looking = self.window_focused && self.current.as_ref() == Some(&r.key);
+            r.term.set_focused(looking);
             // Poll every process so each one's busy state stays current.
-            if !r.term.finished_work() {
-                continue;
+            let update = r.term.update();
+            if let Some(cwd) = update.cwd
+                && r.key.0 == Agent::Shell
+                && cwd != r.cwd
+            {
+                r.cwd = cwd;
+                cwd_changed = true;
             }
-            if self.window_focused && self.current.as_ref() == Some(&r.key) {
+            let Some(message) = update.notice else {
+                continue;
+            };
+            if looking {
                 continue;
             }
             // A plain shell only counts while an agent runs inside it.
@@ -242,9 +254,12 @@ impl App {
                 .iter()
                 .find(|s| &s.key() == key)
                 .map_or_else(|| r.fallback_title.clone(), |s| s.title.clone());
-            done.push((key.0, title));
+            out.push((key.0, title, message));
         }
-        done
+        if cwd_changed {
+            self.rebuild_rows();
+        }
+        out
     }
 
     pub fn handle(&mut self, ev: AppEvent) {
@@ -310,6 +325,11 @@ impl App {
                 && self.cursor_key.as_ref() == Some(old)
             {
                 self.cursor_key = Some(r.key.clone());
+            }
+            if r.linked.is_some() && linked.is_none() {
+                // The agent exited; what it said about being busy was
+                // about itself, not the shell.
+                r.term.forget_reported_busy();
             }
             r.linked = linked;
         }
@@ -1185,8 +1205,16 @@ pub fn build_command(agent: Agent, args: &[String], cwd: &Path) -> CommandBuilde
     ] {
         cmd.env_remove(var);
     }
+    // Our emulator is Ghostty's. Knowing that, Claude reports progress
+    // (OSC 9;4) and notifications, which tell us when it is done.
+    cmd.env("TERM_PROGRAM", "ghostty");
+    cmd.env("TERM_PROGRAM_VERSION", GHOSTTY_VERSION);
     cmd
 }
+
+/// The last Ghostty release in the source libghostty-vt is built from
+/// (1.3.2-dev). libghostty-vt's own version is not Ghostty's.
+const GHOSTTY_VERSION: &str = "1.3.1";
 
 fn agent_icon(agent: Agent) -> (&'static str, Color) {
     match agent {
