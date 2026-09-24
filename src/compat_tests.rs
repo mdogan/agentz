@@ -11,13 +11,16 @@
 //! transcripts the tests create are deleted at the start and end of each test.
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent};
+use serde_json::Value;
 
 use crate::app::build_command;
 use crate::procs::agents_in_shells;
@@ -144,6 +147,147 @@ fn codex_started_in_shell_is_linked() {
         dir.sessions().into_iter().find(|s| s.id == id)
     });
     assert_first_prompt(Agent::Codex, &id);
+}
+
+#[test]
+#[ignore = "runs the real codex CLI and calls the model"]
+fn codex_thread_list_matches_scanner() {
+    let dir = TestDir::new("codex-app-server");
+
+    let started = SystemTime::now() - Duration::from_secs(5);
+    let mut pty = Pty::start(Agent::Codex, &[], &dir.path);
+    pty.wait_ready();
+    pty.submit(PROMPT);
+    pty.wait_for("the new session in the session list", || {
+        dir.sessions()
+            .into_iter()
+            .find(|s| s.agent == Agent::Codex && s.created >= started)
+    });
+    // Stop Codex so nothing, e.g. a generated name, changes between the
+    // two listings.
+    drop(pty);
+
+    // Codex's own listing of the folder, then ours.
+    let mut server = AppServer::start(&dir.path);
+    let list = server.request(
+        "thread/list",
+        serde_json::json!({ "cwd": dir.path, "limit": 50 }),
+    );
+    let sessions = dir.sessions();
+
+    let threads = list["data"].as_array().expect("thread/list data");
+    let thread_ids: Vec<&str> = threads.iter().filter_map(|t| t["id"].as_str()).collect();
+    assert_eq!(
+        thread_ids,
+        ids(&sessions),
+        "thread/list and agentz disagree"
+    );
+
+    let (t, s) = (&threads[0], &sessions[0]);
+    assert_eq!(t["cwd"].as_str().map(Path::new), Some(s.cwd.as_path()));
+    // agentz shows the thread name, else the first line of the first prompt.
+    let title = t["name"]
+        .as_str()
+        .or_else(|| t["preview"].as_str()?.lines().next())
+        .expect("thread name or preview");
+    assert_eq!(title, s.title);
+    // Codex takes the time from the rollout file name, agentz from the file.
+    let created =
+        SystemTime::UNIX_EPOCH + Duration::from_secs(t["createdAt"].as_u64().expect("createdAt"));
+    let diff = created
+        .duration_since(s.created)
+        .or_else(|_| s.created.duration_since(created))
+        .unwrap();
+    assert!(
+        diff < Duration::from_secs(5),
+        "created times differ by {diff:?}"
+    );
+    // Marked unstable in the protocol, so only checked when present.
+    if let Some(path) = t["path"].as_str() {
+        assert_eq!(Some(PathBuf::from(path)), transcript(Agent::Codex, &s.id));
+    }
+}
+
+/// `codex app-server` over stdio: one JSON-RPC message per line.
+struct AppServer {
+    child: Child,
+    stdin: ChildStdin,
+    lines: mpsc::Receiver<String>,
+    next_id: u64,
+}
+
+impl AppServer {
+    fn start(cwd: &Path) -> Self {
+        let mut child = Command::new("codex")
+            .arg("app-server")
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("could not start codex app-server: {e}"));
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        // Read on a thread so a silent server fails the test instead of
+        // hanging it.
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut server = AppServer {
+            child,
+            stdin,
+            lines,
+            next_id: 0,
+        };
+        server.request(
+            "initialize",
+            serde_json::json!({ "clientInfo": { "name": "agentz", "version": "0" } }),
+        );
+        server.send(&serde_json::json!({ "method": "initialized" }));
+        server
+    }
+
+    /// Sends a request and returns its result. Skips notifications and
+    /// requests from the server.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(&serde_json::json!({ "id": id, "method": method, "params": params }));
+        let start = Instant::now();
+        loop {
+            let left = TIMEOUT.saturating_sub(start.elapsed());
+            let line = self
+                .lines
+                .recv_timeout(left)
+                .unwrap_or_else(|e| panic!("no answer to {method}: {e}"));
+            let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if msg["id"] != id || msg.get("method").is_some() {
+                continue;
+            }
+            if let Some(err) = msg.get("error") {
+                panic!("{method} failed: {err}");
+            }
+            return msg["result"].clone();
+        }
+    }
+
+    fn send(&mut self, msg: &Value) {
+        writeln!(self.stdin, "{msg}").expect("write to codex app-server");
+    }
+}
+
+impl Drop for AppServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// An agent or shell in a PTY, started with agentz's own command builder.

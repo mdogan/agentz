@@ -85,6 +85,7 @@ The tests start the real `claude` and `codex` in a PTY, the same way agentz does
 - a new session shows up in the list with the right id, folder and first prompt,
 - resuming it adds to the same transcript instead of starting a new session,
 - a `/rename` name becomes the Claude session's title,
-- an agent started by hand in a shell is linked to that shell.
+- an agent started by hand in a shell is linked to that shell,
+- Codex's own session list (`thread/list` from `codex app-server`) has the same Codex sessions as agentz, with the same folder, title and start time.
 
 Each prompt goes to the model, so they use your normal login and cost a little. They are skipped by `make test`. They run in fixed folders under the temp dir and delete the sessions they create. A failed test prints the agent's screen, which usually shows what changed. `AGENTZ_CLAUDE_ARGS` and `AGENTZ_CODEX_ARGS` apply here too, e.g. `AGENTZ_CLAUDE_ARGS="--model haiku" make integration`.
