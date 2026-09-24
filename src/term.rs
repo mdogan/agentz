@@ -26,7 +26,7 @@ use libghostty_vt::terminal::{
     ColorScheme, DesktopNotification, Mode, ProgressReport, ProgressState, ScrollViewport,
     SizeReportSize,
 };
-use libghostty_vt::{RenderState, Terminal, key};
+use libghostty_vt::{RenderState, Terminal, key, mouse};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -169,7 +169,7 @@ pub enum Signal {
 }
 
 /// The emulator and the objects it needs to read its screen and encode
-/// keys. Everything here lives on the main thread.
+/// keys and mouse events. Everything here lives on the main thread.
 struct Emu {
     term: Terminal<'static, 'static>,
     render: RenderState<'static>,
@@ -177,6 +177,8 @@ struct Emu {
     cells: CellIterator<'static>,
     keys: key::Encoder<'static>,
     key_event: key::Event<'static>,
+    mouse: mouse::Encoder<'static>,
+    mouse_event: mouse::Event<'static>,
     /// Answers to queries (cursor position, colors, ...) that go back to
     /// the agent.
     replies: Rc<RefCell<Vec<u8>>>,
@@ -261,6 +263,8 @@ impl Emu {
             cells: CellIterator::new().map_err(ghostty)?,
             keys: key::Encoder::new().map_err(ghostty)?,
             key_event: key::Event::new().map_err(ghostty)?,
+            mouse: mouse::Encoder::new().map_err(ghostty)?,
+            mouse_event: mouse::Event::new().map_err(ghostty)?,
             replies,
             signals,
         })
@@ -324,6 +328,69 @@ impl Emu {
             .set_options_from_terminal(&self.term)
             .set_macos_option_as_alt(key::OptionAsAlt::True)
             .encode_to_vec(&self.key_event, &mut out);
+        out
+    }
+
+    /// True if the agent asked for mouse reports (DEC modes 9, 1000,
+    /// 1002, 1003).
+    fn wants_mouse(&self) -> bool {
+        [
+            Mode::X10_MOUSE,
+            Mode::NORMAL_MOUSE,
+            Mode::BUTTON_MOUSE,
+            Mode::ANY_MOUSE,
+        ]
+        .into_iter()
+        .any(|m| self.mode(m))
+    }
+
+    /// Turns a mouse event at (col, row) into the report the agent asked
+    /// for, in the format it turned on (X10, SGR, ...). Empty if its mouse
+    /// mode doesn't report this event, e.g. motion in mode 1000.
+    fn encode_mouse(&mut self, ev: MouseEvent, col: u16, row: u16) -> Vec<u8> {
+        use mouse::{Action, Button};
+        let button = |b: MouseButton| match b {
+            MouseButton::Left => Button::Left,
+            MouseButton::Middle => Button::Middle,
+            MouseButton::Right => Button::Right,
+        };
+        let (action, button) = match ev.kind {
+            MouseEventKind::Down(b) => (Action::Press, Some(button(b))),
+            MouseEventKind::Up(b) => (Action::Release, Some(button(b))),
+            MouseEventKind::Drag(b) => (Action::Motion, Some(button(b))),
+            MouseEventKind::Moved => (Action::Motion, None),
+            MouseEventKind::ScrollUp => (Action::Press, Some(Button::Four)),
+            MouseEventKind::ScrollDown => (Action::Press, Some(Button::Five)),
+            MouseEventKind::ScrollLeft => (Action::Press, Some(Button::Six)),
+            MouseEventKind::ScrollRight => (Action::Press, Some(Button::Seven)),
+        };
+        // Ghostty wants pixels, but we only know cells. With 1x1 pixel
+        // cells the pixel position is the cell position.
+        let size = mouse::EncoderSize {
+            screen_width: self.term.cols().unwrap_or(0).into(),
+            screen_height: self.term.rows().unwrap_or(0).into(),
+            cell_width: 1,
+            cell_height: 1,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        self.mouse_event
+            .set_action(action)
+            .set_button(button)
+            .set_mods(ghostty_mods(ev.modifiers))
+            .set_position(mouse::Position {
+                x: col.into(),
+                y: row.into(),
+            });
+        let mut out = Vec::new();
+        let _ = self
+            .mouse
+            .set_options_from_terminal(&self.term)
+            .set_size(size)
+            .set_any_button_pressed(matches!(ev.kind, MouseEventKind::Drag(_)))
+            .encode_to_vec(&self.mouse_event, &mut out);
         out
     }
 
@@ -756,21 +823,10 @@ impl Term {
     /// scrolls our scrollback (or sends arrows on the alternate screen).
     pub fn mouse(&self, ev: MouseEvent, col: u16, row: u16) {
         let mut emu = self.emu.borrow_mut();
-        let mode = if emu.mode(Mode::ANY_MOUSE) {
-            MouseMode::AnyMotion
-        } else if emu.mode(Mode::BUTTON_MOUSE) {
-            MouseMode::ButtonMotion
-        } else if emu.mode(Mode::NORMAL_MOUSE) {
-            MouseMode::PressRelease
-        } else if emu.mode(Mode::X10_MOUSE) {
-            MouseMode::Press
-        } else {
-            MouseMode::None
-        };
-        if mode != MouseMode::None {
-            let sgr = emu.mode(Mode::SGR_MOUSE);
+        if emu.wants_mouse() {
+            let bytes = emu.encode_mouse(ev, col, row);
             drop(emu);
-            if let Some(bytes) = encode_mouse(ev, col, row, mode, sgr) {
+            if !bytes.is_empty() {
                 self.write(&bytes);
             }
             return;
@@ -1005,74 +1061,6 @@ fn char_key(c: char) -> (key::Key, char) {
     (k, unshifted)
 }
 
-/// Which mouse events the app asked for (DEC modes 9, 1000, 1002, 1003).
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MouseMode {
-    None,
-    Press,
-    PressRelease,
-    ButtonMotion,
-    AnyMotion,
-}
-
-fn encode_mouse(ev: MouseEvent, col: u16, row: u16, mode: MouseMode, sgr: bool) -> Option<Vec<u8>> {
-    let button_code = |b: MouseButton| match b {
-        MouseButton::Left => 0u16,
-        MouseButton::Middle => 1,
-        MouseButton::Right => 2,
-    };
-    let (mut code, release) = match ev.kind {
-        MouseEventKind::Down(b) => (button_code(b), false),
-        MouseEventKind::Up(b) => {
-            if mode == MouseMode::Press {
-                return None;
-            }
-            (button_code(b), true)
-        }
-        MouseEventKind::Drag(b) => {
-            if !matches!(mode, MouseMode::ButtonMotion | MouseMode::AnyMotion) {
-                return None;
-            }
-            (button_code(b) + 32, false)
-        }
-        MouseEventKind::Moved => {
-            if mode != MouseMode::AnyMotion {
-                return None;
-            }
-            (3 + 32, false)
-        }
-        MouseEventKind::ScrollUp => (64, false),
-        MouseEventKind::ScrollDown => (65, false),
-        MouseEventKind::ScrollLeft => (66, false),
-        MouseEventKind::ScrollRight => (67, false),
-    };
-    if ev.modifiers.contains(KeyModifiers::SHIFT) {
-        code += 4;
-    }
-    if ev.modifiers.contains(KeyModifiers::ALT) {
-        code += 8;
-    }
-    if ev.modifiers.contains(KeyModifiers::CONTROL) {
-        code += 16;
-    }
-    let (x, y) = (col + 1, row + 1);
-    if sgr {
-        let end = if release { 'm' } else { 'M' };
-        return Some(format!("\x1b[<{code};{x};{y}{end}").into_bytes());
-    }
-    // Legacy X10 encoding: release is button 3, coordinates capped.
-    let code = if release { 3 + (code & !3) } else { code };
-    let clamp = |v: u16| (v.min(223) + 32) as u8;
-    Some(vec![
-        0x1b,
-        b'[',
-        b'M',
-        (code + 32).min(255) as u8,
-        clamp(x),
-        clamp(y),
-    ])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1196,6 +1184,45 @@ mod tests {
         assert_eq!(keys(kitty, KeyCode::Enter, shift), "\x1b[13;2u");
         assert_eq!(keys(kitty, KeyCode::Char('c'), ctrl), "\x1b[99;5u");
         assert_eq!(keys(kitty, KeyCode::Esc, KeyModifiers::NONE), "\x1b[27u");
+    }
+
+    fn mouse(modes: &[u8], kind: MouseEventKind, m: KeyModifiers) -> Vec<u8> {
+        let mut emu = Emu::new(24, 80).unwrap();
+        emu.term.vt_write(modes);
+        let ev = MouseEvent {
+            kind,
+            column: 4,
+            row: 2,
+            modifiers: m,
+        };
+        emu.encode_mouse(ev, ev.column, ev.row)
+    }
+
+    #[test]
+    fn encodes_mouse() {
+        let none = KeyModifiers::NONE;
+        let left = MouseButton::Left;
+        let sgr = b"\x1b[?1000h\x1b[?1006h";
+        assert_eq!(
+            mouse(sgr, MouseEventKind::Down(left), none),
+            b"\x1b[<0;5;3M"
+        );
+        assert_eq!(mouse(sgr, MouseEventKind::Up(left), none), b"\x1b[<0;5;3m");
+        assert_eq!(
+            mouse(sgr, MouseEventKind::ScrollUp, KeyModifiers::CONTROL),
+            b"\x1b[<80;5;3M"
+        );
+        // Mode 1000 doesn't report motion, 1002 reports drags.
+        assert_eq!(mouse(sgr, MouseEventKind::Drag(left), none), b"");
+        let drag = b"\x1b[?1002h\x1b[?1006h";
+        assert_eq!(
+            mouse(drag, MouseEventKind::Drag(left), none),
+            b"\x1b[<32;5;3M"
+        );
+        // Legacy format: release is button 3, everything is +32.
+        let x10 = b"\x1b[?1000h";
+        assert_eq!(mouse(x10, MouseEventKind::Down(left), none), b"\x1b[M %#");
+        assert_eq!(mouse(x10, MouseEventKind::Up(left), none), b"\x1b[M#%#");
     }
 
     #[test]
