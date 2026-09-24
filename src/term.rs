@@ -586,6 +586,21 @@ impl Term {
             })
     }
 
+    /// True if the program started another one in the foreground, like a
+    /// shell running a command: then the terminal belongs to another
+    /// process group.
+    pub fn has_foreground_job(&self) -> bool {
+        #[cfg(unix)]
+        if let (true, Some(pid), Some(group)) = (
+            self.is_running(),
+            self.pid,
+            self.master.process_group_leader(),
+        ) {
+            return group as u32 != pid;
+        }
+        false
+    }
+
     /// Forgets what the program said about being busy, e.g. when the agent
     /// in a shell exits and the shell is left.
     pub fn forget_reported_busy(&mut self) {
@@ -1236,6 +1251,26 @@ mod tests {
         let (term, update) = run_script(script, true, |u| u.notice.is_some());
         assert_eq!(update.notice, Some(None));
         assert!(!term.is_busy());
+    }
+
+    #[test]
+    fn sees_a_shell_running_a_command() {
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.arg("-i");
+        let (tx, _) = channel();
+        let term = Term::spawn(0, cmd, 24, 80, tx, Arc::new(AtomicBool::new(false))).unwrap();
+        let wait_for = |want: bool| {
+            let start = Instant::now();
+            while term.has_foreground_job() != want {
+                assert!(start.elapsed() < Duration::from_secs(5), "expected {want}");
+                term.pump();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait_for(false);
+        term.write(b"sleep 0.5\n");
+        wait_for(true);
+        wait_for(false);
     }
 
     #[test]

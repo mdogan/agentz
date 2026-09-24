@@ -30,7 +30,7 @@ In the sidebar:
 | `a` | show sessions from all repos / only this repo |
 | `i` | hide / show inactive sessions (those with no running agent or shell) |
 | `x` | stop the selected agent or shell |
-| `q` | quit. Refused while an agent is running (stop it with `x` first). Press twice if only shells are open. |
+| `q` | quit. Refused while an agent is working (wait, or stop it with `x`). Press twice if an agent is idle or a shell is running a command. Quits at once if only idle shells are open. |
 
 Anywhere:
 

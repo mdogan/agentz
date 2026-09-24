@@ -711,29 +711,40 @@ impl App {
                 }
             }
             KeyCode::Char('q') => {
-                // Agents (also those started by hand in a shell) block quitting;
-                // plain shells only need a second q.
-                let live: Vec<&Running> = self
+                // Working agents (also those started by hand in a shell) block
+                // quitting. Idle agents and shells running a command need a
+                // second q. Idle shells close without asking.
+                let (mut working, mut idle, mut commands) = (0, 0, 0);
+                for r in self
                     .running
                     .iter()
                     .filter(|r| r.term.is_running() && !r.placeholder)
-                    .collect();
-                let agents = live
-                    .iter()
-                    .filter(|r| r.key.0 != Agent::Shell || r.linked.is_some())
-                    .count();
-                let shells = live.len() - agents;
-                if agents > 0 {
+                {
+                    if r.key.0 != Agent::Shell || r.linked.is_some() {
+                        if r.term.is_busy() {
+                            working += 1;
+                        } else {
+                            idle += 1;
+                        }
+                    } else if r.term.has_foreground_job() {
+                        commands += 1;
+                    }
+                }
+                if working > 0 {
+                    self.confirm_quit = false;
                     self.set_status(format!(
-                        "{agents} agent(s) running. Stop them with x before quitting."
+                        "{working} agent(s) working. Wait, or stop them with x before quitting."
                     ));
-                } else if shells == 0 || self.confirm_quit {
+                } else if idle + commands == 0 || self.confirm_quit {
                     self.quit = true;
                 } else {
                     self.confirm_quit = true;
-                    self.set_status(format!(
-                        "{shells} shell(s) open. Press q again to close them and quit."
-                    ));
+                    let what = match (idle, commands) {
+                        (0, n) => format!("{n} shell(s) running a command"),
+                        (n, 0) => format!("{n} idle agent(s)"),
+                        (a, c) => format!("{a} idle agent(s) and {c} shell(s) running a command"),
+                    };
+                    self.set_status(format!("{what}. Press q again to close them and quit."));
                 }
             }
             _ => {}
