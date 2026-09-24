@@ -12,6 +12,8 @@ make install   # cargo install --path .
 agentz
 ```
 
+Each agent's screen is kept by [libghostty-vt](https://github.com/Uzaaft/libghostty-rs), Ghostty's terminal emulator as a library. Building it needs [Zig](https://ziglang.org) 0.16 on your PATH (`brew install zig`), and the first build downloads the Ghostty source.
+
 Other targets: `make build`, `make release`, `make run`, `make check` (fmt + clippy), `make fmt`, `make test`, `make integration`, `make clean`, `make uninstall`.
 
 ## Keys

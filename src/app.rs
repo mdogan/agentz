@@ -202,6 +202,13 @@ impl App {
         }
     }
 
+    /// Gives every terminal the output its agent printed since last time.
+    pub fn pump(&self) {
+        for r in &self.running {
+            r.term.pump();
+        }
+    }
+
     /// True while the shown agent is in the middle of drawing a frame.
     pub fn current_synchronized(&self) -> bool {
         self.current_running()

@@ -178,10 +178,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         if app.quit {
             break;
         }
+        // Clear the flag before pumping: output that comes in after this
+        // sends a new Redraw, so it is never left waiting for the next tick.
+        redraw.store(false, Ordering::Release);
+        app.pump();
         for (agent, title) in app.finished_unseen() {
             notify(agent, &title);
         }
-        redraw.store(false, Ordering::Release);
 
         // Don't show half-drawn frames, but never wait for long.
         if app.current_synchronized() {
