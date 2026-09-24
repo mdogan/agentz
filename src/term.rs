@@ -258,6 +258,12 @@ impl Term {
         }
     }
 
+    /// The visible screen as plain text.
+    #[cfg(test)]
+    pub fn screen_text(&self) -> String {
+        self.parser.lock().unwrap().screen().contents()
+    }
+
     pub fn scrollback(&self) -> usize {
         self.parser.lock().unwrap().screen().scrollback()
     }

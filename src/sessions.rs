@@ -167,6 +167,13 @@ impl Scanner {
     }
 }
 
+/// The first prompt of a transcript, which is the title when the session
+/// has no other.
+#[cfg(test)]
+pub fn first_prompt(path: &Path, agent: Agent) -> Option<String> {
+    parse(path, agent, Parsed::default()).first_prompt
+}
+
 fn parse(path: &Path, agent: Agent, prev: Parsed) -> Parsed {
     match agent {
         Agent::Claude => parse_claude(path, prev),
@@ -332,7 +339,7 @@ fn claude_projects_dir() -> Option<PathBuf> {
     Some(claude_dir()?.join("projects"))
 }
 
-fn codex_home() -> Option<PathBuf> {
+pub fn codex_home() -> Option<PathBuf> {
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))

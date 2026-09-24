@@ -12,7 +12,7 @@ make install   # cargo install --path .
 agentz
 ```
 
-Other targets: `make build`, `make release`, `make run`, `make check` (fmt + clippy), `make fmt`, `make test`, `make clean`, `make uninstall`.
+Other targets: `make build`, `make release`, `make run`, `make check` (fmt + clippy), `make fmt`, `make test`, `make integration`, `make clean`, `make uninstall`.
 
 ## Keys
 
@@ -59,3 +59,20 @@ AGENTZ_CLAUDE_ARGS="--model opus" AGENTZ_CODEX_ARGS="-c model_reasoning_effort=h
 - Codex: `~/.codex/sessions/**/rollout-*.jsonl` (or `$CODEX_HOME`). The title comes from `session_index.jsonl`, then the first prompt. Sub-agent threads are hidden.
 
 The list refreshes every 3 seconds. `agentz --list` prints it and exits.
+
+## Integration tests
+
+agentz depends on details of Claude Code and Codex that can change in any update: the `--session-id`, `--resume` and `resume` arguments, where transcripts are stored and what is in them, `~/.claude/sessions/<pid>.json`, and Codex keeping its rollout file open. After updating either agent, run:
+
+```
+make integration
+```
+
+The tests start the real `claude` and `codex` in a PTY, the same way agentz does, answer the "trust this folder?" question, and type a short prompt. They check that:
+
+- a new session shows up in the list with the right id, folder and first prompt,
+- resuming it adds to the same transcript instead of starting a new session,
+- a `/rename` name becomes the Claude session's title,
+- an agent started by hand in a shell is linked to that shell.
+
+Each prompt goes to the model, so they use your normal login and cost a little. They are skipped by `make test`. They run in fixed folders under the temp dir and delete the sessions they create. A failed test prints the agent's screen, which usually shows what changed. `AGENTZ_CLAUDE_ARGS` and `AGENTZ_CODEX_ARGS` apply here too, e.g. `AGENTZ_CLAUDE_ARGS="--model haiku" make integration`.

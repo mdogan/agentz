@@ -1,4 +1,4 @@
-.PHONY: build release run install uninstall check fmt test clean
+.PHONY: build release run install uninstall check fmt test integration clean
 
 build:
 	cargo build
@@ -24,6 +24,10 @@ fmt:
 
 test:
 	cargo test
+
+# Runs the real claude and codex CLIs; each test sends prompts to the model.
+integration:
+	cargo test -- --ignored
 
 clean:
 	cargo clean

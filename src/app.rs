@@ -1022,7 +1022,7 @@ fn shell_name() -> String {
         .unwrap_or(program)
 }
 
-fn build_command(agent: Agent, args: &[String], cwd: &Path) -> CommandBuilder {
+pub fn build_command(agent: Agent, args: &[String], cwd: &Path) -> CommandBuilder {
     let (program, extra_var) = match agent {
         Agent::Claude => ("claude".to_string(), Some("AGENTZ_CLAUDE_ARGS")),
         Agent::Codex => ("codex".to_string(), Some("AGENTZ_CODEX_ARGS")),

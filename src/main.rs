@@ -1,4 +1,6 @@
 mod app;
+#[cfg(test)]
+mod compat_tests;
 mod procs;
 mod project;
 mod sessions;
