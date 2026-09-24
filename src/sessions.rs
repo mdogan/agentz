@@ -178,8 +178,9 @@ fn parse(path: &Path, agent: Agent, prev: Parsed) -> Parsed {
     match agent {
         Agent::Claude => parse_claude(path, prev),
         Agent::Codex => {
-            // Codex metadata sits at the top of the file and never changes.
-            if prev.offset > 0 {
+            // A scan can see the metadata before Codex writes the first
+            // prompt. Re-read the file until we have a title.
+            if prev.skip || prev.first_prompt.is_some() {
                 prev
             } else {
                 parse_codex(path)
@@ -398,4 +399,39 @@ fn codex_thread_names(path: &Path) -> HashMap<String, String> {
         }
     }
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn codex_session_appears_after_prompt_is_appended() {
+        let path =
+            std::env::temp_dir().join(format!("agentz-codex-scan-{}.jsonl", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"{"type":"session_meta","payload":{"id":"test-id","cwd":"/tmp","source":"cli"}}
+"#,
+        )
+        .unwrap();
+
+        let mut scanner = Scanner::default();
+        assert!(scanner.visit(&path, Agent::Codex).is_none());
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(
+            br#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first prompt"}]}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+
+        let session = scanner.visit(&path, Agent::Codex).unwrap();
+        assert_eq!(session.id, "test-id");
+        assert_eq!(session.title, "first prompt");
+        assert_eq!(session.cwd, Path::new("/tmp"));
+        fs::remove_file(path).unwrap();
+    }
 }
