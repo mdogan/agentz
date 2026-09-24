@@ -21,6 +21,8 @@ use crate::sessions::{Agent, Session, SessionKey};
 use crate::term::Term;
 
 const SIDEBAR_WIDTH: u16 = 42;
+const MIN_SIDEBAR_WIDTH: u16 = 20;
+const MIN_PANE_WIDTH: u16 = 20;
 const CLAUDE_COLOR: Color = Color::Rgb(217, 119, 87);
 const CODEX_COLOR: Color = Color::Rgb(120, 160, 255);
 const SHELL_COLOR: Color = Color::Rgb(190, 190, 200);
@@ -83,6 +85,10 @@ pub struct App {
     filtering: bool,
     status: Option<(String, Instant)>,
     confirm_quit: bool,
+    /// Sidebar width the user picked by dragging the separator.
+    sidebar_width: u16,
+    /// True while the user drags the separator.
+    resizing: bool,
     sidebar: Rect,
     list_area: Rect,
     pane: Rect,
@@ -120,6 +126,8 @@ impl App {
             filtering: false,
             status: None,
             confirm_quit: false,
+            sidebar_width: SIDEBAR_WIDTH,
+            resizing: false,
             sidebar: Rect::default(),
             list_area: Rect::default(),
             pane: Rect::default(),
@@ -612,7 +620,31 @@ impl App {
     }
 
     fn on_mouse(&mut self, m: MouseEvent) {
+        if self.resizing {
+            match m.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let total = self.pane.right().saturating_sub(self.sidebar.x);
+                    let max = total.saturating_sub(MIN_PANE_WIDTH).max(MIN_SIDEBAR_WIDTH);
+                    self.sidebar_width = (m.column + 1)
+                        .saturating_sub(self.sidebar.x)
+                        .clamp(MIN_SIDEBAR_WIDTH, max);
+                }
+                MouseEventKind::Up(_) => self.resizing = false,
+                _ => {}
+            }
+            return;
+        }
         let pos = Position::new(m.column, m.row);
+        let separator = self.sidebar.x + self.sidebar.width.saturating_sub(1);
+        if self.sidebar.contains(pos)
+            && m.column == separator
+            && m.kind == MouseEventKind::Down(MouseButton::Left)
+        {
+            // Start from the width on screen, which may be clamped.
+            self.sidebar_width = self.sidebar.width;
+            self.resizing = true;
+            return;
+        }
         if self.list_area.contains(pos) {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -651,7 +683,11 @@ impl App {
 
     pub fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
-        let side_w = SIDEBAR_WIDTH.min(area.width / 2);
+        let side_w = self
+            .sidebar_width
+            .min(area.width.saturating_sub(MIN_PANE_WIDTH))
+            .max(MIN_SIDEBAR_WIDTH)
+            .min(area.width);
         self.sidebar = Rect::new(area.x, area.y, side_w, area.height);
         self.pane = Rect::new(area.x + side_w, area.y, area.width - side_w, area.height);
 
@@ -674,7 +710,7 @@ impl App {
         let inner_w = area.width - 1; // last column is the separator
 
         // Separator line.
-        let sep_style = Style::default().fg(if focused {
+        let sep_style = Style::default().fg(if focused || self.resizing {
             ACCENT
         } else {
             Color::Rgb(60, 60, 70)
