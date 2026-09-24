@@ -58,6 +58,7 @@ fn main() -> Result<()> {
     }
 
     let mut terminal = ratatui::init();
+    term::query_outer_colors();
     let kitty = matches!(supports_keyboard_enhancement(), Ok(true));
     execute!(stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     if kitty {

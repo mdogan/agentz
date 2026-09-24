@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{
@@ -18,16 +18,70 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::AppEvent;
 use crate::project::Project;
 use crate::sessions::{Agent, Session, SessionKey};
-use crate::term::Term;
+use crate::term::{self, Term};
 
 const SIDEBAR_WIDTH: u16 = 42;
 const MIN_SIDEBAR_WIDTH: u16 = 20;
 const MIN_PANE_WIDTH: u16 = 20;
-const CLAUDE_COLOR: Color = Color::Rgb(217, 119, 87);
-const CODEX_COLOR: Color = Color::Rgb(120, 160, 255);
-const SHELL_COLOR: Color = Color::Rgb(190, 190, 200);
-const ACCENT: Color = Color::Rgb(120, 200, 140);
-const MUTED: Color = Color::Rgb(120, 120, 130);
+/// The UI colors. The light set is used when the outer terminal reports a
+/// light background.
+struct Theme {
+    claude: Color,
+    codex: Color,
+    shell: Color,
+    accent: Color,
+    muted: Color,
+    /// Status messages and the busy spinner.
+    warn: Color,
+    separator: Color,
+    folder: Color,
+    cursor_bg: Color,
+    cursor_bg_unfocused: Color,
+    header_bg: Color,
+    header_bg_unfocused: Color,
+}
+
+const DARK: Theme = Theme {
+    claude: Color::Rgb(217, 119, 87),
+    codex: Color::Rgb(120, 160, 255),
+    shell: Color::Rgb(190, 190, 200),
+    accent: Color::Rgb(120, 200, 140),
+    muted: Color::Rgb(120, 120, 130),
+    warn: Color::Yellow,
+    separator: Color::Rgb(60, 60, 70),
+    folder: Color::Rgb(160, 160, 175),
+    cursor_bg: Color::Rgb(45, 50, 65),
+    cursor_bg_unfocused: Color::Rgb(35, 37, 45),
+    header_bg: Color::Rgb(40, 44, 58),
+    header_bg_unfocused: Color::Rgb(30, 30, 36),
+};
+
+const LIGHT: Theme = Theme {
+    claude: Color::Rgb(190, 85, 50),
+    codex: Color::Rgb(45, 95, 215),
+    shell: Color::Rgb(85, 85, 100),
+    accent: Color::Rgb(25, 135, 65),
+    muted: Color::Rgb(115, 115, 125),
+    warn: Color::Rgb(165, 105, 0),
+    separator: Color::Rgb(200, 200, 210),
+    folder: Color::Rgb(80, 80, 95),
+    cursor_bg: Color::Rgb(215, 222, 240),
+    cursor_bg_unfocused: Color::Rgb(230, 232, 238),
+    header_bg: Color::Rgb(218, 223, 238),
+    header_bg_unfocused: Color::Rgb(234, 234, 238),
+};
+
+fn theme() -> &'static Theme {
+    static THEME: OnceLock<&Theme> = OnceLock::new();
+    THEME.get_or_init(|| {
+        if term::light_background() {
+            &LIGHT
+        } else {
+            &DARK
+        }
+    })
+}
+
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -711,9 +765,9 @@ impl App {
 
         // Separator line.
         let sep_style = Style::default().fg(if focused || self.resizing {
-            ACCENT
+            theme().accent
         } else {
-            Color::Rgb(60, 60, 70)
+            theme().separator
         });
         for y in area.y..area.y + area.height {
             if let Some(c) = f.buffer_mut().cell_mut((area.x + inner_w, y)) {
@@ -728,14 +782,18 @@ impl App {
             Line::from(vec![
                 Span::styled(
                     " / ",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme().accent)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(format!("{}{cursor}", self.filter)),
             ])
         } else {
             let n_run = self.running.iter().filter(|r| r.term.is_running()).count();
             let title_style = if focused {
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme().accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().add_modifier(Modifier::BOLD)
             };
@@ -743,7 +801,7 @@ impl App {
                 Span::styled(" agentz", title_style),
                 Span::styled(
                     format!("  {} sessions · {n_run} running", self.rows.len()),
-                    Style::default().fg(MUTED),
+                    Style::default().fg(theme().muted),
                 ),
             ])
         };
@@ -759,7 +817,7 @@ impl App {
         let footer_lines = if let Some((msg, _)) = status {
             vec![Line::styled(
                 format!(" {msg}"),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme().warn),
             )]
         } else if focused {
             vec![
@@ -833,7 +891,7 @@ impl App {
                 " No sessions"
             };
             f.render_widget(
-                Paragraph::new(Line::styled(msg, Style::default().fg(MUTED))),
+                Paragraph::new(Line::styled(msg, Style::default().fg(theme().muted))),
                 self.list_area,
             );
             return;
@@ -858,13 +916,13 @@ impl App {
                 .find(|r| r.is(&row.key) && r.term.is_running());
 
             let bg = match (is_cursor, focused) {
-                (true, true) => Color::Rgb(45, 50, 65),
-                (true, false) => Color::Rgb(35, 37, 45),
+                (true, true) => theme().cursor_bg,
+                (true, false) => theme().cursor_bg_unfocused,
                 _ => Color::Reset,
             };
             let (icon, icon_color) = agent_icon(row.key.0);
             let bar = if is_current {
-                Span::styled("▌", Style::default().fg(ACCENT))
+                Span::styled("▌", Style::default().fg(theme().accent))
             } else {
                 Span::raw(" ")
             };
@@ -873,9 +931,9 @@ impl App {
             let marker = match running {
                 Some(r) if r.term.is_busy() => Span::styled(
                     SPINNER[tick % SPINNER.len()],
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(theme().warn),
                 ),
-                Some(_) => Span::styled("●", Style::default().fg(ACCENT)),
+                Some(_) => Span::styled("●", Style::default().fg(theme().accent)),
                 None => Span::raw(" "),
             };
             let title_w = (inner_w as usize).saturating_sub(6);
@@ -905,9 +963,9 @@ impl App {
                 Span::raw("  "),
                 Span::styled(
                     truncate(&project, proj_w),
-                    Style::default().fg(Color::Rgb(160, 160, 175)),
+                    Style::default().fg(theme().folder),
                 ),
-                Span::styled(format!(" · {meta}"), Style::default().fg(MUTED)),
+                Span::styled(format!(" · {meta}"), Style::default().fg(theme().muted)),
             ]);
 
             f.render_widget(
@@ -930,16 +988,19 @@ impl App {
                 Line::raw(""),
                 Line::styled(
                     "  Pick a session on the left to resume it.",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(theme().muted),
                 ),
                 Line::styled(
                     "  Press n for a new Claude session, N for a new Codex session.",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(theme().muted),
                 ),
-                Line::styled("  Press t for a plain shell.", Style::default().fg(MUTED)),
+                Line::styled(
+                    "  Press t for a plain shell.",
+                    Style::default().fg(theme().muted),
+                ),
                 Line::styled(
                     "  Ctrl+\\ switches between the list and the agent.",
-                    Style::default().fg(MUTED),
+                    Style::default().fg(theme().muted),
                 ),
             ];
             f.render_widget(Paragraph::new(lines), body);
@@ -974,14 +1035,16 @@ impl App {
         );
         let focused = self.focus == Focus::Terminal;
         let header_style = if focused {
-            Style::default().bg(Color::Rgb(40, 44, 58))
+            Style::default().bg(theme().header_bg)
         } else {
-            Style::default().bg(Color::Rgb(30, 30, 36)).fg(MUTED)
+            Style::default()
+                .bg(theme().header_bg_unfocused)
+                .fg(theme().muted)
         };
         let line = Line::from(vec![
             Span::styled(
                 pad(&header_text, left_w),
-                Style::default().fg(if focused { icon_color } else { MUTED }),
+                Style::default().fg(if focused { icon_color } else { theme().muted }),
             ),
             Span::raw(" "),
             state,
@@ -1076,19 +1139,22 @@ pub fn build_command(agent: Agent, args: &[String], cwd: &Path) -> CommandBuilde
 
 fn agent_icon(agent: Agent) -> (&'static str, Color) {
     match agent {
-        Agent::Claude => ("✻", CLAUDE_COLOR),
-        Agent::Codex => ("◆", CODEX_COLOR),
-        Agent::Shell => ("❯", SHELL_COLOR),
+        Agent::Claude => ("✻", theme().claude),
+        Agent::Codex => ("◆", theme().codex),
+        Agent::Shell => ("❯", theme().shell),
     }
 }
 
 fn hint_line(items: &[(&str, &str)]) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
     for (k, label) in items {
-        spans.push(Span::styled(k.to_string(), Style::default().fg(ACCENT)));
+        spans.push(Span::styled(
+            k.to_string(),
+            Style::default().fg(theme().accent),
+        ));
         spans.push(Span::styled(
             format!(" {label}  "),
-            Style::default().fg(MUTED),
+            Style::default().fg(theme().muted),
         ));
     }
     Line::from(spans)

@@ -4,8 +4,8 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -53,6 +53,141 @@ impl vt100::Callbacks for Callbacks {
             _ => {}
         }
     }
+
+    /// OSC 10/11 ask for the default foreground/background color. Programs
+    /// use the answer to pick a light or dark theme, and assume dark if we
+    /// stay silent. We answer with the outer terminal's colors. Several `?`
+    /// ask for the next colors too: `10;?;?` means 10 and 11.
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        let Some(first) = params
+            .first()
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|s| s.parse::<u8>().ok())
+        else {
+            return;
+        };
+        let Some(colors) = OUTER_COLORS.get() else {
+            return;
+        };
+        for (i, p) in params[1..].iter().enumerate() {
+            let n = first.saturating_add(i as u8);
+            let value = match n {
+                10 => colors.fg.as_deref(),
+                11 => colors.bg.as_deref(),
+                _ => None,
+            };
+            let (b"?", Some(value)) = (*p, value) else {
+                break;
+            };
+            self.replies
+                .extend_from_slice(format!("\x1b]{n};{value}\x1b\\").as_bytes());
+        }
+    }
+}
+
+/// The outer terminal's default colors as it reported them, e.g.
+/// `rgb:ffff/ffff/ffff`.
+#[derive(Default)]
+pub struct OuterColors {
+    pub fg: Option<String>,
+    pub bg: Option<String>,
+}
+
+pub static OUTER_COLORS: OnceLock<OuterColors> = OnceLock::new();
+
+/// True if the outer terminal reported a light background.
+pub fn light_background() -> bool {
+    OUTER_COLORS
+        .get()
+        .and_then(|c| c.bg.as_deref())
+        .and_then(parse_rgb)
+        .is_some_and(|(r, g, b)| 0.299 * r + 0.587 * g + 0.114 * b > 0.5)
+}
+
+/// `rgb:ffff/fcfc/f0f0` as 0..1 values. Each part has 1 to 4 hex digits.
+fn parse_rgb(s: &str) -> Option<(f32, f32, f32)> {
+    let mut parts = s.strip_prefix("rgb:")?.split('/').map(|p| {
+        let v = u32::from_str_radix(p, 16).ok()?;
+        (1..=4)
+            .contains(&p.len())
+            .then(|| v as f32 / ((1u32 << (4 * p.len())) - 1) as f32)
+    });
+    let rgb = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some(rgb)
+}
+
+/// Asks the outer terminal for its default colors and keeps them in
+/// `OUTER_COLORS`. Must run in raw mode, before anything else reads input.
+/// Every terminal answers the DA1 query at the end, so its reply tells us
+/// to stop waiting, even when the terminal does not know OSC 10/11.
+#[cfg(unix)]
+pub fn query_outer_colors() {
+    use std::os::fd::AsRawFd;
+
+    let fd = std::io::stdin().as_raw_fd();
+    if unsafe { libc::isatty(fd) } != 1 {
+        return;
+    }
+    let mut out = std::io::stdout();
+    if out
+        .write_all(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[c")
+        .and_then(|_| out.flush())
+        .is_err()
+    {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut buf = Vec::new();
+    while !has_da1_reply(&buf) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if left.is_zero() || unsafe { libc::poll(&mut pfd, 1, left.as_millis() as i32) } <= 0 {
+            break;
+        }
+        let mut chunk = [0u8; 1024];
+        let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if n <= 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n as usize]);
+    }
+    let _ = OUTER_COLORS.set(OuterColors {
+        fg: osc_color_reply(&buf, 10),
+        bg: osc_color_reply(&buf, 11),
+    });
+}
+
+#[cfg(not(unix))]
+pub fn query_outer_colors() {}
+
+/// True if `buf` holds a DA1 reply like `\x1b[?62;22c`.
+fn has_da1_reply(buf: &[u8]) -> bool {
+    buf.windows(3)
+        .enumerate()
+        .filter(|(_, w)| *w == b"\x1b[?")
+        .any(|(i, _)| {
+            buf[i + 3..]
+                .iter()
+                .find(|b| !(b.is_ascii_digit() || **b == b';'))
+                == Some(&b'c')
+        })
+}
+
+/// The color in a reply like `\x1b]11;rgb:ffff/ffff/ffff\x1b\\`.
+fn osc_color_reply(buf: &[u8], n: u8) -> Option<String> {
+    let prefix = format!("\x1b]{n};");
+    let start = buf
+        .windows(prefix.len())
+        .position(|w| w == prefix.as_bytes())?
+        + prefix.len();
+    let rest = &buf[start..];
+    let end = rest.iter().position(|&b| b == 0x07 || b == 0x1b)?;
+    let value = std::str::from_utf8(&rest[..end]).ok()?;
+    value.starts_with("rgb:").then(|| value.to_string())
 }
 
 pub struct Term {
@@ -519,5 +654,54 @@ fn encode_mouse(
                 clamp(y),
             ])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_outer_terminal_replies() {
+        let buf = b"\x1b]10;rgb:1a1a/1a1a/1a1a\x07\x1b]11;rgb:ffff/fcfc/f0f0\x1b\\\x1b[?62;22c";
+        assert!(has_da1_reply(buf));
+        assert_eq!(
+            osc_color_reply(buf, 10).as_deref(),
+            Some("rgb:1a1a/1a1a/1a1a")
+        );
+        assert_eq!(
+            osc_color_reply(buf, 11).as_deref(),
+            Some("rgb:ffff/fcfc/f0f0")
+        );
+        // A terminal that only knows DA1.
+        assert!(has_da1_reply(b"\x1b[?1;2c"));
+        assert_eq!(osc_color_reply(b"\x1b[?1;2c", 11), None);
+        assert!(!has_da1_reply(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"));
+    }
+
+    #[test]
+    fn parses_rgb() {
+        assert_eq!(parse_rgb("rgb:ffff/0000/ffff"), Some((1.0, 0.0, 1.0)));
+        assert_eq!(parse_rgb("rgb:ff/80/00").map(|c| c.1 > 0.5), Some(true));
+        assert_eq!(parse_rgb("rgb:f/f/f"), Some((1.0, 1.0, 1.0)));
+        assert_eq!(parse_rgb("rgb:ffff/ffff"), None);
+        assert_eq!(parse_rgb("rgb:fffff/0/0"), None);
+        assert_eq!(parse_rgb("#ffffff"), None);
+    }
+
+    #[test]
+    fn answers_color_queries() {
+        let _ = OUTER_COLORS.set(OuterColors {
+            fg: Some("rgb:1a1a/1a1a/1a1a".into()),
+            bg: Some("rgb:ffff/fcfc/f0f0".into()),
+        });
+        let mut p = vt100::Parser::new_with_callbacks(24, 80, 0, Callbacks::default());
+        p.process(b"\x1b]11;?\x1b\\\x1b]10;?;?\x07\x1b]12;?\x07");
+        assert_eq!(
+            String::from_utf8(std::mem::take(&mut p.callbacks_mut().replies)).unwrap(),
+            "\x1b]11;rgb:ffff/fcfc/f0f0\x1b\\\
+             \x1b]10;rgb:1a1a/1a1a/1a1a\x1b\\\
+             \x1b]11;rgb:ffff/fcfc/f0f0\x1b\\"
+        );
     }
 }
