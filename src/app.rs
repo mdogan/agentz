@@ -19,6 +19,7 @@ use crate::AppEvent;
 use crate::procs;
 use crate::project::{self, Project};
 use crate::sessions::{Agent, Session, SessionKey};
+use crate::state::{SavedState, SavedTab};
 use crate::term::{self, Term};
 use crate::usage::{self, Limits, Usage};
 
@@ -89,7 +90,7 @@ fn theme() -> &'static Theme {
 
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Focus {
     Sidebar,
     Terminal,
@@ -102,6 +103,8 @@ struct Running {
     cwd: PathBuf,
     spawned_at: SystemTime,
     fallback_title: String,
+    /// This process was started by resuming an existing transcript.
+    resumed: bool,
     /// A shell we opened by ourselves after an agent quit, and that the user
     /// has not typed into yet. It is closed when the user switches away.
     placeholder: bool,
@@ -220,6 +223,97 @@ impl App {
             started: Instant::now(),
             quit: false,
         }
+    }
+
+    /// Save only tabs that still have a process. The PTY screen and shell
+    /// command history are transient; agents continue from their transcripts.
+    pub fn saved_state(&self) -> SavedState {
+        let mut state = SavedState {
+            sidebar_focused: self.focus == Focus::Sidebar,
+            sidebar_width: self.sidebar_width,
+            ..SavedState::default()
+        };
+        for r in self.running.iter().filter(|r| r.term.is_running()) {
+            let linked = r
+                .linked
+                .as_ref()
+                .and_then(|key| self.sessions.iter().find(|s| s.key() == *key));
+            let session = linked.or_else(|| self.sessions.iter().find(|s| s.key() == r.key));
+            let agent = linked.map_or(r.key.0, |s| s.agent);
+            let tab = SavedTab {
+                agent,
+                id: session
+                    .map(|s| s.id.clone())
+                    .or_else(|| (r.resumed && r.key.0 != Agent::Shell).then(|| r.key.1.clone())),
+                cwd: linked.map_or_else(
+                    || {
+                        if agent == Agent::Shell {
+                            r.term
+                                .pid
+                                .and_then(procs::working_dir)
+                                .unwrap_or_else(|| r.cwd.clone())
+                        } else {
+                            r.cwd.clone()
+                        }
+                    },
+                    |s| s.cwd.clone(),
+                ),
+                title: session.map_or_else(
+                    || {
+                        if agent == Agent::Shell {
+                            shell_name()
+                        } else {
+                            r.fallback_title.clone()
+                        }
+                    },
+                    |s| s.title.clone(),
+                ),
+            };
+            if self.current.as_ref() == Some(&r.key) {
+                state.active = Some(state.tabs.len());
+            }
+            state.tabs.push(tab);
+        }
+        state
+    }
+
+    /// Recreate saved tabs in their original order, then show the tab that
+    /// was selected on quit. Return tabs that could not be opened so the
+    /// next launch can try them again.
+    pub fn restore(&mut self, saved: SavedState) -> SavedState {
+        self.sidebar_width = saved.sidebar_width.max(MIN_SIDEBAR_WIDTH);
+        let mut selected = None;
+        let mut failed = SavedState {
+            sidebar_focused: saved.sidebar_focused,
+            sidebar_width: saved.sidebar_width,
+            ..SavedState::default()
+        };
+        for (i, tab) in saved.tabs.into_iter().enumerate() {
+            if self.start(
+                tab.agent,
+                tab.id.clone(),
+                tab.cwd.clone(),
+                tab.title.clone(),
+            ) {
+                if saved.active == Some(i) {
+                    selected = self.current.clone();
+                }
+            } else {
+                if saved.active == Some(i) {
+                    failed.active = Some(failed.tabs.len());
+                }
+                failed.tabs.push(tab);
+            }
+        }
+        if let Some(key) = selected {
+            self.cursor_key = Some(key.clone());
+            self.current = Some(key);
+            self.rebuild_rows();
+        }
+        if saved.sidebar_focused || self.current.is_none() {
+            self.focus = Focus::Sidebar;
+        }
+        failed
     }
 
     /// Gives every terminal the output its agent printed since last time.
@@ -461,7 +555,7 @@ impl App {
         self.running.iter_mut().find(|r| &r.key == key)
     }
 
-    fn set_status(&mut self, msg: impl Into<String>) {
+    pub(crate) fn set_status(&mut self, msg: impl Into<String>) {
         self.status = Some((msg.into(), Instant::now()));
     }
 
@@ -588,6 +682,7 @@ impl App {
             self.set_status(format!("Folder no longer exists: {}", cwd.display()));
             return false;
         }
+        let resumed = resume.is_some();
         let (key, mut args): (SessionKey, Vec<String>) = match (agent, resume) {
             (Agent::Claude, Some(id)) => ((agent, id.clone()), vec!["--resume".into(), id]),
             (Agent::Claude, None) => {
@@ -639,6 +734,7 @@ impl App {
                     cwd,
                     spawned_at: SystemTime::now(),
                     fallback_title: title,
+                    resumed,
                     placeholder: false,
                     linked: None,
                     foreground: None,
@@ -1588,6 +1684,7 @@ mod tests {
             cwd: app.root.clone(),
             spawned_at: SystemTime::now(),
             fallback_title: "sh".into(),
+            resumed: false,
             placeholder: false,
             linked: None,
             foreground: None,
@@ -1634,5 +1731,53 @@ mod tests {
         app.attention();
         assert_eq!(app.rows[0].title, "sh");
         app.running[0].term.kill();
+    }
+
+    #[test]
+    fn restores_shell_tabs_and_selected_pane() {
+        let (tx, _) = channel();
+        let redraw = Arc::new(AtomicBool::new(false));
+        let mut app = App::new(tx.clone(), redraw.clone(), Arc::new(Mutex::new(Vec::new())));
+        assert!(app.start(Agent::Shell, None, PathBuf::from("/"), "first".into()));
+        assert!(app.start(Agent::Shell, None, PathBuf::from("/tmp"), "second".into()));
+        app.current = Some(app.running[0].key.clone());
+        app.focus = Focus::Sidebar;
+        app.sidebar_width = 55;
+        let mut saved = app.saved_state();
+        assert_eq!(saved.tabs.len(), 2);
+        assert_eq!(saved.active, Some(0));
+        assert_eq!(saved.tabs[0].cwd, PathBuf::from("/"));
+        assert_eq!(
+            saved.tabs[1].cwd,
+            PathBuf::from("/tmp").canonicalize().unwrap()
+        );
+        // A fast second quit must preserve the resume id even before the
+        // background scanner has found this agent's transcript.
+        app.running[0].key = (Agent::Claude, "existing".into());
+        app.running[0].resumed = true;
+        assert_eq!(app.saved_state().tabs[0].id.as_deref(), Some("existing"));
+        for r in &mut app.running {
+            r.term.kill();
+        }
+        drop(app);
+
+        let mut restored = App::new(tx, redraw, Arc::new(Mutex::new(Vec::new())));
+        let missing = std::env::temp_dir().join(format!("missing-agentz-{}", uuid::Uuid::new_v4()));
+        saved.tabs.push(SavedTab {
+            agent: Agent::Shell,
+            id: None,
+            cwd: missing.clone(),
+            title: "missing".into(),
+        });
+        let failed = restored.restore(saved);
+        assert_eq!(failed.tabs.len(), 1);
+        assert_eq!(failed.tabs[0].cwd, missing);
+        assert_eq!(restored.running.len(), 2);
+        assert_eq!(restored.current, Some(restored.running[0].key.clone()));
+        assert_eq!(restored.focus, Focus::Sidebar);
+        assert_eq!(restored.sidebar_width, 55);
+        for r in &mut restored.running {
+            r.term.kill();
+        }
     }
 }

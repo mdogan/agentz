@@ -6,6 +6,7 @@ A terminal UI that holds your Claude Code and Codex sessions in one place.
 - Clicking a session (or pressing Enter) resumes it in the right pane with the right agent.
 - Every agent runs in its own PTY. When you switch to another session, the previous agent keeps running in the background.
 - Selecting a session that is already running just switches to it. It is not restarted.
+- On a normal `q` quit, agentz saves the open tabs. The first interactive agentz launch after that restores them, including the selected tab. Agent sessions resume from their transcripts; shell tabs reopen in their last folder. Running shell commands, terminal output, and scrollback are not saved.
 
 ```
 make install   # cargo install --path .

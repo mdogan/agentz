@@ -4,6 +4,7 @@ mod compat_tests;
 mod procs;
 mod project;
 mod sessions;
+mod state;
 mod term;
 mod usage;
 
@@ -189,6 +190,16 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
     }
 
     let mut app = App::new(tx, redraw.clone(), shell_pids);
+    match state::take() {
+        Ok(Some(saved)) => {
+            let failed = app.restore(saved);
+            if let Err(err) = state::save(failed) {
+                app.set_status(format!("Could not keep unopened tabs: {err:#}"));
+            }
+        }
+        Ok(None) => {}
+        Err(err) => app.set_status(format!("Could not restore tabs: {err:#}")),
+    }
     let mut sync_since: Option<Instant> = None;
     terminal.draw(|f| app.draw(f))?;
 
@@ -203,6 +214,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             app.handle(ev);
         }
         if app.quit {
+            state::save(app.saved_state())?;
             break;
         }
         // Clear the flag before pumping: output that comes in after this
