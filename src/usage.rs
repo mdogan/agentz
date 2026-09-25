@@ -3,6 +3,8 @@
 //! Claude Code: sends `rate_limits` to its status line command. agentz
 //!              starts Claude with its own status line (`agentz statusline`),
 //!              which saves them to a file and then runs the user's one.
+//!              Users can also install it in Claude's user settings, so
+//!              manually launched sessions report their limits too.
 //! Codex:       writes `rate_limits` into the rollout file after each turn.
 
 use std::collections::HashMap;
@@ -12,12 +14,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::sessions::claude_dir;
 
 /// Tells `agentz statusline` which status line command the user set up.
 pub const USER_STATUS_LINE_VAR: &str = "AGENTZ_USER_STATUS_LINE";
+const REGISTRATION_FILE: &str = "agentz-statusline.json";
+
+#[derive(Serialize, Deserialize)]
+struct Registration {
+    installed_command: String,
+    installed_line: Value,
+    original: Option<Value>,
+    settings_existed: bool,
+}
 
 /// Codex rollout files can be large; the last turn is near the end.
 const CODEX_TAIL: u64 = 1024 * 1024;
@@ -101,14 +113,18 @@ fn parse_claude(v: &Value) -> Option<Usage> {
 /// `AGENTZ_USER_STATUS_LINE`. Settings from `--settings` win over the
 /// user's, so their status line has to be run by ours.
 pub fn claude_settings(cwd: &Path) -> Option<(String, Option<String>)> {
-    let exe = std::env::current_exe().ok()?;
-    let ours = format!("{} statusline", shell_quote(&exe.to_string_lossy()));
+    claude_settings_for(cwd, &claude_dir()?, &std::env::current_exe().ok()?)
+}
+
+fn claude_settings_for(
+    cwd: &Path,
+    config_dir: &Path,
+    exe: &Path,
+) -> Option<(String, Option<String>)> {
+    let ours = status_line_command(exe);
 
     // Later files win, like in Claude Code, so look at them first.
-    let mut files: Vec<PathBuf> = claude_dir()
-        .map(|d| d.join("settings.json"))
-        .into_iter()
-        .collect();
+    let mut files = vec![config_dir.join("settings.json")];
     files.push(cwd.join(".claude").join("settings.json"));
     files.push(cwd.join(".claude").join("settings.local.json"));
     let theirs = files
@@ -121,13 +137,212 @@ pub fn claude_settings(cwd: &Path) -> Option<(String, Option<String>)> {
 
     // Keep the rest of their settings, e.g. `padding`.
     let mut line = theirs.unwrap_or_else(|| serde_json::json!({ "type": "command" }));
-    let user_cmd = line["command"]
-        .as_str()
-        .filter(|c| !c.trim().is_empty())
-        .map(str::to_string);
+    let registration = active_registration(config_dir);
+    let user_cmd = delegate_command(&line, registration.as_ref())
+        .filter(|cmd| cmd != &ours && cmd.trim() != "agentz statusline");
     line["command"] = Value::String(ours);
     let settings = serde_json::json!({ "statusLine": line });
     Some((settings.to_string(), user_cmd))
+}
+
+fn status_line_command(exe: &Path) -> String {
+    format!("{} statusline", shell_quote(&exe.to_string_lossy()))
+}
+
+fn command(line: &Value) -> Option<String> {
+    line["command"]
+        .as_str()
+        .filter(|cmd| !cmd.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn delegate_command(line: &Value, registration: Option<&Registration>) -> Option<String> {
+    let cmd = command(line)?;
+    match registration {
+        Some(reg) if cmd == reg.installed_command => reg.original.as_ref().and_then(command),
+        _ => Some(cmd),
+    }
+}
+
+fn settings_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("settings.json")
+}
+
+fn registration_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(REGISTRATION_FILE)
+}
+
+fn read_settings(path: &Path) -> anyhow::Result<Value> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let value: Value = serde_json::from_slice(&bytes)?;
+            anyhow::ensure!(
+                value.is_object(),
+                "{} must contain a JSON object",
+                path.display()
+            );
+            Ok(value)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn read_registration(config_dir: &Path) -> anyhow::Result<Option<Registration>> {
+    match fs::read(registration_path(config_dir)) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn active_registration(config_dir: &Path) -> Option<Registration> {
+    let reg = read_registration(config_dir).ok()??;
+    let settings = read_settings(&settings_path(config_dir)).ok()?;
+    (command(&settings["statusLine"]).as_deref() == Some(reg.installed_command.as_str()))
+        .then_some(reg)
+}
+
+fn saved_status_line_command(config_dir: &Path) -> Option<String> {
+    active_registration(config_dir)?
+        .original
+        .as_ref()
+        .and_then(command)
+}
+
+/// Install or remove the Claude user setting that reports limits from every
+/// manual `claude` launch. The prior status line is saved for forwarding.
+pub fn configure_status_line(action: &str) -> anyhow::Result<()> {
+    let config_dir =
+        claude_dir().ok_or_else(|| anyhow::anyhow!("Claude config directory not found"))?;
+    match action {
+        "install" => {
+            install_status_line(&config_dir, &std::env::current_exe()?)?;
+            println!(
+                "Installed agentz status line in {}",
+                settings_path(&config_dir).display()
+            );
+        }
+        "uninstall" => {
+            uninstall_status_line(&config_dir)?;
+            println!(
+                "Restored Claude status line in {}",
+                settings_path(&config_dir).display()
+            );
+        }
+        _ => anyhow::bail!("usage: agentz statusline [install|uninstall]"),
+    }
+    Ok(())
+}
+
+fn install_status_line(config_dir: &Path, exe: &Path) -> anyhow::Result<()> {
+    let path = settings_path(config_dir);
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        anyhow::bail!("refusing to replace symlink {}", path.display());
+    }
+    let existed = path.exists();
+    let mut settings = read_settings(&path)?;
+    let previous = read_registration(config_dir)?;
+    let current = settings.get("statusLine").cloned();
+    let (original, settings_existed) = match previous {
+        Some(reg) if current.as_ref() == Some(&reg.installed_line) => {
+            (reg.original, reg.settings_existed)
+        }
+        Some(reg)
+            if current.as_ref().and_then(command).as_deref() == Some(&reg.installed_command) =>
+        {
+            anyhow::bail!("Claude statusLine changed since installation; leaving it untouched")
+        }
+        _ => (current, existed),
+    };
+    anyhow::ensure!(
+        original
+            .as_ref()
+            .is_none_or(|v| v.is_object() || v.is_null()),
+        "existing statusLine must be a JSON object"
+    );
+    let ours = status_line_command(exe);
+    anyhow::ensure!(
+        !original
+            .as_ref()
+            .and_then(command)
+            .is_some_and(|cmd| cmd == ours || cmd.trim() == "agentz statusline"),
+        "statusLine already points to agentz, but no prior status line was saved"
+    );
+    let mut line = original
+        .clone()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({ "type": "command" }));
+    line["type"] = Value::String("command".into());
+    line["command"] = Value::String(ours.clone());
+    settings["statusLine"] = line.clone();
+    let reg = Registration {
+        installed_command: ours,
+        installed_line: line,
+        original,
+        settings_existed,
+    };
+    write_json_atomic(&registration_path(config_dir), &reg)?;
+    write_json_atomic(&path, &settings)?;
+    Ok(())
+}
+
+fn uninstall_status_line(config_dir: &Path) -> anyhow::Result<()> {
+    let reg = read_registration(config_dir)?
+        .ok_or_else(|| anyhow::anyhow!("agentz status line is not installed"))?;
+    let path = settings_path(config_dir);
+    let mut settings = read_settings(&path)?;
+    anyhow::ensure!(
+        settings.get("statusLine") == Some(&reg.installed_line),
+        "Claude statusLine changed since installation; leaving it untouched"
+    );
+    match reg.original {
+        Some(line) => settings["statusLine"] = line,
+        None => {
+            settings.as_object_mut().unwrap().remove("statusLine");
+        }
+    }
+    if !reg.settings_existed && settings.as_object().is_some_and(|v| v.is_empty()) {
+        fs::remove_file(&path)?;
+    } else {
+        write_json_atomic(&path, &settings)?;
+    }
+    fs::remove_file(registration_path(config_dir))?;
+    Ok(())
+}
+
+fn write_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent"))?;
+    fs::create_dir_all(parent)?;
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        anyhow::bail!("refusing to replace symlink {}", path.display());
+    }
+    let tmp = parent.join(format!(".agentz-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        if let Ok(meta) = fs::metadata(path) {
+            fs::set_permissions(&tmp, meta.permissions())?;
+        }
+        let mut bytes = serde_json::to_vec_pretty(value)?;
+        bytes.push(b'\n');
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// `agentz statusline`: Claude runs this with its status as JSON on stdin.
@@ -150,6 +365,11 @@ pub fn status_line() -> anyhow::Result<()> {
     let Some(cmd) = std::env::var(USER_STATUS_LINE_VAR)
         .ok()
         .filter(|c| !c.is_empty())
+        .or_else(|| {
+            let dir = claude_dir()?;
+            saved_status_line_command(&dir)
+        })
+        .filter(|cmd| cmd.trim() != "agentz statusline")
     else {
         return Ok(());
     };
@@ -318,5 +538,73 @@ mod tests {
         // The window started over.
         assert_eq!(usage.session.unwrap().left(1790011725), 100.0);
         assert!(parse_claude(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn installing_and_removing_preserves_claude_settings_and_status_line() {
+        let dir = std::env::temp_dir().join(format!("agentz-statusline-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let original = serde_json::json!({
+            "permissions": { "allow": ["Read"] },
+            "statusLine": { "type": "command", "command": "printf own", "padding": 2 }
+        });
+        fs::write(settings_path(&dir), original.to_string()).unwrap();
+        let exe = Path::new("/tmp/agentz's bin");
+        install_status_line(&dir, exe).unwrap();
+        let installed = read_settings(&settings_path(&dir)).unwrap();
+        assert_eq!(installed["permissions"], original["permissions"]);
+        assert_eq!(installed["statusLine"]["padding"], 2);
+        assert_eq!(
+            active_registration(&dir).unwrap().original,
+            Some(original["statusLine"].clone())
+        );
+        assert_eq!(
+            saved_status_line_command(&dir).as_deref(),
+            Some("printf own")
+        );
+        let (_, delegate) = claude_settings_for(&dir, &dir, exe).unwrap();
+        assert_eq!(delegate.as_deref(), Some("printf own"));
+        let project = dir.join("project");
+        fs::create_dir_all(project.join(".claude")).unwrap();
+        fs::write(
+            project.join(".claude/settings.json"),
+            r#"{"statusLine":{"type":"command","command":"printf project"}}"#,
+        )
+        .unwrap();
+        let (_, project_delegate) = claude_settings_for(&project, &dir, exe).unwrap();
+        assert_eq!(project_delegate.as_deref(), Some("printf project"));
+
+        // Reinstalling after the executable moves must keep the real original.
+        install_status_line(&dir, Path::new("/tmp/new-agentz")).unwrap();
+        assert_eq!(
+            active_registration(&dir).unwrap().original,
+            Some(original["statusLine"].clone())
+        );
+        uninstall_status_line(&dir).unwrap();
+        assert_eq!(read_settings(&settings_path(&dir)).unwrap(), original);
+        assert!(!registration_path(&dir).exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn uninstall_keeps_a_status_line_changed_after_install() {
+        let dir = std::env::temp_dir().join(format!("agentz-statusline-{}", uuid::Uuid::new_v4()));
+        install_status_line(&dir, Path::new("/tmp/agentz")).unwrap();
+        assert!(settings_path(&dir).exists());
+        assert!(saved_status_line_command(&dir).is_none());
+        let replacement = serde_json::json!({ "statusLine": { "type": "command", "command": status_line_command(Path::new("/tmp/agentz")), "padding": 3 } });
+        write_json_atomic(&settings_path(&dir), &replacement).unwrap();
+        assert!(uninstall_status_line(&dir).is_err());
+        assert_eq!(read_settings(&settings_path(&dir)).unwrap(), replacement);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn uninstall_removes_settings_file_that_did_not_exist_before() {
+        let dir = std::env::temp_dir().join(format!("agentz-statusline-{}", uuid::Uuid::new_v4()));
+        install_status_line(&dir, Path::new("/tmp/agentz")).unwrap();
+        uninstall_status_line(&dir).unwrap();
+        assert!(!settings_path(&dir).exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -45,6 +45,9 @@ const SYNC_WAIT: Duration = Duration::from_millis(50);
 
 fn main() -> Result<()> {
     if std::env::args().nth(1).as_deref() == Some("statusline") {
+        if let Some(action) = std::env::args().nth(2) {
+            return usage::configure_status_line(&action);
+        }
         return usage::status_line();
     }
     if std::env::args().nth(1).as_deref() == Some("--list") {

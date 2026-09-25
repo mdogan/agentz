@@ -461,15 +461,6 @@ impl App {
         self.running.iter_mut().find(|r| &r.key == key)
     }
 
-    /// True if `agent` runs in one of our terminals, on its own or started
-    /// by hand in a shell.
-    fn agent_running(&self, agent: Agent) -> bool {
-        self.running.iter().any(|r| {
-            r.term.is_running()
-                && (r.key.0 == agent || r.linked.as_ref().is_some_and(|k| k.0 == agent))
-        })
-    }
-
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status = Some((msg.into(), Instant::now()));
     }
@@ -1011,17 +1002,10 @@ impl App {
         };
         f.render_widget(Paragraph::new(header_line), header);
 
-        // Footer: what is left of the rate limits of each running agent,
-        // then a status message or key hints, each below a line.
+        // Footer: the available rate limits, then a status message or key
+        // hints, each below a line.
         let now = usage::now();
-        let usage_lines: Vec<Line> = [
-            (Agent::Claude, self.limits.claude),
-            (Agent::Codex, self.limits.codex),
-        ]
-        .into_iter()
-        .filter(|(agent, _)| self.agent_running(*agent))
-        .filter_map(|(agent, u)| Some(usage_line(agent, &u?, now, inner_w as usize)))
-        .collect();
+        let usage_lines = usage_lines(self.limits, now, inner_w as usize);
         let hints_h = 3;
         let hints_area = Rect::new(area.x, area.y + area.height - hints_h, inner_w, hints_h);
         let mut footer_y = hints_area.y;
@@ -1412,6 +1396,15 @@ fn hint_line(items: &[(&str, &str)]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Show every provider whose limits have been reported, even if no session
+/// for that provider is currently running in agentz.
+fn usage_lines(limits: Limits, now: u64, max: usize) -> Vec<Line<'static>> {
+    [(Agent::Claude, limits.claude), (Agent::Codex, limits.codex)]
+        .into_iter()
+        .filter_map(|(agent, usage)| Some(usage_line(agent, &usage?, now, max)))
+        .collect()
+}
+
 /// E.g. ` ✻ 58% left · resets 2h10m · week 88%`: the 5-hour window first,
 /// then the weekly one. Drops the reset time if it does not fit in `max`.
 fn usage_line(agent: Agent, u: &Usage, now: u64, max: usize) -> Line<'static> {
@@ -1555,6 +1548,28 @@ mod tests {
             text(&usage_line(Agent::Codex, &week_only, now, 41)),
             " ◆ week 88% left · resets 3d0h"
         );
+    }
+
+    #[test]
+    fn usage_lines_show_both_available_providers() {
+        let usage = Usage {
+            session: Some(Window {
+                used: 25.0,
+                resets_at: 1_000_000,
+            }),
+            week: None,
+        };
+        let lines = usage_lines(
+            Limits {
+                claude: Some(usage),
+                codex: Some(usage),
+            },
+            0,
+            41,
+        );
+        assert_eq!(lines.len(), 2);
+        assert!(text(&lines[0]).starts_with(" ✻ 75% left"));
+        assert!(text(&lines[1]).starts_with(" ◆ 75% left"));
     }
 
     #[test]

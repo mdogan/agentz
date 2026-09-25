@@ -56,7 +56,7 @@ agentz knows an agent is working because the agent says so:
 
 ## Rate limits
 
-While a Claude or Codex agent is running, the bottom of the sidebar shows how much of your plan's limits is left, one line per agent:
+The bottom of the sidebar shows the last reported limits for Claude and Codex, one line per agent when data is available. A session does not need to be running in agentz:
 
 ```
  ✻ 58% left · resets 2h10m · week 88%
@@ -66,7 +66,13 @@ While a Claude or Codex agent is running, the bottom of the sidebar shows how mu
 The first number is the 5-hour window and when it starts over. The second is the weekly window. The numbers turn yellow below 20%.
 
 - Codex writes its limits into the rollout file after each turn. agentz reads the newest one.
-- Claude only gives its limits to its status line command. So agentz starts `claude` with `--settings` that sets the status line to `agentz statusline`. That command saves the limits to `~/Library/Caches/agentz/claude-rate-limits.json` (`~/.cache/agentz` on Linux), then runs your own status line command with the same input, if you have one in `~/.claude/settings.json` or the project's `.claude/settings.json` / `settings.local.json`. The limits are only there with a Claude subscription, and only after Claude's first reply. A `claude` you start by hand in a shell tab does not update them.
+- Claude gives its limits to its status line command after the first reply (with a Claude subscription). Agentz starts its own Claude sessions with `--settings` to run `agentz statusline`. To collect limits from a `claude` you start by hand, install the status line once:
+
+  ```sh
+  agentz statusline install
+  ```
+
+  This adds the command to your Claude user settings (`$CLAUDE_CONFIG_DIR/settings.json` or `~/.claude/settings.json`). Agentz saves any existing status line in `agentz-statusline.json` in that directory and runs it after recording limits. Manual launches in shell panels and other terminals then update the limits. Run `agentz statusline uninstall` to restore the earlier setting. A project status line can override the user setting; agentz-started sessions still use `--settings`. Limits are saved in `~/Library/Caches/agentz/claude-rate-limits.json` (`~/.cache/agentz` on Linux).
 
 A shell tab follows `cd`: its folder in the sidebar, and the folder `t` opens a new shell in, is the one the shell reports (OSC 7). fish does this by default; zsh and bash on macOS don't, so their tabs keep the folder they started in.
 
