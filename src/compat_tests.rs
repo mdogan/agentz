@@ -1,6 +1,6 @@
 //! Tests against the real `claude` and `codex` CLIs. They catch updates that
 //! break what agentz relies on: CLI flags, transcript files and their format,
-//! `~/.claude/sessions/<pid>.json`, and Codex keeping its rollout file open.
+//! `~/.claude/sessions/<pid>.json`, and how a running Codex's thread is found.
 //!
 //! They start the agents in a PTY just like agentz does, type a prompt, and
 //! check what shows up on disk. Each prompt is sent to the model, so they are
@@ -135,7 +135,8 @@ fn codex_started_in_shell_is_linked() {
     // Codex creates its transcript on the first message.
     shell.submit(PROMPT);
 
-    // Found through the rollout file Codex keeps open.
+    // Found through the rollout file Codex keeps open, or on newer versions
+    // through the thread it has open in the same folder.
     let pid = shell.term.pid.expect("shell pid");
     let id = shell.wait_for("codex to be linked to the shell", || {
         agents_in_shells(&[pid])

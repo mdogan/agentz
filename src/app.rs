@@ -1717,7 +1717,7 @@ mod tests {
         assert_eq!(app.active_idle_shell(), None);
         let group = app.running[0].term.foreground_process_group().unwrap();
         let shell_pid = app.running[0].term.pid.unwrap();
-        let found = procs::shell_processes(&[shell_pid]);
+        let found = procs::shell_processes(&[shell_pid], &[], &mut procs::CodexLinks::default());
         assert_eq!(found[0].foreground, Some((group, "sleep".into())));
         app.running[0].foreground = found.into_iter().next().unwrap().foreground;
         app.attention();

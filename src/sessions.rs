@@ -40,6 +40,8 @@ pub struct Session {
     pub id: String,
     pub title: String,
     pub cwd: PathBuf,
+    /// Codex's creator (`codex-tui`, `codex_exec`, ...).
+    pub originator: Option<String>,
     pub created: SystemTime,
     pub updated: SystemTime,
 }
@@ -57,6 +59,7 @@ struct Parsed {
     offset: u64,
     id: String,
     cwd: Option<String>,
+    originator: Option<String>,
     first_prompt: Option<String>,
     ai_title: Option<String>,
     custom_title: Option<String>,
@@ -176,6 +179,7 @@ impl Scanner {
             id: p.id.clone(),
             title,
             cwd: PathBuf::from(p.cwd.clone()?),
+            originator: p.originator.clone(),
             created: entry.created,
             updated: entry.mtime,
         })
@@ -287,6 +291,7 @@ fn parse_codex(path: &Path) -> Parsed {
             }
             p.id = str_field(payload, "id").unwrap_or_default();
             p.cwd = str_field(payload, "cwd");
+            p.originator = str_field(payload, "originator");
             // Sub-agent threads (e.g. reviews) have an object as `source`.
             if !payload["source"].is_string() || payload["thread_source"] == "subagent" {
                 p.skip = true;
@@ -427,7 +432,7 @@ mod tests {
             std::env::temp_dir().join(format!("agentz-codex-scan-{}.jsonl", uuid::Uuid::new_v4()));
         fs::write(
             &path,
-            r#"{"type":"session_meta","payload":{"id":"test-id","cwd":"/tmp","source":"cli"}}
+            r#"{"type":"session_meta","payload":{"id":"test-id","cwd":"/tmp","source":"vscode","originator":"codex-tui"}}
 "#,
         )
         .unwrap();
@@ -447,6 +452,7 @@ mod tests {
         assert_eq!(session.id, "test-id");
         assert_eq!(session.title, "first prompt");
         assert_eq!(session.cwd, Path::new("/tmp"));
+        assert_eq!(session.originator.as_deref(), Some("codex-tui"));
         fs::remove_file(path).unwrap();
     }
 }

@@ -166,11 +166,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             let dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
             let mut scanner = Scanner::default();
             let mut codex = usage::CodexReader::default();
+            let mut codex_links = procs::CodexLinks::default();
             loop {
                 let sessions = scanner.scan();
                 let project = Project::detect(&dir);
                 let pids = shell_pids.lock().unwrap().clone();
-                let links = procs::shell_processes(&pids);
+                let links = procs::shell_processes(&pids, &sessions, &mut codex_links);
                 if tx
                     .send(AppEvent::Sessions(sessions, project, links))
                     .is_err()

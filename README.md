@@ -83,7 +83,7 @@ Starting a new Claude or Codex session, or resuming one from the list, replaces 
 
 When the agent you are looking at exits, agentz opens a plain shell in its folder, so you can start `claude` or `codex` by hand. If you switch to another session before typing anything in that shell, the shell is closed and removed from the list. Typing `exit` in a shell closes it, like a terminal tab.
 
-If you start `claude` or `codex` by hand in a shell, agentz links the shell to that session within a few seconds. The session's row shows as running, clicking it switches to the shell (no second copy is started), and the shell's own row is hidden until the agent exits. agentz finds the session from `~/.claude/sessions/<pid>.json` for Claude, and from the rollout file Codex keeps open for Codex (via `lsof` on macOS, `/proc` on Linux). A new Codex session is only linked after its first message, since Codex creates the file then.
+If you start `claude` or `codex` by hand in a shell, agentz links the shell to that session within a few seconds when it can identify the session. The session's row shows as running, clicking it switches to the shell (no second copy is started), and the shell's own row is hidden until the agent exits. agentz finds the session from `~/.claude/sessions/<pid>.json` for Claude, and for Codex from the rollout file it keeps open (via `lsof` on macOS, `/proc` on Linux). Since Codex 0.157 a shared `codex app-server` daemon keeps that file open instead, so agentz matches Codex processes to open threads (`~/.codex/thread-writer-locks/<id>.lock`) in the same folder. If more than one match is possible, the shell keeps its `codex` label until agentz can identify the thread. A new Codex session is only linked after its first message, since Codex creates the transcript then.
 
 Because agentz captures the mouse, use your terminal's selection modifier to select text (`Option`+drag in iTerm2, `Shift`+drag in most other terminals).
 
@@ -102,7 +102,7 @@ The list refreshes every 3 seconds. `agentz --list` prints it and exits.
 
 ## Integration tests
 
-agentz depends on details of Claude Code and Codex that can change in any update: the `--session-id`, `--resume` and `resume` arguments, where transcripts are stored and what is in them, `~/.claude/sessions/<pid>.json`, and Codex keeping its rollout file open. After updating either agent, run:
+agentz depends on details of Claude Code and Codex that can change in any update: the `--session-id`, `--resume` and `resume` arguments, where transcripts are stored and what is in them, `~/.claude/sessions/<pid>.json`, and Codex's rollout file or thread lock files. After updating either agent, run:
 
 ```
 make integration
