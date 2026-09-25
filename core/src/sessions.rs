@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
     Claude,
@@ -22,19 +22,13 @@ pub enum Agent {
     Shell,
 }
 
-impl Agent {
-    pub fn name(self) -> &'static str {
-        match self {
-            Agent::Claude => "claude",
-            Agent::Codex => "codex",
-            Agent::Shell => "shell",
-        }
-    }
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct SessionKey {
+    pub agent: Agent,
+    pub id: String,
 }
 
-pub type SessionKey = (Agent, String);
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct Session {
     pub agent: Agent,
     pub id: String,
@@ -44,12 +38,8 @@ pub struct Session {
     pub originator: Option<String>,
     pub created: SystemTime,
     pub updated: SystemTime,
-}
-
-impl Session {
-    pub fn key(&self) -> SessionKey {
-        (self.agent, self.id.clone())
-    }
+    /// Whether `cwd` is in the project of the folder the scan was for.
+    pub in_project: bool,
 }
 
 /// What we learned from one transcript file. Claude files are parsed
@@ -79,6 +69,28 @@ pub struct Scanner {
     cache: HashMap<PathBuf, CacheEntry>,
     /// Codex rollout files from the last scan, newest first.
     codex_files: Vec<PathBuf>,
+    thread_names: ThreadNames,
+}
+
+/// Codex's `session_index.jsonl`, read again only when it changes.
+#[derive(Default)]
+struct ThreadNames {
+    /// Length and modification time when it was read.
+    stamp: Option<(u64, SystemTime)>,
+    names: HashMap<String, String>,
+}
+
+impl ThreadNames {
+    fn read(&mut self, path: &Path) -> &HashMap<String, String> {
+        let stamp = fs::metadata(path)
+            .ok()
+            .and_then(|m| Some((m.len(), m.modified().ok()?)));
+        if stamp != self.stamp {
+            self.stamp = stamp;
+            self.names = codex_thread_names(path);
+        }
+        &self.names
+    }
 }
 
 impl Scanner {
@@ -96,7 +108,9 @@ impl Scanner {
         }
 
         if let Some(home) = codex_home() {
-            let names = codex_thread_names(&home.join("session_index.jsonl"));
+            // Taken out while `visit` borrows the scanner.
+            let mut thread_names = std::mem::take(&mut self.thread_names);
+            let names = thread_names.read(&home.join("session_index.jsonl"));
             let mut files = Vec::new();
             walk_jsonl(&home.join("sessions"), &mut files);
             let mut by_mtime = Vec::new();
@@ -114,6 +128,7 @@ impl Scanner {
             }
             by_mtime.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
             self.codex_files = by_mtime.into_iter().map(|(_, p)| p).collect();
+            self.thread_names = thread_names;
         }
 
         let seen: std::collections::HashSet<_> = seen.into_iter().collect();
@@ -182,15 +197,9 @@ impl Scanner {
             originator: p.originator.clone(),
             created: entry.created,
             updated: entry.mtime,
+            in_project: false,
         })
     }
-}
-
-/// The first prompt of a transcript, which is the title when the session
-/// has no other.
-#[cfg(test)]
-pub fn first_prompt(path: &Path, agent: Agent) -> Option<String> {
-    parse(path, agent, Parsed::default()).first_prompt
 }
 
 fn parse(path: &Path, agent: Agent, prev: Parsed) -> Parsed {
@@ -351,19 +360,23 @@ fn clean_prompt(text: String) -> Option<String> {
 
 /// `$CLAUDE_CONFIG_DIR` or `~/.claude`.
 pub fn claude_dir() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
+    env_dir("CLAUDE_CONFIG_DIR").or_else(|| dirs::home_dir().map(|h| h.join(".claude")))
 }
 
 fn claude_projects_dir() -> Option<PathBuf> {
     Some(claude_dir()?.join("projects"))
 }
 
+/// `$CODEX_HOME` or `~/.codex`.
 pub fn codex_home() -> Option<PathBuf> {
-    std::env::var_os("CODEX_HOME")
+    env_dir("CODEX_HOME").or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+}
+
+/// A folder from the environment. Empty counts as not set.
+fn env_dir(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
 }
 
 /// Top-level `*.jsonl` files in each project dir. Sub-agent transcripts live
@@ -454,5 +467,46 @@ mod tests {
         assert_eq!(session.cwd, Path::new("/tmp"));
         assert_eq!(session.originator.as_deref(), Some("codex-tui"));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn claude_transcript_is_read_incrementally() {
+        let path =
+            std::env::temp_dir().join(format!("agentz-claude-{}.jsonl", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"{"type":"user","cwd":"/work","message":{"content":"<command>ignored</command>"}}
+{"type":"user","cwd":"/work","message":{"content":[{"type":"text","text":"\n  fix the bug\nmore"}]}}
+{"type":"ai-title","aiTitle":"half"#,
+        )
+        .unwrap();
+
+        let mut scanner = Scanner::default();
+        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        assert_eq!(session.title, "fix the bug");
+        assert_eq!(session.cwd, Path::new("/work"));
+
+        // The half-written line is read once it is complete.
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(
+            br#" title"}
+{"type":"custom-title","customTitle":"Named"}
+"#,
+        )
+        .unwrap();
+        drop(file);
+        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        assert_eq!(session.title, "Named");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cleans_prompts() {
+        let clean = |s: &str| clean_prompt(s.to_string());
+        assert_eq!(clean("  "), None);
+        assert_eq!(clean("# AGENTS.md instructions"), None);
+        assert_eq!(clean("Caveat: the messages below"), None);
+        assert_eq!(clean("\n\n  hello\nworld").as_deref(), Some("hello"));
+        assert_eq!(clean(&"x".repeat(300)).map(|s| s.len()), Some(200));
     }
 }

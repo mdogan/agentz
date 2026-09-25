@@ -1,0 +1,10 @@
+[package]
+name = "uniffi-bindgen-swift"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Generates the Swift bindings for agentz-core. A crate of its own so the
+# library does not build UniFFI's command line parts.
+[dependencies]
+uniffi = { version = "0.32.2", features = ["cli"] }

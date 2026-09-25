@@ -1,0 +1,9 @@
+# The generated Swift file is compiled into the app's AgentzCore module, and
+# its C half (header and module map) is the AgentzFFI module.
+[bindings.swift]
+module_name = "AgentzCore"
+ffi_module_name = "AgentzFFI"
+ffi_module_filename = "AgentzFFI"
+# `project.contains(cwd)`, not `project.contains(cwd: cwd)`.
+omit_argument_labels = true
+

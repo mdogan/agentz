@@ -12,7 +12,6 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,7 +36,7 @@ const CODEX_TAIL: u64 = 1024 * 1024;
 const CODEX_FILES: usize = 5;
 
 /// One rate limit window.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
 pub struct Window {
     /// Percent of the limit used, 0-100.
     pub used: f64,
@@ -45,9 +44,10 @@ pub struct Window {
     pub resets_at: u64,
 }
 
+#[uniffi::export]
 impl Window {
-    /// Percent left right now. A window whose reset time has passed is
-    /// fully available again.
+    /// Percent left at `now` (Unix seconds). A window whose reset time has
+    /// passed is fully available again.
     pub fn left(&self, now: u64) -> f64 {
         if self.resets_at <= now {
             100.0
@@ -57,7 +57,7 @@ impl Window {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, uniffi::Record)]
 pub struct Usage {
     /// The 5-hour window.
     pub session: Option<Window>,
@@ -65,16 +65,12 @@ pub struct Usage {
     pub week: Option<Window>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, uniffi::Record)]
 pub struct Limits {
+    #[uniffi(default)]
     pub claude: Option<Usage>,
+    #[uniffi(default)]
     pub codex: Option<Usage>,
-}
-
-pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 // ---------- Claude ----------
@@ -111,9 +107,10 @@ fn parse_claude(v: &Value) -> Option<Usage> {
 /// The `--settings` value that makes Claude run `agentz statusline`, and
 /// the user's own status line command to pass on in
 /// `AGENTZ_USER_STATUS_LINE`. Settings from `--settings` win over the
-/// user's, so their status line has to be run by ours.
-pub fn claude_settings(cwd: &Path) -> Option<(String, Option<String>)> {
-    claude_settings_for(cwd, &claude_dir()?, &std::env::current_exe().ok()?)
+/// user's, so their status line has to be run by ours. `exe` is the agentz
+/// program that Claude runs as `<exe> statusline`.
+pub fn claude_settings(cwd: &Path, exe: &Path) -> Option<(String, Option<String>)> {
+    claude_settings_for(cwd, &claude_dir()?, exe)
 }
 
 fn claude_settings_for(
@@ -210,29 +207,30 @@ fn saved_status_line_command(config_dir: &Path) -> Option<String> {
         .and_then(command)
 }
 
-/// Install or remove the Claude user setting that reports limits from every
-/// manual `claude` launch. The prior status line is saved for forwarding.
-pub fn configure_status_line(action: &str) -> anyhow::Result<()> {
+/// `agentz statusline install|uninstall`: installs or removes the Claude
+/// user setting that reports limits from every manual `claude` launch. The
+/// prior status line is saved for forwarding. Returns what was done.
+pub fn configure_status_line(action: &str, exe: &Path) -> anyhow::Result<String> {
     let config_dir =
         claude_dir().ok_or_else(|| anyhow::anyhow!("Claude config directory not found"))?;
+    let settings = settings_path(&config_dir);
     match action {
         "install" => {
-            install_status_line(&config_dir, &std::env::current_exe()?)?;
-            println!(
+            install_status_line(&config_dir, exe)?;
+            Ok(format!(
                 "Installed agentz status line in {}",
-                settings_path(&config_dir).display()
-            );
+                settings.display()
+            ))
         }
         "uninstall" => {
             uninstall_status_line(&config_dir)?;
-            println!(
+            Ok(format!(
                 "Restored Claude status line in {}",
-                settings_path(&config_dir).display()
-            );
+                settings.display()
+            ))
         }
         _ => anyhow::bail!("usage: agentz statusline [install|uninstall]"),
     }
-    Ok(())
 }
 
 fn install_status_line(config_dir: &Path, exe: &Path) -> anyhow::Result<()> {
@@ -346,8 +344,9 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Result<()> 
 }
 
 /// `agentz statusline`: Claude runs this with its status as JSON on stdin.
-/// Saves the rate limits, then prints the user's own status line.
-pub fn status_line() -> anyhow::Result<()> {
+/// Saves the rate limits, then runs the user's own status line and returns
+/// its exit code.
+pub fn status_line() -> anyhow::Result<i32> {
     let mut input = Vec::new();
     std::io::stdin().read_to_end(&mut input)?;
     if let Ok(v) = serde_json::from_slice::<Value>(&input)
@@ -371,7 +370,7 @@ pub fn status_line() -> anyhow::Result<()> {
         })
         .filter(|cmd| cmd.trim() != "agentz statusline")
     else {
-        return Ok(());
+        return Ok(0);
     };
     let mut child = Command::new("sh")
         .arg("-c")
@@ -381,11 +380,11 @@ pub fn status_line() -> anyhow::Result<()> {
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(&input);
     }
-    let status = child.wait()?;
-    std::process::exit(status.code().unwrap_or(1));
+    Ok(child.wait()?.code().unwrap_or(1))
 }
 
-fn shell_quote(s: &str) -> String {
+/// Quotes `s` for `sh`.
+pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 

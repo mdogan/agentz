@@ -11,16 +11,37 @@ use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
 use crate::sessions::{Agent, Session, SessionKey, claude_dir, codex_home};
 
-/// `ps` reports elapsed time in whole seconds, so the estimated process
-/// start can be up to a second later than the real one.
+/// A thread's lock is created after its process starts. Outside macOS the
+/// start comes from `ps`, which reports whole seconds, so it can be up to a
+/// second later than the real one.
 const CODEX_LOCK_SLACK: Duration = Duration::from_secs(1);
+
+/// The processes on the machine, read on first use, and the Codex threads
+/// paired with them. One per scan, so everything in the scan sees the same
+/// processes and nothing reads them twice.
+#[derive(Default)]
+pub struct Snapshot {
+    table: OnceCell<HashMap<u32, Process>>,
+    codex_threads: OnceCell<HashMap<u32, String>>,
+}
+
+impl Snapshot {
+    fn table(&self) -> &HashMap<u32, Process> {
+        self.table.get_or_init(process_table)
+    }
+
+    /// See `codex_threads_by_pid`.
+    fn codex_threads(&self, sessions: &[Session], links: &mut CodexLinks) -> &HashMap<u32, String> {
+        self.codex_threads
+            .get_or_init(|| codex_threads_by_pid(self.table(), sessions, links))
+    }
+}
 
 /// Links established on earlier scans. Keep them while both the process and
 /// its lock exist, so another thread opening cannot move a shell's title.
@@ -43,32 +64,49 @@ pub struct ShellProcess {
 }
 
 struct Process {
+    pid: u32,
     ppid: u32,
     pgid: u32,
     tpgid: Option<u32>,
+    /// The program's name, cut to 16 bytes. Stands in for `argv0` when the
+    /// arguments can't be read, e.g. for another user's process.
+    comm: String,
+    /// Known for the user's own processes.
+    started: Option<SystemTime>,
+    /// Read on first use, since most processes are never asked.
+    args: OnceCell<Args>,
+}
+
+struct Args {
     argv0: String,
     /// The first argument, e.g. `app-server` for Codex's daemon.
     arg1: Option<String>,
-    /// Seconds since the process started.
-    age: Option<u64>,
-    /// Time at which `ps` finished, paired with its elapsed-time snapshot.
-    observed_at: SystemTime,
 }
 
-/// For each shell pid, the session of the agent running under it, if any.
-#[cfg(test)]
-pub fn agents_in_shells(shells: &[u32]) -> Vec<(u32, SessionKey)> {
-    let sessions = crate::sessions::Scanner::default().scan();
-    shell_processes(shells, &sessions, &mut CodexLinks::default())
-        .into_iter()
-        .filter_map(|s| s.agent.map(|agent| (s.pid, agent)))
-        .collect()
+impl Process {
+    fn args(&self) -> &Args {
+        self.args.get_or_init(|| {
+            read_args(self.pid).unwrap_or_else(|| Args {
+                argv0: self.comm.clone(),
+                arg1: None,
+            })
+        })
+    }
+
+    fn argv0(&self) -> &str {
+        &self.args().argv0
+    }
+
+    fn arg1(&self) -> Option<&str> {
+        self.args().arg1.as_deref()
+    }
 }
 
 /// Finds the foreground command and any linked agent for each shell.
 /// `sessions` gives the folder of each Codex thread.
 pub fn shell_processes(
     shells: &[u32],
+    procs: &Snapshot,
     sessions: &[Session],
     codex_links: &mut CodexLinks,
 ) -> Vec<ShellProcess> {
@@ -76,14 +114,37 @@ pub fn shell_processes(
         codex_links.by_pid.clear();
         return Vec::new();
     }
-    let procs = process_table();
-    let mut codex_threads = || codex_threads_by_pid(&procs, sessions, codex_links);
+    let mut codex_threads = || procs.codex_threads(sessions, codex_links).clone();
     shell_processes_from_table(
         shells,
-        &procs,
+        procs.table(),
         claude_dir().map(|d| d.join("sessions")).as_deref(),
         &mut codex_threads,
     )
+}
+
+/// The thread each of these `codex` processes has open, for the ones
+/// where that is certain. Every `codex` on the machine takes part in the
+/// pairing, so one process can't take another one's thread.
+pub fn codex_threads(
+    pids: &[u32],
+    procs: &Snapshot,
+    sessions: &[Session],
+    codex_links: &mut CodexLinks,
+) -> HashMap<u32, String> {
+    let mut out = HashMap::new();
+    for &pid in pids {
+        let id = codex_session(pid).or_else(|| {
+            procs
+                .codex_threads(sessions, codex_links)
+                .get(&pid)
+                .cloned()
+        });
+        if let Some(id) = id {
+            out.insert(pid, id);
+        }
+    }
+    out
 }
 
 fn shell_processes_from_table(
@@ -123,11 +184,14 @@ fn shell_processes_from_table(
                 continue;
             };
             if state.foreground.is_none() && foreground_group == Some(proc.pgid) {
-                state.foreground = Some((proc.pgid, basename(&proc.argv0).to_string()));
+                state.foreground = Some((proc.pgid, basename(proc.argv0()).to_string()));
             }
             let found = claude_sessions
                 .and_then(|dir| claude_session(dir, pid))
-                .map(|id| (Agent::Claude, id))
+                .map(|id| SessionKey {
+                    agent: Agent::Claude,
+                    id,
+                })
                 .or_else(|| {
                     is_codex_tui(proc)
                         .then(|| {
@@ -139,7 +203,10 @@ fn shell_processes_from_table(
                             })
                         })
                         .flatten()
-                        .map(|id| (Agent::Codex, id))
+                        .map(|id| SessionKey {
+                            agent: Agent::Codex,
+                            id,
+                        })
                 });
             if let Some(key) = found {
                 state.agent = Some(key);
@@ -152,10 +219,136 @@ fn shell_processes_from_table(
     out
 }
 
-/// pid -> parent, process group, terminal foreground group, age, argv.
+/// pid -> parent, groups, name and start time, from the kernel.
+#[cfg(target_os = "macos")]
+fn process_table() -> HashMap<u32, Process> {
+    let mut pids: Vec<libc::c_int> = vec![0; 2048];
+    loop {
+        let bytes = (pids.len() * size_of::<libc::c_int>()) as libc::c_int;
+        // SAFETY: the buffer is `bytes` bytes long.
+        let n = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        let Ok(n) = usize::try_from(n) else {
+            return HashMap::new();
+        };
+        if n < pids.len() {
+            pids.truncate(n);
+            break;
+        }
+        // It filled the buffer, so there may be more.
+        pids.resize(pids.len() * 2, 0);
+    }
+    pids.into_iter()
+        .filter_map(|pid| Some((u32::try_from(pid).ok()?, process(pid)?)))
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn process(pid: libc::c_int) -> Option<Process> {
+    // The full info is only given for the user's own processes.
+    // SAFETY: PROC_PIDTBSDINFO fills a proc_bsdinfo.
+    if let Some(info) = unsafe { pid_info::<libc::proc_bsdinfo>(pid, libc::PROC_PIDTBSDINFO) } {
+        return Some(Process {
+            pid: info.pbi_pid,
+            ppid: info.pbi_ppid,
+            pgid: info.pbi_pgid,
+            tpgid: Some(info.e_tpgid),
+            comm: c_string(&info.pbi_comm),
+            started: Some(
+                SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(info.pbi_start_tvsec)
+                    + Duration::from_micros(info.pbi_start_tvusec),
+            ),
+            args: OnceCell::new(),
+        });
+    }
+    // SAFETY: PROC_PIDT_SHORTBSDINFO fills a proc_bsdshortinfo.
+    let info = unsafe { pid_info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO) }?;
+    Some(Process {
+        pid: info.pbsi_pid,
+        ppid: info.pbsi_ppid,
+        pgid: info.pbsi_pgid,
+        tpgid: None,
+        comm: c_string(&info.pbsi_comm),
+        started: None,
+        args: OnceCell::new(),
+    })
+}
+
+/// `proc_pidinfo` for a flavor that fills a `T`.
+///
+/// # Safety
+///
+/// `T` must be the plain-data struct that `flavor` fills.
+#[cfg(target_os = "macos")]
+unsafe fn pid_info<T>(pid: libc::c_int, flavor: libc::c_int) -> Option<T> {
+    let mut info = std::mem::MaybeUninit::<T>::zeroed();
+    let size = size_of::<T>() as libc::c_int;
+    // SAFETY: the buffer is `size` bytes and lives across the call.
+    let n = unsafe { libc::proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
+    // SAFETY: T is plain data, zeroed and then filled by the kernel.
+    (n == size).then(|| unsafe { info.assume_init() })
+}
+
+/// argv[0] and argv[1] from `KERN_PROCARGS2`.
+#[cfg(target_os = "macos")]
+fn read_args(pid: u32) -> Option<Args> {
+    use std::ptr::null_mut;
+
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        libc::c_int::try_from(pid).ok()?,
+    ];
+    let mut size = 0;
+    // SAFETY: with no buffer, sysctl only writes the size it needs.
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, null_mut(), &mut size, null_mut(), 0) } != 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: the buffer is `size` bytes long.
+    let ok = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            null_mut(),
+            0,
+        )
+    } == 0;
+    ok.then(|| parse_procargs(buf.get(..size)?))?
+}
+
+/// `KERN_PROCARGS2` gives argc, the program's path, NULs up to a word
+/// boundary, then the arguments, each ending in a NUL.
+fn parse_procargs(buf: &[u8]) -> Option<Args> {
+    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?);
+    let rest = &buf[4..];
+    let rest = &rest[rest.iter().position(|&b| b == 0)?..];
+    let rest = &rest[rest.iter().position(|&b| b != 0)?..];
+    let mut args = rest
+        .split(|&b| b == 0)
+        .take(usize::try_from(argc).ok()?)
+        .map(|a| String::from_utf8_lossy(a).into_owned());
+    Some(Args {
+        argv0: args.next()?,
+        arg1: args.next(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn c_string(chars: &[libc::c_char]) -> String {
+    // SAFETY: c_char and u8 have the same size and alignment.
+    let bytes = unsafe { std::slice::from_raw_parts(chars.as_ptr().cast::<u8>(), chars.len()) };
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// pid -> parent, process group, terminal foreground group, start, argv.
+#[cfg(not(target_os = "macos"))]
 fn process_table() -> HashMap<u32, Process> {
     let mut out = HashMap::new();
-    let Ok(res) = Command::new("ps")
+    let Ok(res) = std::process::Command::new("ps")
         .args(["-eo", "pid=,ppid=,pgid=,tpgid=,etime=,args="])
         .output()
     else {
@@ -175,16 +368,21 @@ fn process_table() -> HashMap<u32, Process> {
             continue;
         };
         if let (Ok(pid), Ok(ppid), Ok(pgid)) = (pid.parse(), ppid.parse(), pgid.parse()) {
+            let args = Args {
+                argv0: argv0.to_string(),
+                arg1: parts.next().map(str::to_string),
+            };
             out.insert(
                 pid,
                 Process {
+                    pid,
                     ppid,
                     pgid,
                     tpgid: tpgid.parse().ok(),
-                    argv0: argv0.to_string(),
-                    arg1: parts.next().map(str::to_string),
-                    age: parse_etime(etime),
-                    observed_at,
+                    comm: basename(argv0).to_string(),
+                    started: parse_etime(etime)
+                        .and_then(|age| observed_at.checked_sub(Duration::from_secs(age))),
+                    args: OnceCell::from(args),
                 },
             );
         }
@@ -192,7 +390,14 @@ fn process_table() -> HashMap<u32, Process> {
     out
 }
 
+/// `process_table` read them all already.
+#[cfg(not(target_os = "macos"))]
+fn read_args(_pid: u32) -> Option<Args> {
+    None
+}
+
 /// `ps` elapsed time: `[[dd-]hh:]mm:ss`.
+#[cfg(any(test, not(target_os = "macos")))]
 fn parse_etime(s: &str) -> Option<u64> {
     let (days, rest) = match s.split_once('-') {
         Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
@@ -207,9 +412,9 @@ fn parse_etime(s: &str) -> Option<u64> {
 
 /// An interactive `codex`, not its daemon or a one-shot command.
 fn is_codex_tui(proc: &Process) -> bool {
-    basename(&proc.argv0) == "codex"
+    basename(proc.argv0()) == "codex"
         && !matches!(
-            proc.arg1.as_deref(),
+            proc.arg1(),
             Some(
                 "agents"
                     | "exec"
@@ -246,8 +451,7 @@ fn is_codex_tui(proc: &Process) -> bool {
 /// These commands can have open threads too; they must claim their own lock
 /// before a shell's interactive Codex can be linked to one.
 fn is_codex_noninteractive_thread(proc: &Process) -> bool {
-    basename(&proc.argv0) == "codex"
-        && matches!(proc.arg1.as_deref(), Some("exec" | "e" | "review"))
+    basename(proc.argv0()) == "codex" && matches!(proc.arg1(), Some("exec" | "e" | "review"))
 }
 
 fn claude_session(dir: &Path, pid: u32) -> Option<String> {
@@ -300,7 +504,7 @@ fn codex_threads_by_pid(
             Some(CodexProcess {
                 pid,
                 cwd: working_dir(pid)?,
-                started: p.observed_at.checked_sub(Duration::from_secs(p.age?))?,
+                started: p.started?,
                 tui: is_codex_tui(p),
             })
         })
@@ -445,6 +649,77 @@ fn maximum_matching(
     result
 }
 
+/// The files the process has open.
+#[cfg(target_os = "macos")]
+fn open_files(pid: u32) -> Vec<PathBuf> {
+    // <sys/proc_info.h>; libc does not have these.
+    const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+    #[repr(C)]
+    struct ProcFileInfo {
+        fi_openflags: u32,
+        fi_status: u32,
+        fi_offset: libc::off_t,
+        fi_type: i32,
+        fi_guardflags: u32,
+    }
+    #[repr(C)]
+    struct VnodeFdInfoWithPath {
+        pfi: ProcFileInfo,
+        pvip: libc::vnode_info_path,
+    }
+
+    let Ok(pid) = libc::c_int::try_from(pid) else {
+        return Vec::new();
+    };
+    let entry = size_of::<libc::proc_fdinfo>();
+    // SAFETY: with no buffer, proc_pidinfo returns the size it needs.
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    let Ok(needed) = usize::try_from(needed) else {
+        return Vec::new();
+    };
+    // Room for files opened in between.
+    let mut fds = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0
+        };
+        needed / entry + 16
+    ];
+    // SAFETY: the buffer is `fds.len() * entry` bytes long.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            fds.as_mut_ptr().cast(),
+            (fds.len() * entry) as libc::c_int,
+        )
+    };
+    fds.truncate(usize::try_from(n).unwrap_or(0) / entry);
+    fds.iter()
+        .filter(|fd| fd.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32)
+        .filter_map(|fd| {
+            let mut info = std::mem::MaybeUninit::<VnodeFdInfoWithPath>::zeroed();
+            let size = size_of::<VnodeFdInfoWithPath>() as libc::c_int;
+            // SAFETY: the buffer is `size` bytes and lives across the call.
+            let n = unsafe {
+                libc::proc_pidfdinfo(
+                    pid,
+                    fd.proc_fd,
+                    PROC_PIDFDVNODEPATHINFO,
+                    info.as_mut_ptr().cast(),
+                    size,
+                )
+            };
+            // SAFETY: plain data, zeroed and then filled by the kernel.
+            (n == size).then(|| vnode_path(unsafe { &info.assume_init_ref().pvip }))?
+        })
+        .collect()
+}
+
+/// The files the process has open.
+#[cfg(not(target_os = "macos"))]
 fn open_files(pid: u32) -> Vec<PathBuf> {
     let proc_fd = PathBuf::from(format!("/proc/{pid}/fd"));
     if let Ok(entries) = fs::read_dir(&proc_fd) {
@@ -453,7 +728,7 @@ fn open_files(pid: u32) -> Vec<PathBuf> {
             .filter_map(|e| fs::read_link(e.path()).ok())
             .collect();
     }
-    let Ok(res) = Command::new("lsof")
+    let Ok(res) = std::process::Command::new("lsof")
         .args(["-w", "-p", &pid.to_string(), "-Fn"])
         .output()
     else {
@@ -469,26 +744,22 @@ fn open_files(pid: u32) -> Vec<PathBuf> {
 /// The process's current directory, even when its shell does not send OSC 7.
 #[cfg(target_os = "macos")]
 pub fn working_dir(pid: u32) -> Option<PathBuf> {
+    // SAFETY: PROC_PIDVNODEPATHINFO fills a proc_vnodepathinfo.
+    let info = unsafe {
+        pid_info::<libc::proc_vnodepathinfo>(
+            libc::c_int::try_from(pid).ok()?,
+            libc::PROC_PIDVNODEPATHINFO,
+        )
+    }?;
+    vnode_path(&info.pvi_cdir)
+}
+
+#[cfg(target_os = "macos")]
+fn vnode_path(info: &libc::vnode_info_path) -> Option<PathBuf> {
     use std::ffi::{CStr, OsStr};
     use std::os::unix::ffi::OsStrExt;
 
-    // SAFETY: proc_vnodepathinfo is plain data; all zeros is a valid value.
-    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
-    let size = size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
-    // SAFETY: the buffer is `size` bytes and lives across the call.
-    let n = unsafe {
-        libc::proc_pidinfo(
-            pid as libc::c_int,
-            libc::PROC_PIDVNODEPATHINFO,
-            0,
-            (&raw mut info).cast(),
-            size,
-        )
-    };
-    if n != size {
-        return None;
-    }
-    let path = info.pvi_cdir.vip_path.as_flattened();
+    let path = info.vip_path.as_flattened();
     // SAFETY: c_char and u8 have the same size and alignment.
     let bytes = unsafe { std::slice::from_raw_parts(path.as_ptr().cast::<u8>(), path.len()) };
     let path = CStr::from_bytes_until_nul(bytes).ok()?.to_bytes();
@@ -509,22 +780,26 @@ fn basename(path: &str) -> &str {
 mod tests {
     use super::*;
 
+    fn process(pid: u32, ppid: u32, pgid: u32, tpgid: Option<u32>, args: &[&str]) -> Process {
+        Process {
+            pid,
+            ppid,
+            pgid,
+            tpgid,
+            comm: basename(args[0]).to_string(),
+            started: None,
+            args: OnceCell::from(Args {
+                argv0: args[0].into(),
+                arg1: args.get(1).map(|a| a.to_string()),
+            }),
+        }
+    }
+
     #[test]
     fn foreground_command_ignores_background_and_unrelated_processes() {
         let mut procs = HashMap::new();
         let mut add = |pid, ppid, pgid, tpgid, argv0: &str| {
-            procs.insert(
-                pid,
-                Process {
-                    ppid,
-                    pgid,
-                    tpgid,
-                    argv0: argv0.into(),
-                    arg1: None,
-                    age: None,
-                    observed_at: SystemTime::UNIX_EPOCH,
-                },
-            );
+            procs.insert(pid, process(pid, ppid, pgid, tpgid, &[argv0]));
         };
         add(10, 1, 10, Some(30), "/bin/fish");
         add(20, 10, 20, Some(30), "/bin/long-background-job");
@@ -549,16 +824,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_procargs() {
+        let mut buf = 2i32.to_ne_bytes().to_vec();
+        buf.extend(b"/usr/bin/codex\0\0\0codex\0exec now\0HOME=/x\0");
+        let args = parse_procargs(&buf).unwrap();
+        assert_eq!(args.argv0, "codex");
+        assert_eq!(args.arg1.as_deref(), Some("exec now"));
+        // The environment is not an argument.
+        let mut buf = 1i32.to_ne_bytes().to_vec();
+        buf.extend(b"/bin/sleep\0sleep\0HOME=/x\0");
+        assert_eq!(parse_procargs(&buf).unwrap().arg1, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_processes_from_the_kernel() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let procs = process_table();
+        let found = &procs[&pid];
+        let me = &procs[&std::process::id()];
+        assert_eq!(found.ppid, std::process::id());
+        assert_eq!(found.comm, "sleep");
+        assert_eq!(found.argv0(), "/bin/sleep");
+        assert_eq!(found.arg1(), Some("30"));
+        let started = found.started.unwrap();
+        assert!(started >= me.started.unwrap());
+        assert!(started <= SystemTime::now());
+        // Other users' processes are listed too, e.g. launchd.
+        assert_eq!(procs[&1].ppid, 0);
+        assert!(open_files(std::process::id()).iter().any(|p| p.exists()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
     fn exec_processes_claim_threads_but_are_not_shell_sessions() {
-        let process = Process {
-            ppid: 1,
-            pgid: 2,
-            tpgid: Some(2),
-            argv0: "/usr/local/bin/codex".into(),
-            arg1: Some("exec".into()),
-            age: Some(10),
-            observed_at: SystemTime::UNIX_EPOCH,
-        };
+        let process = process(3, 1, 2, Some(2), &["/usr/local/bin/codex", "exec"]);
         assert!(!is_codex_tui(&process));
         assert!(is_codex_noninteractive_thread(&process));
     }

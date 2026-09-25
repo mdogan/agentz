@@ -1,33 +1,37 @@
-.PHONY: build release run install uninstall check fmt test integration clean
+# agentz has two parts:
+#   core/    the Rust core (sessions, processes, rate limits, saved tabs,
+#            busy tracking) and its bridge to Swift
+#   macos/   the macOS app, in Swift (see macos/Makefile)
+# These targets cover both.
 
-build:
-	cargo build
+.PHONY: all install uninstall test check fmt smoke clean
 
-release:
-	cargo build --release
+all:
+	$(MAKE) -C macos app
 
-run:
-	cargo run --release
-
+# Copies the app to ~/Applications/Agentz.app.
 install:
-	cargo install --path .
+	$(MAKE) -C macos install
 
 uninstall:
-	cargo uninstall agentz
+	$(MAKE) -C macos uninstall
+
+# Unit tests: the Rust core, then the macOS app.
+test:
+	cd core && cargo test
+	$(MAKE) -C macos test
 
 check:
-	cargo fmt --check
-	cargo clippy --release -- -D warnings
+	cd core && cargo fmt --check
+	cd core && cargo clippy --release --all-targets -- -D warnings
 
 fmt:
-	cargo fmt
+	cd core && cargo fmt
 
-test:
-	cargo test
-
-# Runs the real claude and codex CLIs; each test sends prompts to the model.
-integration:
-	cargo test -- --ignored
+# Opens the macOS app with real terminals for about half a minute.
+smoke:
+	$(MAKE) -C macos smoke
 
 clean:
-	cargo clean
+	cd core && cargo clean
+	$(MAKE) -C macos clean

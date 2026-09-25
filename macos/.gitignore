@@ -1,0 +1,4 @@
+.build/
+# Made by build-core.sh.
+/Frameworks/
+/Sources/AgentzCore/Generated/

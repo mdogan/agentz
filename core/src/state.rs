@@ -11,22 +11,32 @@ use serde::{Deserialize, Serialize};
 
 use crate::sessions::Agent;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct SavedTab {
     pub agent: Agent,
     /// None for a shell or an agent that has no transcript to resume yet.
+    #[uniffi(default)]
     pub id: Option<String>,
     pub cwd: PathBuf,
     pub title: String,
 }
 
-#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct SavedState {
+    #[uniffi(default)]
     pub tabs: Vec<SavedTab>,
-    pub active: Option<usize>,
-    pub sidebar_focused: bool,
-    pub sidebar_width: u16,
+    /// The index of the tab that was shown.
+    #[uniffi(default)]
+    pub active: Option<u32>,
+    /// The folder the window showed.
+    #[uniffi(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<PathBuf>,
 }
+
+/// The name of the state file, and of its lock. `mac-` because a terminal
+/// UI once kept its tabs in `open-tabs`.
+const STEM: &str = "mac-open-tabs";
 
 fn state_dir() -> Result<PathBuf> {
     Ok(dirs::data_local_dir()
@@ -50,17 +60,16 @@ fn save_in(dir: &Path, state: SavedState) -> Result<()> {
         return Ok(());
     }
     with_lock(dir, || {
-        let path = dir.join("open-tabs.json");
+        let path = dir.join(format!("{STEM}.json"));
         let mut saved = read(&path)?.unwrap_or_default();
         let base = saved.tabs.len();
         saved.tabs.extend(state.tabs);
-        saved.active = state.active.map(|i| base + i);
-        saved.sidebar_focused = state.sidebar_focused;
-        saved.sidebar_width = state.sidebar_width;
+        let shown = state.active.map(|i| base + i as usize);
+        saved.project = state.project.or(saved.project);
         // Two agentz windows can show the same agent. Resume that session
         // once, using the last window's tab and selection.
         let mut unique = Vec::new();
-        let mut active = None;
+        let mut active: Option<usize> = None;
         for (i, tab) in saved.tabs.into_iter().enumerate() {
             if let Some(id) = &tab.id
                 && let Some(previous) = unique.iter().position(|other: &SavedTab| {
@@ -69,7 +78,6 @@ fn save_in(dir: &Path, state: SavedState) -> Result<()> {
             {
                 unique.remove(previous);
                 if let Some(selected) = active.as_mut() {
-                    let selected: &mut usize = selected;
                     if *selected == previous {
                         active = None;
                     } else if *selected > previous {
@@ -77,20 +85,20 @@ fn save_in(dir: &Path, state: SavedState) -> Result<()> {
                     }
                 }
             }
-            if saved.active == Some(i) {
+            if shown == Some(i) {
                 active = Some(unique.len());
             }
             unique.push(tab);
         }
         saved.tabs = unique;
-        saved.active = active;
+        saved.active = active.map(|i| i as u32);
         write_atomic(&path, &saved)
     })
 }
 
 fn take_in(dir: &Path) -> Result<Option<SavedState>> {
     with_lock(dir, || {
-        let path = dir.join("open-tabs.json");
+        let path = dir.join(format!("{STEM}.json"));
         let state = read(&path)?;
         if state.is_some() {
             fs::remove_file(&path)?;
@@ -112,7 +120,8 @@ fn read(path: &Path) -> Result<Option<SavedState>> {
 
 fn write_atomic(path: &Path, state: &SavedState) -> Result<()> {
     let dir = path.parent().context("state path has no parent")?;
-    let tmp = dir.join(format!(".open-tabs-{}.tmp", uuid::Uuid::new_v4()));
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("state");
+    let tmp = dir.join(format!(".{stem}-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         let mut file = OpenOptions::new()
             .write(true)
@@ -139,7 +148,7 @@ fn with_lock<T>(dir: &Path, action: impl FnOnce() -> Result<T>) -> Result<T> {
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(dir.join("open-tabs.lock"))?;
+        .open(dir.join(format!("{STEM}.lock")))?;
     loop {
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
             break;
@@ -184,8 +193,7 @@ mod tests {
                     tab(Agent::Codex, Some("two")),
                 ],
                 active: Some(1),
-                sidebar_focused: true,
-                sidebar_width: 51,
+                ..SavedState::default()
             },
         )
         .unwrap();
@@ -195,9 +203,36 @@ mod tests {
         assert_eq!(saved.tabs[1].id.as_deref(), Some("one"));
         assert_eq!(saved.tabs[2].id.as_deref(), Some("two"));
         assert_eq!(saved.active, Some(2));
-        assert!(saved.sidebar_focused);
-        assert_eq!(saved.sidebar_width, 51);
         assert_eq!(take_in(&dir).unwrap(), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keeps_the_last_project_and_reads_older_files() {
+        let dir = std::env::temp_dir().join(format!("agentz-state-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        // Written by an older build: sidebar fields, no null ids.
+        fs::write(
+            dir.join("mac-open-tabs.json"),
+            br#"{"tabs":[{"agent":"shell","cwd":"/tmp","title":"fish"}],"active":0,"sidebar_focused":false,"sidebar_width":0,"project":"/repo"}"#,
+        )
+        .unwrap();
+        let tab = SavedTab {
+            agent: Agent::Claude,
+            id: Some("one".into()),
+            cwd: PathBuf::from("/repo"),
+            title: "tab".into(),
+        };
+        let state = SavedState {
+            tabs: vec![tab.clone()],
+            ..SavedState::default()
+        };
+        save_in(&dir, state).unwrap();
+        let saved = take_in(&dir).unwrap().unwrap();
+        assert_eq!(saved.tabs.len(), 2);
+        assert_eq!(saved.tabs[0].id, None);
+        assert_eq!(saved.tabs[1], tab);
+        assert_eq!(saved.project, Some(PathBuf::from("/repo")));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -205,9 +240,9 @@ mod tests {
     fn malformed_state_is_not_consumed() {
         let dir = std::env::temp_dir().join(format!("agentz-state-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("open-tabs.json"), b"broken").unwrap();
+        fs::write(dir.join("mac-open-tabs.json"), b"broken").unwrap();
         assert!(take_in(&dir).is_err());
-        assert!(dir.join("open-tabs.json").exists());
+        assert!(dir.join("mac-open-tabs.json").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 }
