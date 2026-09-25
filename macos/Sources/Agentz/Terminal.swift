@@ -111,6 +111,11 @@ final class Terminal: NSObject {
         isRunning = false
         onExit = nil
         view.controller = nil
+        // Ghostty finds a surface's queued messages by its address, and a new
+        // surface often gets the freed one's. A "child exited" still queued
+        // for this surface would then reach the next one, which from then on
+        // drops every key. Handle the queue now, before any new surface.
+        GhosttyApp.controller.tick()
     }
 
     private func exited() {

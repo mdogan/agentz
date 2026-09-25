@@ -52,6 +52,9 @@ final class SmokeTest {
 
         lines.append("info ghostty config: \(GhosttyApp.configIssue.map { "not used: \($0)" } ?? "used")")
 
+        // `make smoke` opens this repo.
+        check("worktrees of the repo are listed", await wait(10) { ws.currentWorktree != nil }, "\(ws.worktrees.count) worktrees")
+
         // A shell: its pid, environment, folder and foreground job.
         ws.newSession(.shell)
         guard let shell = ws.currentTab else { return finish("no tab after newSession") }

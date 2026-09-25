@@ -54,6 +54,8 @@ struct Row: Identifiable, Equatable {
     var key: SessionKey
     var title: String
     var cwd: String
+    /// `repo`, or `repo/worktree` outside the main checkout.
+    var place: String
     var updated: Date
     /// What the list sorts by, newest first. For a session with a tab of
     /// ours, when the tab started: new and resumed sessions go to the top
@@ -62,15 +64,44 @@ struct Row: Identifiable, Equatable {
     var id: SessionKey { key }
 }
 
+/// The repo the list is limited to: all its worktrees, or one folder
+/// outside a repo.
+struct RepoFilter: Equatable {
+    let name: String
+    /// The main checkout, or the folder outside a repo.
+    let root: String
+    /// The worktrees' folders, and their real paths.
+    private(set) var dirs: [String]
+
+    init(name: String, root: String, worktrees: [Worktree]) {
+        self.name = name
+        self.root = root
+        let paths = worktrees.isEmpty ? [root] : worktrees.map(\.path)
+        var dirs: [String] = []
+        for p in paths + paths.compactMap(realPath) where !dirs.contains(p) {
+            dirs.append(p)
+        }
+        self.dirs = dirs
+    }
+
+    func contains(_ cwd: String) -> Bool {
+        dirs.contains { pathStarts(cwd, with: $0) }
+    }
+}
+
 @MainActor
 @Observable
 final class Workspace {
     private(set) var sessions: [Session] = []
     private(set) var loaded = false
-    /// The folder the window shows. Its repo's sessions are listed.
+    /// The folder the user last started a session in. ⌘N and friends
+    /// start there too.
     private(set) var projectDir: String
-    /// Show sessions from other repos too.
-    var allRepos = false { didSet { rebuildRows() } }
+    /// The worktrees of the project's repo, main first. Empty outside a
+    /// repo.
+    private(set) var worktrees: [Worktree] = []
+    /// Show only this repo's sessions; nil shows all repos.
+    var repo: RepoFilter? { didSet { rebuildRows() } }
     /// Show only sessions with a running agent or shell.
     var hideInactive = true { didSet { rebuildRows() } }
     var filter = "" { didSet { rebuildRows() } }
@@ -109,15 +140,14 @@ final class Workspace {
             onLayout?()
         }
     }
-    /// The folder `sessions` were scanned for. Their `inProject` is about
-    /// its project.
-    @ObservationIgnored private var sessionsDir: String?
     /// Where new sessions start: the top of the project's git worktree.
     @ObservationIgnored private(set) var root: String
     @ObservationIgnored private var statusAt = Date.distantPast
     @ObservationIgnored private var nextNewId = 1
     /// Tabs whose agent wants attention.
     @ObservationIgnored private var waiting = Set<ObjectIdentifier>()
+    /// `Row.place` by folder.
+    @ObservationIgnored private var places: [String: String] = [:]
 
     /// The tabs or the shown tab changed.
     @ObservationIgnored var onLayout: (() -> Void)?
@@ -155,10 +185,17 @@ final class Workspace {
         statusAt = Date()
     }
 
+    /// The worktree the open folder is in.
+    var currentWorktree: Worktree? {
+        worktree(containing: projectDir, in: worktrees)
+    }
+
     func openProject(_ dir: String) {
         let dir = URL(fileURLWithPath: dir).standardizedFileURL.path
         guard dir != projectDir else { return }
         projectDir = dir
+        // Another worktree of the same repo keeps the list until the scan.
+        if worktree(containing: dir, in: worktrees) == nil { worktrees = [] }
         root = dir
         findRoot()
         rebuildRows()
@@ -268,12 +305,17 @@ final class Workspace {
     /// Results of a background scan of `dir`.
     func apply(_ scan: Scan, dir: String) {
         // Nil when nothing changed since the last scan.
-        if let scanned = scan.sessions {
-            sessions = scanned
-            sessionsDir = dir
-        }
+        if let scanned = scan.sessions { sessions = scanned }
         loaded = true
         if scan.limits != limits { limits = scan.limits }
+        if dir == projectDir, scan.worktrees != worktrees {
+            worktrees = scan.worktrees
+            places = [:]
+            // A worktree was added or removed in the filtered repo.
+            if let r = repo, r.root == worktrees.first?.path {
+                repo = RepoFilter(name: r.name, root: r.root, worktrees: worktrees)
+            }
+        }
         linkShells(scan.shells)
         bindNewCodexSessions(scan.codexThreads)
         rebuildRows()
@@ -319,23 +361,22 @@ final class Workspace {
     }
 
     func rebuildRows() {
-        // Until the sessions of a newly opened folder are scanned, show them
-        // all rather than going by the old project.
-        let knowProject = sessionsDir == projectDir
-        // Rows with a process of ours stay visible either way, so a running
-        // agent can't get lost behind a hidden row.
+        // Rows with a process of ours stay visible even when inactive ones
+        // are hidden, so a running agent can't get lost.
         var rows: [Row] = sessions.compactMap { s in
             let key = s.key
             let tab = tabs.first { $0.shows(key) }
-            let inProject = allRepos || !knowProject || s.inProject
-            guard tab != nil || (inProject && !hideInactive) else { return nil }
+            guard tab != nil || !hideInactive else { return nil }
             let order = tab?.spawnedAt ?? s.updated
-            return Row(key: key, title: s.title, cwd: s.cwd, updated: s.updated, order: order)
+            return Row(key: key, title: s.title, cwd: s.cwd, place: place(s.cwd), updated: s.updated, order: order)
         }
         // Sessions we started that have no transcript yet, and shells. A
         // shell running an agent is shown as that agent's session.
         for r in tabs where !rows.contains(where: { r.shows($0.key) }) {
-            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, updated: r.spawnedAt, order: r.spawnedAt))
+            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.spawnedAt))
+        }
+        if let repo {
+            rows = rows.filter { repo.contains($0.cwd) }
         }
         if !filter.isEmpty {
             let q = filter.lowercased()
@@ -346,6 +387,13 @@ final class Workspace {
         rows.sort { $0.order > $1.order }
         if rows != self.rows { self.rows = rows }
         refreshStates()
+    }
+
+    private func place(_ cwd: String) -> String {
+        if let p = places[cwd] { return p }
+        let p = placeName(cwd)
+        places[cwd] = p
+        return p
     }
 
     /// Which rows run and work, for the list. Only assigned when it changed,

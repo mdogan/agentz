@@ -17,9 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func application(_: NSApplication, open urls: [URL]) {
         guard let dir = urls.first(where: { isDirectory($0.path) })?.path else { return }
-        if let workspace {
-            workspace.openProject(dir)
-            UserDefaults.standard.set(dir, forKey: "project")
+        if workspace != nil {
+            open(dir, recent: true)
             windowController?.showWindow(nil)
         } else {
             pendingProject = dir
@@ -49,12 +48,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         let workspace = Workspace(projectDir: isDirectory(dir) ? dir : NSHomeDirectory())
         self.workspace = workspace
+        if SmokeTest.logPath == nil { remember(workspace.projectDir) }
         let controller = MainWindowController(
             workspace: workspace,
             look: Look(),
             actions: SidebarActions(
                 close: { [weak self] key in self?.closeSession(key) },
-                openFolder: { [weak self] in self?.openFolder(nil) },
+                start: { [weak self] agent, dir, repo in self?.start(agent, in: dir, repo: repo) },
+                chooseFolder: { [weak self] agent in
+                    self?.chooseFolder("Start a new \(agent.displayName) session in this folder.", prompt: "Start")
+                },
+                recentFolders: { UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? [] },
+                clearRecentFolders: { UserDefaults.standard.removeObject(forKey: Self.recentsKey) },
                 notificationSettings: { [weak self] in self?.notificationSettings(nil) }
             )
         )
@@ -112,6 +117,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
         NSApp.activate()
+    }
+
+    private static let recentsKey = "recentFolders"
+
+    /// Shows the project of `dir`, and opens it there on the next launch.
+    /// With `recent`, it goes to the top of the recent folders.
+    private func open(_ dir: String, recent: Bool) {
+        guard let workspace else { return }
+        workspace.openProject(dir)
+        UserDefaults.standard.set(workspace.projectDir, forKey: "project")
+        if recent { remember(workspace.projectDir) }
+    }
+
+    /// Starts a session in `dir`, and makes `repo`, the folder picked from
+    /// the recent folders, the most recent one.
+    private func start(_ agent: Agent, in dir: String, repo: String) {
+        guard let workspace else { return }
+        open(dir, recent: false)
+        remember(repo)
+        workspace.newSession(agent, cwd: dir)
+    }
+
+    private func remember(_ dir: String) {
+        let recents = UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? []
+        UserDefaults.standard.set(addingRecent(dir, to: recents), forKey: Self.recentsKey)
     }
 
     /// `--project <dir>` or a folder argument, for when the binary runs
@@ -198,14 +228,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func newShell(_: Any?) { workspace?.newSession(.shell) }
 
     @objc func openFolder(_: Any?) {
+        guard let dir = chooseFolder("New sessions start in this folder.", prompt: "Open") else { return }
+        application(NSApp, open: [URL(fileURLWithPath: dir)])
+    }
+
+    private func chooseFolder(_ message: String, prompt: String) -> String? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        panel.prompt = "Open"
-        panel.message = "Show the sessions of this folder's project."
+        panel.prompt = prompt
+        panel.message = message
         if let dir = workspace?.projectDir { panel.directoryURL = URL(fileURLWithPath: dir) }
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        application(NSApp, open: [url])
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url.path
     }
 
     @objc func closeCurrent(_: Any?) {
@@ -222,12 +257,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard confirm("The shell is running a command.", "Closing stops it.", button: "Close") else { return }
         }
         workspace.close(key)
-    }
-
-    @objc func toggleAllRepos(_: Any?) {
-        guard let workspace else { return }
-        workspace.allRepos.toggle()
-        workspace.setStatus(workspace.allRepos ? "Showing sessions from all repos" : "Showing sessions from this repo only")
     }
 
     @objc func toggleInactive(_: Any?) {
@@ -266,8 +295,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let workspace else { return false }
         switch item.action {
-        case #selector(toggleAllRepos(_:)):
-            item.state = workspace.allRepos ? .on : .off
         case #selector(toggleInactive(_:)):
             item.state = workspace.hideInactive ? .off : .on
         case #selector(closeCurrent(_:)), #selector(focusTerminal(_:)):
@@ -313,7 +340,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         let view = submenu(main, "View")
-        add(view, "Sessions From All Repos", #selector(toggleAllRepos(_:)), "A")
         add(view, "Inactive Sessions", #selector(toggleInactive(_:)), "I")
         view.addItem(.separator())
         add(view, "Go to Session List", #selector(focusList(_:)), "l")

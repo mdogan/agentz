@@ -19,7 +19,13 @@ final class SidebarFocus {
 /// What the sidebar asks the app to do.
 struct SidebarActions {
     var close: (SessionKey) -> Void
-    var openFolder: () -> Void
+    /// Starts a session in `dir`. `repo` is the recent folder it was picked
+    /// from, which goes to the top of the recent folders.
+    var start: (_ agent: Agent, _ dir: String, _ repo: String) -> Void
+    /// Asks for a folder to start the agent in.
+    var chooseFolder: (Agent) -> String?
+    var recentFolders: () -> [String]
+    var clearRecentFolders: () -> Void
     var notificationSettings: () -> Void
 }
 
@@ -31,6 +37,7 @@ struct SidebarView: View {
     @FocusState private var listFocused: Bool
     @FocusState private var filterFocused: Bool
     @State private var hovered: SessionKey?
+    @State private var newWorktree: WorktreeRequest?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,42 +62,26 @@ struct SidebarView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Button(action: actions.openFolder) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "folder.fill")
-                            .foregroundStyle(look.accent)
-                        Text(baseName(workspace.projectDir))
-                            .font(.system(size: 13, weight: .semibold))
-                            .lineLimit(1)
+                HStack(spacing: 2) {
+                    ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
+                        PopUpButton(look: look, help: "New \(agent.displayName) session. Pick a folder, or a worktree of a repo.", menu: { startMenu(agent) }) {
+                            Text(agent.icon)
+                                .foregroundStyle(look.color(for: agent))
+                            Text(agent.displayName)
+                                .lineLimit(1)
+                        }
+                        .font(.system(size: 12, weight: .medium))
                     }
                 }
-                .buttonStyle(.plain)
-                .help("\(tilde(workspace.projectDir))\nOpen another folder (⌘O)")
+                // The buttons' hover padding, so the icon lines up with the
+                // filter below.
+                .padding(.leading, -5)
                 Spacer(minLength: 0)
-                Menu {
-                    Button("New Claude Session") { workspace.newSession(.claude) }
-                    Button("New Codex Session") { workspace.newSession(.codex) }
-                    Button("New Shell") { workspace.newSession(.shell) }
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("New session")
-                Menu {
-                    Toggle("Sessions From All Repos", isOn: $workspace.allRepos)
-                    Toggle("Inactive Sessions", isOn: Binding(
-                        get: { !workspace.hideInactive },
-                        set: { workspace.hideInactive = !$0 }
-                    ))
-                } label: {
+                PopUpButton(look: look, help: filterHelp, chevron: false, menu: filterMenu) {
                     Image(systemName: "line.3.horizontal.decrease")
+                        .foregroundStyle(workspace.repo == nil ? look.text : look.accent)
                 }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help("Which sessions to show")
+                .padding(.trailing, -5)
             }
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
@@ -117,6 +108,9 @@ struct SidebarView: View {
             .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
             HStack(spacing: 4) {
                 Text("\(workspace.rows.count) sessions")
+                if let repo = workspace.repo {
+                    Text("in \(repo.name)").foregroundStyle(look.accent)
+                }
                 Text("·")
                 Text("\(workspace.runningCount) running")
                 if !workspace.busyKeys.isEmpty {
@@ -130,6 +124,97 @@ struct SidebarView: View {
         .padding(.horizontal, 12)
         .padding(.top, 4)
         .padding(.bottom, 8)
+        .sheet(item: $newWorktree) { request in
+            NewWorktreeView(
+                worktrees: request.repo.worktrees,
+                current: worktree(containing: workspace.projectDir, in: request.repo.worktrees),
+                created: { made in
+                    actions.start(request.agent, made.path, request.repo.dir)
+                    workspace.requestScan?()
+                    if let problem = made.warnings.first {
+                        let more = made.warnings.count > 1 ? " (and \(made.warnings.count - 1) more)" : ""
+                        workspace.setStatus("Created \(tilde(made.path)). \(problem)\(more)")
+                    } else {
+                        workspace.setStatus("Created worktree \(tilde(made.path))")
+                    }
+                },
+                switchTo: { wt in actions.start(request.agent, wt.path, request.repo.dir) }
+            )
+        }
+    }
+
+    /// Where to start a new session: a recent folder, or in a git repo one
+    /// of its worktrees.
+    private func startMenu(_ agent: Agent) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let repos = recentRepos(actions.recentFolders())
+        if !repos.isEmpty {
+            menu.addItem(.sectionHeader(title: "Start \(agent.displayName) In"))
+            for repo in repos {
+                let item = MenuAction(repo.name, detail: repo.parent) { actions.start(agent, repo.dir, repo.dir) }
+                item.toolTip = tilde(repo.dir)
+                if !repo.worktrees.isEmpty {
+                    item.submenu = worktreeMenu(agent, repo)
+                }
+                menu.addItem(item)
+            }
+            menu.addItem(.separator())
+        }
+        menu.addItem(MenuAction("Open Folder…") {
+            if let dir = actions.chooseFolder(agent) { actions.start(agent, dir, dir) }
+        })
+        if !repos.isEmpty {
+            menu.addItem(MenuAction("Clear Recent Folders", actions.clearRecentFolders))
+        }
+        return menu
+    }
+
+    private func worktreeMenu(_ agent: Agent, _ repo: RecentRepo) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(.sectionHeader(title: "Worktrees"))
+        for wt in repo.worktrees where !wt.bare {
+            var detail = wt.missing ? "folder is gone" : tilde(wt.path)
+            if wt.locked { detail += " · locked" }
+            let item = MenuAction(wt.label, detail: detail) { actions.start(agent, wt.path, repo.dir) }
+            item.isEnabled = !wt.missing
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        menu.addItem(MenuAction("New Worktree…") { newWorktree = WorktreeRequest(agent: agent, repo: repo) })
+        return menu
+    }
+
+    private var filterHelp: String {
+        let repo = workspace.repo.map { "Sessions in \($0.name) · \(tilde($0.root))" } ?? "Sessions from all repos"
+        return "\(repo)\nWhich sessions to show"
+    }
+
+    private func filterMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(.sectionHeader(title: "Repos"))
+        let all = MenuAction("All Repos") { workspace.repo = nil }
+        all.state = workspace.repo == nil ? .on : .off
+        menu.addItem(all)
+        var repos = recentRepos(actions.recentFolders())
+        // Keep a filtered repo that fell off the recent folders.
+        if let current = workspace.repo, !repos.contains(where: { $0.root == current.root }) {
+            repos.append(RecentRepo(dir: current.root, worktrees: listWorktrees(current.root)))
+        }
+        for repo in repos {
+            let item = MenuAction(repo.name, detail: repo.parent) { workspace.repo = repo.filter }
+            item.state = workspace.repo?.root == repo.root ? .on : .off
+            item.toolTip = tilde(repo.root)
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let inactive = MenuAction("Inactive Sessions") { workspace.hideInactive.toggle() }
+        inactive.state = workspace.hideInactive ? .off : .on
+        inactive.keyEquivalent = "I"
+        menu.addItem(inactive)
+        return menu
     }
 
     // MARK: - List
@@ -140,7 +225,6 @@ struct SidebarView: View {
                 LazyVStack(spacing: 2) {
                     ForEach(workspace.rows) { row in
                         let running = workspace.runningKeys.contains(row.key)
-                        let closable = running && hovered == row.key
                         RowView(
                             row: row,
                             look: look,
@@ -151,7 +235,6 @@ struct SidebarView: View {
                             busy: workspace.busyKeys.contains(row.key),
                             waiting: workspace.waitingKeys.contains(row.key),
                             hovered: hovered == row.key,
-                            closable: closable,
                             now: workspace.now
                         )
                         .id(row.key)
@@ -164,9 +247,14 @@ struct SidebarView: View {
                         // After the row's gestures, so a click on it does
                         // not also select the row.
                         .overlay(alignment: .trailing) {
-                            if closable {
-                                CloseButton(look: look) { actions.close(row.key) }
-                                    .padding(.trailing, 4)
+                            if hovered == row.key {
+                                RowButtons(
+                                    look: look,
+                                    closable: running,
+                                    start: { agent in workspace.newSession(agent, cwd: row.cwd) },
+                                    close: { actions.close(row.key) }
+                                )
+                                .padding(.trailing, 4)
                             }
                         }
                         // Around the button too, or moving onto it would
@@ -237,9 +325,9 @@ struct SidebarView: View {
         }
         Divider()
         if let row = workspace.rows.first(where: { $0.key == key }) {
-            Button("New Claude Session Here") { workspace.newSession(.claude, cwd: row.cwd) }
-            Button("New Codex Session Here") { workspace.newSession(.codex, cwd: row.cwd) }
-            Button("New Shell Here") { workspace.newSession(.shell, cwd: row.cwd) }
+            ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
+                Button(agent.newHere) { workspace.newSession(agent, cwd: row.cwd) }
+            }
             Divider()
             Button("Show Folder in Finder") {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: row.cwd)
@@ -254,7 +342,7 @@ struct SidebarView: View {
     private var emptyMessage: String {
         if !workspace.loaded { return "Loading sessions…" }
         if workspace.hideInactive { return "No running sessions.\nShow inactive ones with ⇧⌘I." }
-        if !workspace.allRepos { return "No sessions here.\nShow all repos with ⇧⌘A." }
+        if let repo = workspace.repo { return "No sessions in \(repo.name).\nShow all repos from the filter menu." }
         return "No sessions"
     }
 
@@ -298,6 +386,13 @@ struct SidebarView: View {
     }
 }
 
+/// A repo to make a new worktree in, and the agent to start there.
+private struct WorktreeRequest: Identifiable {
+    let id = UUID()
+    let agent: Agent
+    let repo: RecentRepo
+}
+
 private func copy(_ text: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(text, forType: .string)
@@ -314,9 +409,8 @@ private struct RowView: View {
     let running: Bool
     let busy: Bool
     let waiting: Bool
+    /// The list shows its buttons where the state would be.
     let hovered: Bool
-    /// The list shows a close button where the state would be.
-    let closable: Bool
     let now: Date
 
     var body: some View {
@@ -330,15 +424,16 @@ private struct RowView: View {
                     .font(.system(size: 12.5, weight: isCurrent ? .semibold : .regular))
                     .foregroundStyle(running || selected ? look.text : look.text.opacity(0.75))
                     .lineLimit(1)
-                Text("\(baseName(row.cwd)) · \(age(now: now, row.updated))")
+                Text("\(row.place) · \(age(now: now, row.updated))")
                     .font(.system(size: 11))
                     .foregroundStyle(look.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 4)
             state
-                .opacity(closable ? 0 : 1)
-                .frame(width: 14)
+                .opacity(hovered ? 0 : 1)
+                // Room for the buttons, so the text stops before them.
+                .frame(width: hovered ? RowButtons.width(closable: running) - 2 : 14)
         }
         .padding(.leading, 8)
         .padding(.trailing, 6)
@@ -383,25 +478,58 @@ private struct RowView: View {
     }
 }
 
-/// Stops the session's agent or shell, like File › Close Session.
-private struct CloseButton: View {
+/// The buttons on a hovered row: start a new session in its folder, and
+/// stop the session's agent or shell, like File › Close Session.
+private struct RowButtons: View {
     let look: Look
+    let closable: Bool
+    let start: (Agent) -> Void
+    let close: () -> Void
+
+    static let size: CGFloat = 18
+
+    static func width(closable: Bool) -> CGFloat {
+        size * (closable ? 4 : 3)
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
+                RowButton(look: look, help: agent.newHere, action: { start(agent) }) { _ in
+                    Text(agent.icon)
+                        .font(.system(size: 11))
+                        .foregroundStyle(look.color(for: agent))
+                }
+            }
+            if closable {
+                RowButton(look: look, help: "Close Session", action: close) { hovered in
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(hovered ? look.text : look.secondary)
+                }
+            }
+        }
+    }
+}
+
+private struct RowButton<Label: View>: View {
+    let look: Look
+    let help: String
     let action: () -> Void
+    @ViewBuilder let label: (_ hovered: Bool) -> Label
     @State private var hovered = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "xmark")
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(hovered ? look.text : look.secondary)
-                .frame(width: 18, height: 18)
+            label(hovered)
+                .frame(width: RowButtons.size, height: RowButtons.size)
                 .background(hovered ? look.selection : .clear, in: Circle())
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .help("Close")
-        .accessibilityLabel("Close Session")
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 
@@ -505,7 +633,7 @@ struct EmptyPaneView: View {
                     hint("⇧⌘N", "New Codex session")
                     hint("⌘T", "New shell")
                     hint("⇧⌘I", "Show inactive sessions")
-                    hint("⌘O", "Open another folder")
+                    hint("⌘O", "Pick the folder these start in")
                 }
             }
         }
@@ -540,5 +668,10 @@ extension Agent {
         case .codex: "Codex"
         case .shell: "Shell"
         }
+    }
+
+    /// Starts one in the folder of the session it is for.
+    var newHere: String {
+        self == .shell ? "New Shell Here" : "New \(displayName) Session Here"
     }
 }

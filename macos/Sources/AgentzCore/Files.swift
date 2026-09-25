@@ -46,3 +46,8 @@ public func shellEscape(_ path: String) -> String {
     }
     return out
 }
+
+/// Recent folders with `dir` first, without repeats, at most `limit`.
+public func addingRecent(_ dir: String, to recents: [String], limit: Int = 10) -> [String] {
+    Array(([dir] + recents.filter { $0 != dir }).prefix(limit))
+}

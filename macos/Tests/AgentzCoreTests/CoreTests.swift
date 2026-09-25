@@ -99,3 +99,34 @@ final class ThemeColorTests: XCTestCase {
         XCTAssertNil(RGB(hex: "red"))
     }
 }
+
+final class WorktreeTests: XCTestCase {
+    private func wt(_ path: String, _ branch: String?, head: String = "1a2b3c4d5e") -> Worktree {
+        Worktree(path: path, branch: branch, head: head, isMain: false, bare: false, locked: false, missing: false)
+    }
+
+    func testFindsTheDeepestWorktree() {
+        let list = [wt("/r/app", "main"), wt("/r/app/nested", "x")]
+        XCTAssertEqual(worktree(containing: "/r/app/src", in: list)?.branch, "main")
+        XCTAssertEqual(worktree(containing: "/r/app/nested/a", in: list)?.branch, "x")
+        XCTAssertNil(worktree(containing: "/r/application", in: list))
+    }
+
+    func testLabels() {
+        XCTAssertEqual(wt("/a", "feature/x").label, "feature/x")
+        XCTAssertEqual(wt("/a", nil).label, "detached 1a2b3c4")
+        XCTAssertEqual(Branch(name: "x", remote: "origin").ref, "origin/x")
+        XCTAssertEqual(Branch(name: "x", remote: nil).ref, "x")
+    }
+
+    func testRecentFolders() {
+        XCTAssertEqual(addingRecent("/b", to: ["/a", "/b", "/c"]), ["/b", "/a", "/c"])
+        XCTAssertEqual(addingRecent("/d", to: ["/a", "/b", "/c"], limit: 3), ["/d", "/a", "/b"])
+    }
+
+    func testCoreErrorsSayWhatWentWrong() {
+        XCTAssertThrowsError(try forkWorktree("/nonexistent-\(UUID().uuidString)", "x", false)) { error in
+            XCTAssertTrue(errorMessage(error).contains("not in a git repo"), errorMessage(error))
+        }
+    }
+}

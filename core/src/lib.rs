@@ -21,11 +21,13 @@ mod sessions;
 mod state;
 mod turns;
 mod usage;
+mod worktree;
 
 use sessions::{Session, SessionKey};
 use state::SavedState;
 use turns::{TerminalSignal, TurnUpdate};
 use usage::Limits;
+use worktree::{Branch, NewWorktree, Worktree};
 
 uniffi::setup_scaffolding!();
 
@@ -76,6 +78,59 @@ pub fn project_root(dir: PathBuf) -> PathBuf {
     project::root_of(&dir)
 }
 
+// ---------- worktrees ----------
+
+/// The worktrees of the repo `dir` is in, main first. Empty outside a repo.
+#[uniffi::export]
+pub fn list_worktrees(dir: PathBuf) -> Vec<Worktree> {
+    worktree::list(&dir).unwrap_or_default()
+}
+
+/// Local branches, then remote branches with no local copy yet.
+#[uniffi::export]
+pub fn git_branches(dir: PathBuf) -> Result<Vec<Branch>, CoreError> {
+    Ok(worktree::branches(&dir)?)
+}
+
+/// Where a new worktree for `branch` would go, next to the main checkout.
+#[uniffi::export]
+pub fn new_worktree_path(main: PathBuf, branch: String) -> PathBuf {
+    worktree::new_path(&main, &branch)
+}
+
+/// Checks out an existing branch (`x`, or `origin/x` for a remote one) in a
+/// new worktree of the repo `dir` is in. Copies ignored files like `.env`
+/// from the main checkout.
+#[uniffi::export]
+pub fn add_worktree(dir: PathBuf, branch: String) -> Result<NewWorktree, CoreError> {
+    Ok(worktree::add(&dir, &branch)?)
+}
+
+/// Makes a new branch from what the worktree `from` has checked out, in a
+/// new worktree. Copies ignored files from `from`, and with `changes` its
+/// uncommitted changes too.
+#[uniffi::export]
+pub fn fork_worktree(
+    from: PathBuf,
+    new_branch: String,
+    changes: bool,
+) -> Result<NewWorktree, CoreError> {
+    Ok(worktree::fork(&from, &new_branch, changes)?)
+}
+
+/// A short name for where `dir` is: `repo` in the main checkout,
+/// `repo/worktree` in a linked worktree, else the folder's name.
+#[uniffi::export]
+pub fn place_name(dir: PathBuf) -> String {
+    worktree::place(&dir)
+}
+
+/// True if the worktree has uncommitted changes or untracked files.
+#[uniffi::export]
+pub fn worktree_has_changes(dir: PathBuf) -> bool {
+    worktree::has_changes(&dir)
+}
+
 // ---------- scanning ----------
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -117,6 +172,9 @@ pub struct Scan {
     /// The thread each new Codex has open, by pid.
     pub codex_threads: HashMap<i32, String>,
     pub limits: Limits,
+    /// The worktrees of the scanned folder's repo, main first. Empty
+    /// outside a repo.
+    pub worktrees: Vec<Worktree>,
 }
 
 /// Reads transcripts, processes and rate limits. It keeps caches between
@@ -172,6 +230,11 @@ impl SessionScanner {
     pub fn scan(&self, dir: PathBuf, shell_pids: Vec<i32>, new_codex_pids: Vec<i32>) -> Scan {
         let mut s = lock(&self.0);
         let sessions = s.scan_sessions(&dir);
+        let worktrees = s
+            .project
+            .as_ref()
+            .map(|(_, p)| p.worktrees().to_vec())
+            .unwrap_or_default();
         let ScanState {
             sessions: scanner,
             codex_usage,
@@ -202,6 +265,7 @@ impl SessionScanner {
                 .map(|(pid, id)| (pid as i32, id))
                 .collect(),
             limits,
+            worktrees,
         }
     }
 }
