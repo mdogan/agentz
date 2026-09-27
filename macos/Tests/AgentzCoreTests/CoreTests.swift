@@ -98,6 +98,69 @@ final class ThemeColorTests: XCTestCase {
         XCTAssertEqual(TerminalColors.pickTheme("Solo", dark: true), "Solo")
         XCTAssertNil(RGB(hex: "red"))
     }
+
+    func testPickedThemeReplacesConfigColors() {
+        let config = """
+        font-size = 13
+        theme = light:Day,dark:Night
+        background = #101010
+        palette = 1=#ff0000
+        cursor-color=#00ff00
+        """
+        XCTAssertEqual(GhosttyThemes.config(config, using: "/themes/Paper"), """
+        font-size = 13
+        theme = /themes/Paper
+        """)
+        let colors = TerminalColors.from(config: GhosttyThemes.config(config, using: "/themes/Paper"), dark: true) {
+            $0 == "/themes/Paper" ? "background = #fcf4dc\npalette = 1=#c94c22" : nil
+        }
+        XCTAssertEqual(colors.background, RGB(hex: "fcf4dc"))
+        XCTAssertEqual(colors.foreground, TerminalColors.ghostty.foreground)
+        XCTAssertEqual(colors.palette, [1: RGB(hex: "c94c22")!])
+        XCTAssertNil(colors.cursor)
+    }
+
+    private func themeDirectories() throws -> (dirs: [String], cleanup: () -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("agentz-themes-\(UUID().uuidString)")
+        let dirs = [root.appendingPathComponent("user"), root.appendingPathComponent("app")]
+        for dir in dirs {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return (dirs.map(\.path), { try? FileManager.default.removeItem(at: root) })
+    }
+
+    func testListsThemeNamesOnceInFinderOrder() throws {
+        let (dirs, cleanup) = try themeDirectories()
+        defer { cleanup() }
+        try FileManager.default.createDirectory(atPath: dirs[0] + "/Folder", withIntermediateDirectories: true)
+        for (dir, name) in [
+            (dirs[0], "Theme 10"), (dirs[0], "Mine"), (dirs[0], ".hidden"),
+            (dirs[1], "Theme 2"), (dirs[1], "Mine"), (dirs[1], "alabaster"),
+        ] {
+            try "background = #333333".write(toFile: dir + "/" + name, atomically: true, encoding: .utf8)
+        }
+        XCTAssertEqual(GhosttyThemes.names(in: dirs), ["alabaster", "Mine", "Theme 2", "Theme 10"])
+        XCTAssertEqual(GhosttyThemes.path(of: "Mine", in: dirs), dirs[0] + "/Mine")
+        XCTAssertNil(GhosttyThemes.path(of: "Gone", in: dirs))
+    }
+
+    func testSortsThemesIntoLightAndDark() throws {
+        let (dirs, cleanup) = try themeDirectories()
+        defer { cleanup() }
+        for (name, text) in [
+            ("Paper", "background = #f7f7f7"),
+            ("Night", "background = #212121"),
+            ("Bare", "foreground = #111111"),
+        ] {
+            try text.write(toFile: dirs[0] + "/" + name, atomically: true, encoding: .utf8)
+        }
+        XCTAssertEqual(GhosttyThemes.themes(named: ["Paper", "Night", "Bare"], in: dirs), [
+            GhosttyTheme(name: "Paper", isDark: false),
+            GhosttyTheme(name: "Night", isDark: true),
+            // No background means Ghostty's dark default.
+            GhosttyTheme(name: "Bare", isDark: true),
+        ])
+    }
 }
 
 final class WorktreeTests: XCTestCase {

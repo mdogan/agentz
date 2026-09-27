@@ -102,3 +102,82 @@ public struct TerminalColors: Equatable, Sendable {
         return parts.first { !$0.hasPrefix("light:") && !$0.hasPrefix("dark:") } ?? parts.first
     }
 }
+
+/// A Ghostty theme agentz can switch to.
+public struct GhosttyTheme: Hashable, Sendable {
+    public var name: String
+    public var isDark: Bool
+
+    public init(name: String, isDark: Bool) {
+        (self.name, self.isDark) = (name, isDark)
+    }
+}
+
+/// The Ghostty themes on disk, and configs that use one of them.
+public enum GhosttyThemes {
+    /// Where Ghostty looks for themes by name. User themes come first.
+    public static func directories(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = NSHomeDirectory()
+    ) -> [String] {
+        let xdg = environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 } ?? home + "/.config"
+        return [
+            xdg + "/ghostty/themes",
+            home + "/Library/Application Support/com.mitchellh.ghostty/themes",
+            "/Applications/Ghostty.app/Contents/Resources/ghostty/themes",
+            home + "/Applications/Ghostty.app/Contents/Resources/ghostty/themes",
+        ]
+    }
+
+    /// The file of the theme `name`, an absolute path or a name found in
+    /// `directories`.
+    public static func path(of name: String, in directories: [String] = directories()) -> String? {
+        if name.hasPrefix("/") { return FileManager.default.fileExists(atPath: name) ? name : nil }
+        return directories.map { $0 + "/" + name }.first { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// Every theme name in `directories`, each once, in Finder's order.
+    public static func names(in directories: [String] = directories()) -> [String] {
+        let fileManager = FileManager.default
+        var names = Set<String>()
+        for directory in directories {
+            guard let entries = try? fileManager.contentsOfDirectory(atPath: directory) else { continue }
+            for entry in entries where !entry.hasPrefix(".") {
+                var isDirectory: ObjCBool = false
+                if fileManager.fileExists(atPath: directory + "/" + entry, isDirectory: &isDirectory),
+                   !isDirectory.boolValue
+                {
+                    names.insert(entry)
+                }
+            }
+        }
+        return names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    /// Each named theme with whether its background is dark, for the Light
+    /// and Dark theme menus. A theme without a background keeps Ghostty's
+    /// dark one.
+    public static func themes(named names: [String], in directories: [String] = directories()) -> [GhosttyTheme] {
+        names.map { name in
+            let text = path(of: name, in: directories).flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
+            let colors = TerminalColors.from(config: text ?? "", dark: true) { _ in nil }
+            return GhosttyTheme(name: name, isDark: colors.isDark)
+        }
+    }
+
+    /// Settings a theme sets, which a picked theme replaces.
+    static let colorKeys: Set<String> = [
+        "theme", "background", "foreground", "palette", "cursor-color", "cursor-text",
+        "selection-background", "selection-foreground", "bold-color",
+    ]
+
+    /// `config` with the theme file at `path` in place of its own theme
+    /// and colors, so the picked theme shows on Ghostty's defaults alone.
+    public static func config(_ config: String, using path: String) -> String {
+        let kept = config.split(separator: "\n", omittingEmptySubsequences: false).filter { line in
+            guard let key = TerminalColors.parse(String(line)).first?.key else { return true }
+            return !colorKeys.contains(key)
+        }
+        return (kept + ["theme = " + path]).joined(separator: "\n")
+    }
+}

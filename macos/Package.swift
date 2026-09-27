@@ -8,7 +8,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     dependencies: [
         // Ghostty's full embedding API (renderer, input, PTY) as a prebuilt
-        // XCFramework. Only Sources/Agentz/Terminal.swift imports it.
+        // XCFramework, and Ghostty's themes for when Ghostty.app is not
+        // installed. Only Sources/Agentz/Terminal.swift imports them.
         .package(url: "https://github.com/Lakr233/libghostty-spm.git", exact: "1.6.20260922"),
     ],
     targets: [
@@ -23,6 +24,7 @@ let package = Package(
             dependencies: [
                 "AgentzCore",
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
+                .product(name: "GhosttyTheme", package: "libghostty-spm"),
             ],
             path: "Sources/Agentz",
             swiftSettings: swift5

@@ -4,11 +4,14 @@ import SwiftUI
 
 /// The window's colors, taken from the terminals' Ghostty theme so the
 /// sidebar and title bar match them. Follows the system appearance for
-/// themes with a light and a dark side.
+/// themes with a light and a dark side, unless a theme is picked in the
+/// Theme menu.
 @MainActor
 @Observable
 final class Look {
     private(set) var colors: TerminalColors
+    /// Every Ghostty theme on disk, for the Theme menu.
+    @ObservationIgnored private(set) var themes: [GhosttyTheme] = []
     @ObservationIgnored private var observation: NSKeyValueObservation?
 
     init() {
@@ -25,6 +28,28 @@ final class Look {
     private func update() {
         let new = GhosttyApp.colors(dark: Self.systemIsDark)
         if new != colors { colors = new }
+    }
+
+    /// The name of the picked theme, or nil when following the config or
+    /// when the picked one is no longer on disk.
+    var selectedTheme: String? {
+        let name = UserDefaults.standard.string(forKey: GhosttyApp.selectedThemeKey)
+        return themes.contains { $0.name == name } ? name : nil
+    }
+
+    /// Uses `name`'s colors from now on, or the Ghostty config's when `nil`.
+    func selectTheme(_ name: String?) {
+        GhosttyApp.selectTheme(name)
+        update()
+    }
+
+    /// Reads the themes on disk again. Sorting them into light and dark
+    /// reads every file, so that is only redone when themes were added or
+    /// removed.
+    func refreshThemes() {
+        let dirs = GhosttyApp.themeDirectories
+        let names = GhosttyThemes.names(in: dirs)
+        if names != themes.map(\.name) { themes = GhosttyThemes.themes(named: names, in: dirs) }
     }
 
     var isDark: Bool { colors.isDark }

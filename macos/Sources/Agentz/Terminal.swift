@@ -13,6 +13,7 @@
 import AgentzCore
 import AppKit
 import GhosttyTerminal
+import GhosttyTheme
 
 @MainActor
 final class Terminal: NSObject {
@@ -259,15 +260,22 @@ final class SurfaceView: TerminalView {
     }
 }
 
-/// The one Ghostty app all terminals share, and its config.
+/// The one Ghostty app all terminals share, and its config. A theme picked
+/// in the Theme menu replaces the config's colors, across launches, until
+/// "Follow Ghostty" is picked again.
 @MainActor
 enum GhosttyApp {
+    /// The `UserDefaults` key of the picked theme's name; absent to follow
+    /// the Ghostty config.
+    static let selectedThemeKey = "selectedGhosttyTheme"
     /// Why the user's Ghostty config could not be used, if it could not.
     private(set) static var configIssue: String?
     /// The config the terminals use, for reading their colors.
     private static var configText = ""
     /// True when the wrapper's own theme gives the colors.
     private static var usesDefaultTheme = true
+    /// The user's Ghostty config, read once at launch.
+    private static var userText: String?
 
     /// The terminals' colors in the light or dark appearance.
     static func colors(dark: Bool) -> TerminalColors {
@@ -277,6 +285,59 @@ enum GhosttyApp {
             text = (dark ? TerminalTheme.default.dark : TerminalTheme.default.light).rendered + "\n" + text
         }
         return TerminalColors.from(config: text, dark: dark) { try? String(contentsOfFile: $0, encoding: .utf8) }
+    }
+
+    /// Where themes are found by name: Ghostty's own places, and without
+    /// Ghostty.app, the themes that come with the library, written out
+    /// once per launch.
+    static let themeDirectories: [String] = {
+        var dirs = GhosttyThemes.directories()
+        guard !dirs.contains(where: { $0.hasSuffix("/Ghostty.app/Contents/Resources/ghostty/themes") && isDirectory($0) })
+        else { return dirs }
+        let bundled = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(Bundle.main.bundleIdentifier ?? "agentz")
+            .appendingPathComponent("ghostty-themes")
+        // Written fresh, so themes dropped from the library go away too.
+        try? FileManager.default.removeItem(at: bundled)
+        guard (try? FileManager.default.createDirectory(at: bundled, withIntermediateDirectories: true)) != nil
+        else { return dirs }
+        for theme in GhosttyThemeCatalog.allThemes where !theme.name.contains("/") {
+            let text = theme.toTerminalConfiguration().rendered
+            try? text.write(to: bundled.appendingPathComponent(theme.name), atomically: false, encoding: .utf8)
+        }
+        dirs.append(bundled.path)
+        return dirs
+    }()
+
+    /// The user's config with the picked theme, if any, in place of its
+    /// colors. Nil without either. A picked theme that is no longer on
+    /// disk is left out, so the config's colors show.
+    private static var themedUserText: String? {
+        let picked = UserDefaults.standard.string(forKey: selectedThemeKey)
+            .flatMap { GhosttyThemes.path(of: $0, in: themeDirectories) }
+        guard let picked else { return userText }
+        return GhosttyThemes.config(userText ?? "", using: picked)
+    }
+
+    /// Uses `name`'s colors in every terminal from now on, or the Ghostty
+    /// config's when `nil`.
+    static func selectTheme(_ name: String?) {
+        UserDefaults.standard.set(name, forKey: selectedThemeKey)
+        configIssue = nil
+        if let user = themedUserText {
+            let text = defaults + "\n" + user
+            _ = controller.setTheme(TerminalTheme())
+            if controller.updateConfigSource(.generated(text)) {
+                configText = text
+                usesDefaultTheme = false
+                return
+            }
+            configIssue = controller.lastConfigurationIssue
+        }
+        controller.updateConfigSource(.generated(defaults))
+        _ = controller.setTheme(.default)
+        configText = defaults
+        usesDefaultTheme = true
     }
 
     /// Created on first use, after the login shell's environment is loaded,
@@ -292,7 +353,8 @@ enum GhosttyApp {
         // The wrapper writes a config file per load and leaves them behind.
         try? FileManager.default.removeItem(at: TerminalController.managedConfigDirectory)
         configText = defaults
-        guard let user = userConfig() else {
+        userText = userConfig()
+        guard let user = themedUserText else {
             return TerminalController(configSource: .generated(defaults), theme: .default)
         }
         // Ours first, so their own settings and keybinds win.
@@ -371,10 +433,7 @@ enum GhosttyApp {
         guard let path = candidates.first(where: { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }),
               let text = try? String(contentsOfFile: path, encoding: .utf8)
         else { return nil }
-        let themeDirs = [
-            xdg + "/ghostty/themes",
-            "/Applications/Ghostty.app/Contents/Resources/ghostty/themes",
-        ]
+        let themeDirs = themeDirectories
         return text.split(separator: "\n", omittingEmptySubsequences: false).compactMap { line in
             let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             guard parts.count == 2 else { return String(line) }
@@ -396,9 +455,7 @@ enum GhosttyApp {
         value.split(separator: ",").map { part in
             let pieces = part.split(separator: ":", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             let name = pieces.last ?? ""
-            let path = name.hasPrefix("/") ? name : dirs.map { $0 + "/" + name }.first {
-                FileManager.default.fileExists(atPath: $0)
-            } ?? name
+            let path = GhosttyThemes.path(of: name, in: dirs) ?? name
             return pieces.count == 2 ? "\(pieces[0]):\(path)" : path
         }.joined(separator: ",")
     }

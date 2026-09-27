@@ -3,8 +3,9 @@ import AppKit
 import UserNotifications
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
     private var workspace: Workspace?
+    private var look: Look?
     private var windowController: MainWindowController?
     private var scanner: Scanner?
     /// A folder the app was asked to open before it finished launching.
@@ -48,10 +49,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         let workspace = Workspace(projectDir: isDirectory(dir) ? dir : NSHomeDirectory())
         self.workspace = workspace
+        let look = Look()
+        self.look = look
         if SmokeTest.logPath == nil { remember(workspace.projectDir) }
         let controller = MainWindowController(
             workspace: workspace,
-            look: Look(),
+            look: look,
             actions: SidebarActions(
                 close: { [weak self] key in self?.closeSession(key) },
                 start: { [weak self] agent, dir, repo in self?.start(agent, in: dir, repo: repo) },
@@ -292,6 +295,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         alert.runModal()
     }
 
+    @objc func selectTheme(_ sender: NSMenuItem) {
+        look?.selectTheme(sender.representedObject as? String)
+        if let issue = GhosttyApp.configIssue {
+            workspace?.setStatus("Your Ghostty config was not used: \(issue)")
+        }
+    }
+
+    /// View > Theme: follow the Ghostty config, or pick any Ghostty theme
+    /// from the Light and Dark submenus. Filled each time it opens, so new
+    /// themes show up.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let look else { return }
+        look.refreshThemes()
+        let selected = look.selectedTheme
+        menu.removeAllItems()
+        add(menu, "Follow Ghostty", #selector(selectTheme(_:))).state = selected == nil ? .on : .off
+        menu.addItem(.separator())
+        let light = look.themes.filter { !$0.isDark }
+        let dark = look.themes.filter(\.isDark)
+        // Without Ghostty.app there are usually no themes; say so instead
+        // of showing empty submenus.
+        if light.isEmpty && dark.isEmpty {
+            menu.addItem(withTitle: "No Ghostty Themes Found", action: nil, keyEquivalent: "")
+        }
+        for (title, themes) in [("Light", light), ("Dark", dark)] where !themes.isEmpty {
+            let side = submenu(menu, title)
+            for theme in themes {
+                let item = add(side, theme.name, #selector(selectTheme(_:)))
+                item.representedObject = theme.name
+                item.state = theme.name == selected ? .on : .off
+            }
+        }
+    }
+
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let workspace else { return false }
         switch item.action {
@@ -350,6 +387,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         view.addItem(.separator())
         let sidebar = add(view, "Toggle Session List", #selector(toggleSessionList(_:)), "s")
         sidebar.keyEquivalentModifierMask = [.command, .control]
+        view.addItem(.separator())
+        submenu(view, "Theme").delegate = self
 
         let window = submenu(main, "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
@@ -362,6 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         return main
     }
 
+    @discardableResult
     private func submenu(_ main: NSMenu, _ title: String) -> NSMenu {
         let item = main.addItem(withTitle: title, action: nil, keyEquivalent: "")
         let menu = NSMenu(title: title)
