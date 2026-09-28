@@ -65,7 +65,7 @@ struct SidebarView: View {
                 HStack(spacing: 2) {
                     ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
                         PopUpButton(look: look, help: "New \(agent.displayName) session. Pick a folder, or a worktree of a repo.", menu: { startMenu(agent) }) {
-                            Text(agent.icon)
+                            agent.icon
                                 .foregroundStyle(look.color(for: agent))
                             Text(agent.displayName)
                                 .lineLimit(1)
@@ -329,8 +329,8 @@ struct SidebarView: View {
                 Button(agent.newHere) { workspace.newSession(agent, cwd: row.cwd) }
             }
             Divider()
-            Button("Show Folder in Finder") {
-                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: row.cwd)
+            ForEach(FolderApp.installed) { app in
+                Button(app.title) { app.open(row.cwd) }
             }
             Button("Copy Folder Path") { copy(row.cwd) }
         }
@@ -415,7 +415,7 @@ private struct RowView: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            Text(row.key.agent.icon)
+            row.key.agent.icon
                 .font(.system(size: 13))
                 .foregroundStyle(look.color(for: row.key.agent))
                 .frame(width: 16)
@@ -478,6 +478,31 @@ private struct RowView: View {
     }
 }
 
+/// An app a session's folder opens in.
+@MainActor
+struct FolderApp: Identifiable {
+    let id: String
+    let title: String
+    let url: URL
+
+    /// Finder, and Zed when it is installed. Looked up once.
+    static let installed: [FolderApp] = [
+        ("com.apple.finder", "Open in Finder"),
+        ("dev.zed.Zed", "Open in Zed"),
+    ].compactMap { id, title in
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { FolderApp(id: id, title: title, url: $0) }
+    }
+
+    func open(_ dir: String) {
+        let folder = URL(fileURLWithPath: dir)
+        if id == "com.apple.finder" {
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder.path)
+        } else {
+            NSWorkspace.shared.open([folder], withApplicationAt: url, configuration: NSWorkspace.OpenConfiguration())
+        }
+    }
+}
+
 /// The buttons on a hovered row: start a new session in its folder, and
 /// stop the session's agent or shell, like File › Close Session.
 private struct RowButtons: View {
@@ -486,7 +511,7 @@ private struct RowButtons: View {
     let start: (Agent) -> Void
     let close: () -> Void
 
-    static let size: CGFloat = 18
+    static let size: CGFloat = 22
 
     static func width(closable: Bool) -> CGFloat {
         size * (closable ? 4 : 3)
@@ -496,15 +521,15 @@ private struct RowButtons: View {
         HStack(spacing: 0) {
             ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
                 RowButton(look: look, help: agent.newHere, action: { start(agent) }) { _ in
-                    Text(agent.icon)
-                        .font(.system(size: 11))
+                    agent.icon
+                        .font(.system(size: 13))
                         .foregroundStyle(look.color(for: agent))
                 }
             }
             if closable {
                 RowButton(look: look, help: "Close Session", action: close) { hovered in
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundStyle(hovered ? look.text : look.secondary)
                 }
             }
@@ -551,7 +576,7 @@ private struct UsageView: View {
                 ForEach(usage, id: \.0) { agent, u in
                     GridRow {
                         HStack(spacing: 5) {
-                            Text(agent.icon).foregroundStyle(look.color(for: agent))
+                            agent.icon.foregroundStyle(look.color(for: agent))
                             Text(agent.displayName).fontWeight(.semibold)
                         }
                         .gridCellColumns(4)
@@ -617,7 +642,7 @@ struct EmptyPaneView: View {
                let row = workspace.rows.first(where: { $0.key == key })
             {
                 HStack(spacing: 8) {
-                    Text(row.key.agent.icon).foregroundStyle(look.color(for: row.key.agent))
+                    row.key.agent.icon.foregroundStyle(look.color(for: row.key.agent))
                     Text(row.title).font(.title3).lineLimit(2)
                 }
                 Text("\(row.key.agent.name) · \(tilde(row.cwd)) · \(age(now: workspace.now, row.updated))")
@@ -654,11 +679,12 @@ struct EmptyPaneView: View {
 }
 
 extension Agent {
-    var icon: String {
+    /// Text, so it takes the font and color around it.
+    var icon: Text {
         switch self {
-        case .claude: "✻"
-        case .codex: "◆"
-        case .shell: "❯"
+        case .claude: Text("✻")
+        case .codex: Text("◆")
+        case .shell: Text(Image(systemName: "terminal"))
         }
     }
 
