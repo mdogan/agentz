@@ -542,9 +542,14 @@ final class Workspace {
     }
 
     /// The list selection moved. Running sessions are shown right away;
-    /// others wait for `open`, since resuming starts a process.
+    /// others wait for `open`, since resuming starts a process. Until then
+    /// the pane offers to resume them.
     func select(_ key: SessionKey?) {
-        guard let key, let r = tabs.first(where: { $0.shows(key) && $0.isRunning }) else { return }
+        guard let key else { return }
+        guard let r = tabs.first(where: { $0.shows(key) && $0.isRunning }) else {
+            current = nil
+            return
+        }
         if current != r.key {
             prune(keep: key)
             current = r.key

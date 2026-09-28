@@ -693,6 +693,9 @@ struct EmptyPaneView: View {
                 Button("Resume") { workspace.open(key) }
                     .keyboardShortcut(.defaultAction)
                     .padding(.top, 4)
+                Text("Tip: double-click a session in the list to resume it right away.")
+                    .font(.callout)
+                    .foregroundStyle(look.secondary)
             } else {
                 Text("Pick a session on the left. Double-click it or press Return to open it.")
                     .foregroundStyle(look.secondary)
