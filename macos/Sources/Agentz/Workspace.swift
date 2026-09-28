@@ -148,6 +148,8 @@ final class Workspace {
     /// Rows whose agent finished while the user was not looking, until the
     /// user looks.
     private(set) var waitingKeys: Set<SessionKey> = []
+    /// Rows whose agent quit while the user was not looking.
+    private(set) var quitKeys: Set<SessionKey> = []
     /// macOS does not let agentz show notifications.
     var notificationsOff = false
     private(set) var runningCount = 0
@@ -162,6 +164,7 @@ final class Workspace {
             for old in oldValue where !tabs.contains(where: { $0 === old }) {
                 old.terminal.close()
                 waiting.remove(ObjectIdentifier(old))
+                quit.remove(ObjectIdentifier(old))
             }
             onLayout?()
         }
@@ -172,6 +175,9 @@ final class Workspace {
     @ObservationIgnored private var nextNewId = 1
     /// Tabs whose agent wants attention.
     @ObservationIgnored private var waiting = Set<ObjectIdentifier>()
+    /// Tabs whose agent quit while the user was not looking. They stay,
+    /// without a process, until the user resumes or closes the session.
+    @ObservationIgnored private var quit = Set<ObjectIdentifier>()
     /// `Row.place` by folder.
     @ObservationIgnored private var places: [String: String] = [:]
 
@@ -179,7 +185,9 @@ final class Workspace {
     @ObservationIgnored var onLayout: (() -> Void)?
     @ObservationIgnored var onTick: (() -> Void)?
     @ObservationIgnored var focusTerminal: (() -> Void)?
-    @ObservationIgnored var notify: ((_ agent: Agent, _ title: String, _ message: String?, _ key: SessionKey) -> Void)?
+    /// Shows a notification: `heading`, then the session's `title` and
+    /// `message`. Clicking it opens `key`.
+    @ObservationIgnored var notify: ((_ heading: String, _ title: String, _ message: String?, _ key: SessionKey) -> Void)?
     /// False while the window is in the background.
     @ObservationIgnored var isWindowFocused: () -> Bool = { true }
     @ObservationIgnored var requestScan: (() -> Void)?
@@ -313,7 +321,7 @@ final class Workspace {
             guard let key = r.key.agent == .shell ? r.linked : r.key else { continue }
             let title = sessions.first { $0.key == key }?.title ?? r.fallbackTitle
             waiting.insert(ObjectIdentifier(r))
-            notify?(key.agent, title, notice.message, key)
+            notify?("\(key.agent.displayName) is waiting", title, notice.message, key)
         }
         let titleChanged = tabs.contains { r in
             r.key.agent == .shell && r.linked == nil && rows.contains { $0.key == r.key && $0.title != r.title }
@@ -429,8 +437,14 @@ final class Workspace {
         var running = Set<SessionKey>()
         var busy = Set<SessionKey>()
         var waitingRows = Set<SessionKey>()
+        var quitRows = Set<SessionKey>()
         for row in rows {
-            guard let r = tabs.first(where: { $0.shows(row.key) && $0.isRunning }) else { continue }
+            guard let r = tabs.first(where: { $0.shows(row.key) && $0.isRunning }) else {
+                if tabs.contains(where: { $0.shows(row.key) && quit.contains(ObjectIdentifier($0)) }) {
+                    quitRows.insert(row.key)
+                }
+                continue
+            }
             running.insert(row.key)
             if r.isBusy { busy.insert(row.key) }
             if waiting.contains(ObjectIdentifier(r)) { waitingRows.insert(row.key) }
@@ -438,6 +452,7 @@ final class Workspace {
         if running != runningKeys { runningKeys = running }
         if busy != busyKeys { busyKeys = busy }
         if waitingRows != waitingKeys { waitingKeys = waitingRows }
+        if quitRows != quitKeys { quitKeys = quitRows }
         let count = tabs.filter(\.isRunning).count
         if count != runningCount { runningCount = count }
         let linked = currentTab?.linked
@@ -459,10 +474,15 @@ final class Workspace {
             focusTerminal?()
             return
         }
-        guard let row = rows.first(where: { $0.key == key }) else { return }
+        // From a notification, the session may not be listed any more.
+        guard let (cwd, title) = rows.first(where: { $0.key == key }).map({ ($0.cwd, $0.title) })
+            ?? sessions.first(where: { $0.key == key }).map({ ($0.cwd, $0.title) })
+        else { return }
+        // The tab of an agent that quit makes way for the resumed one.
+        tabs.removeAll { $0.shows(key) && !$0.isRunning }
         // A Codex session that never got a transcript starts fresh.
         let resume = key.id.hasPrefix("new-") || key.agent == .shell ? nil : key.id
-        startFromActiveShell(key.agent, resume: resume, cwd: row.cwd, shellCwd: false, title: row.title)
+        startFromActiveShell(key.agent, resume: resume, cwd: cwd, shellCwd: false, title: title)
     }
 
     /// The list selection moved. Running sessions are shown right away;
@@ -524,9 +544,12 @@ final class Workspace {
     }
 
     /// Placeholder shells are kept only until the user moves on. Drops
-    /// them, except the one showing `keep`.
+    /// them and ended tabs, except the one showing `keep` and agents that
+    /// quit while the user was away.
     private func prune(keep: SessionKey?) {
-        tabs.removeAll { r in !(keep.map(r.shows) ?? false) && (!r.isRunning || r.placeholder) }
+        tabs.removeAll { r in
+            !(keep.map(r.shows) ?? false) && !quit.contains(ObjectIdentifier(r)) && (!r.isRunning || r.placeholder)
+        }
     }
 
     /// Spawns an agent or shell. `resume` is the session id to resume, or
@@ -565,6 +588,12 @@ final class Workspace {
             guard let self, let tab else { return }
             self.exited(tab)
         }
+        if agent == .shell {
+            terminal.onCommandFinished = { [weak self, weak tab] exitCode, seconds in
+                guard let self, let tab else { return }
+                self.commandFinished(tab, exitCode: exitCode, seconds: seconds)
+            }
+        }
         tabs.append(tab)
         current = key
         selection = key
@@ -577,11 +606,23 @@ final class Workspace {
         guard let i = tabs.firstIndex(where: { $0 === tab }) else { return }
         let key = tab.key
         let hadFocus = tab.terminal.isFocused
-        if key.agent != .shell, Date().timeIntervalSince(tab.spawnedAt) < 3 {
+        let early = Date().timeIntervalSince(tab.spawnedAt) < 3
+        if key.agent != .shell, early {
             setStatus("\(key.agent.name) quit right after starting. Is it installed and in your login shell's PATH?")
         }
+        // An agent only quits when told to, in its own tab. Quitting while
+        // nobody looks means it crashed or something killed it.
+        let unexpected = key.agent != .shell && !early && !(isWindowFocused() && current == key)
+        if unexpected {
+            let title = sessions.first { $0.key == key }?.title ?? tab.fallbackTitle
+            notify?("\(key.agent.displayName) quit", title, "It quit while you were away. Open the session to resume it.", key)
+        }
         if current != key {
-            tabs.remove(at: i)
+            if unexpected {
+                quit.insert(ObjectIdentifier(tab))
+            } else {
+                tabs.remove(at: i)
+            }
         } else if key.agent == .shell {
             // Like closing a terminal tab.
             tabs.remove(at: i)
@@ -596,6 +637,29 @@ final class Workspace {
             }
         }
         rebuildRows()
+    }
+
+    /// A command the user ran in a shell ended. Tells the user as the
+    /// Ghostty config's `notify-on-command-finish` settings say.
+    private func commandFinished(_ tab: Tab, exitCode: Int?, seconds: TimeInterval) {
+        let settings = GhosttyApp.commandFinish
+        let looking = isWindowFocused() && current == tab.key
+        guard settings.applies(seconds: seconds, looking: looking), settings.bell || settings.notify else { return }
+        if !looking {
+            waiting.insert(ObjectIdentifier(tab))
+            refreshStates()
+        }
+        // Ghostty's bell bounces the Dock icon; it does nothing while the
+        // app is in front.
+        if settings.bell { NSApp.requestUserAttention(.informationalRequest) }
+        guard settings.notify else { return }
+        // The scan saw the command if it ran for a few seconds.
+        let command = tab.foreground?.name
+        let failed = exitCode.map { $0 != 0 } ?? false
+        let heading = "\(command ?? "Command") \(failed ? "failed" : "finished")"
+        var message = "Took \(elapsed(seconds))"
+        if failed, let exitCode { message = "Exit code \(exitCode) after \(elapsed(seconds))" }
+        notify?(heading, tilde(tab.cwd), message, tab.linked ?? tab.key)
     }
 
     /// Stops the session's agent or shell and closes its tab, then shows the

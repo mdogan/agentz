@@ -46,6 +46,10 @@ The list shows sessions from all repos. At start it shows only sessions with a r
 
 When an agent finishes or waits for your permission while you are not looking at it, you get a notification. Click it to go to that session. If notifications are off, the session list shows a button to turn them on.
 
+An agent only quits when you tell it to, in its own tab. If one quits while you are looking elsewhere (it crashed, or something killed it), you get a notification and its row shows a red warning sign until you resume or close it.
+
+A shell can tell you when a long command ends, as Ghostty does: set `notify-on-command-finish` (`unfocused` or `always`) in your Ghostty config. `notify-on-command-finish-after` sets how long a command must run (5s by default). `notify-on-command-finish-action` picks `bell` (bounce the Dock icon and mark the row), `notify` (a notification), or both. Like in Ghostty, `bell` is on unless you write `no-bell`. The shell has to mark its commands: fish 4 does this by itself, and Ghostty's shell integration does it for zsh and bash.
+
 **Quit** (⌘Q) asks first if an agent or a command is still running. The open tabs come back on the next launch.
 
 Rate limits for Claude and Codex show at the bottom of the list. To also get Claude's limits from a `claude` you start by hand, use **Agentz › Install Claude Status Line**.

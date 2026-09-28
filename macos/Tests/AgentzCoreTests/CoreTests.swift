@@ -68,6 +68,69 @@ final class PathTests: XCTestCase {
     }
 }
 
+final class CommandFinishTests: XCTestCase {
+    func testDefaultsAreOff() {
+        let settings = CommandFinishSettings(config: "")
+        XCTAssertEqual(settings, CommandFinishSettings())
+        XCTAssertFalse(settings.applies(seconds: 60, looking: false))
+    }
+
+    func testReadsTheConfig() {
+        let settings = CommandFinishSettings(config: """
+        notify-on-command-finish = always
+        notify-on-command-finish = unfocused
+        notify-on-command-finish-action = notify
+        notify-on-command-finish-after = 1m 30s
+        """)
+        XCTAssertEqual(settings.when, .unfocused)
+        // Like Ghostty, `notify` alone keeps the bell.
+        XCTAssertTrue(settings.bell)
+        XCTAssertTrue(settings.notify)
+        XCTAssertEqual(settings.after, 90)
+        XCTAssertTrue(settings.applies(seconds: 90, looking: false))
+        XCTAssertFalse(settings.applies(seconds: 89, looking: false))
+        XCTAssertFalse(settings.applies(seconds: 90, looking: true))
+    }
+
+    func testAlwaysAppliesWhileLooking() {
+        let settings = CommandFinishSettings(config: "notify-on-command-finish = always")
+        XCTAssertTrue(settings.applies(seconds: 5, looking: true))
+        XCTAssertFalse(settings.applies(seconds: 4.9, looking: true))
+    }
+
+    func testActions() {
+        XCTAssertTrue(CommandFinishSettings.actions("no-bell,notify") == (false, true))
+        XCTAssertTrue(CommandFinishSettings.actions("bell, no-notify") == (true, false))
+        XCTAssertTrue(CommandFinishSettings.actions("false") == (false, false))
+        XCTAssertTrue(CommandFinishSettings.actions("true") == (true, true))
+        XCTAssertTrue(CommandFinishSettings.actions("") == (true, false))
+    }
+
+    func testDurations() {
+        XCTAssertEqual(parseDuration("45s"), 45)
+        XCTAssertEqual(parseDuration("1h30m"), 5400)
+        XCTAssertEqual(parseDuration("1m 30s"), 90)
+        XCTAssertEqual(parseDuration("1m1m"), 120)
+        XCTAssertEqual(parseDuration("1d"), 86400)
+        XCTAssertEqual(parseDuration("1w"), 7 * 86400)
+        XCTAssertEqual(parseDuration("250ms")!, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(parseDuration("5µs")!, 5e-6, accuracy: 1e-12)
+        XCTAssertNil(parseDuration(""))
+        XCTAssertNil(parseDuration("5"))
+        XCTAssertNil(parseDuration("s"))
+        XCTAssertNil(parseDuration("5 minutes"))
+        XCTAssertEqual(CommandFinishSettings(config: "notify-on-command-finish-after = soon").after, 5)
+    }
+
+    func testElapsed() {
+        XCTAssertEqual(elapsed(4.6), "5s")
+        XCTAssertEqual(elapsed(60), "1m")
+        XCTAssertEqual(elapsed(63), "1m 3s")
+        XCTAssertEqual(elapsed(7500), "2h 5m")
+        XCTAssertEqual(elapsed(7200), "2h")
+    }
+}
+
 final class ThemeColorTests: XCTestCase {
     func testThemeThenOwnColors() {
         let config = """

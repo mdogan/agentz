@@ -10,6 +10,16 @@ public func until(_ secs: UInt64) -> String {
     }
 }
 
+/// How long something took, e.g. `12s`, `1m 3s` or `2h 5m`.
+public func elapsed(_ seconds: TimeInterval) -> String {
+    let s = Int(max(seconds, 0).rounded())
+    switch s {
+    case ..<60: return "\(s)s"
+    case ..<3600: return s % 60 == 0 ? "\(s / 60)m" : "\(s / 60)m \(s % 60)s"
+    default: return s % 3600 / 60 == 0 ? "\(s / 3600)h" : "\(s / 3600)h \(s % 3600 / 60)m"
+    }
+}
+
 /// How long ago `t` was, e.g. `now`, `5m ago`, `3d ago`.
 public func age(now: Date, _ t: Date) -> String {
     let s = UInt64(max(now.timeIntervalSince(t), 0))

@@ -38,9 +38,9 @@ final class SmokeTest {
     func run() async {
         let ws = workspace
         let notify = ws.notify
-        ws.notify = { [weak self] agent, title, message, key in
+        ws.notify = { [weak self] heading, title, message, key in
             self?.notices.append((key, message))
-            notify?(agent, title, message, key)
+            notify?(heading, title, message, key)
         }
         let tmp = (realPath(NSTemporaryDirectory()) ?? NSTemporaryDirectory()) + "/agentz-smoke-\(getpid())"
         let bin = tmp + "/bin"
@@ -73,12 +73,21 @@ final class SmokeTest {
         t.run("cd \(shellQuote(tmp))")
         check("folder follows cd (OSC 7)", await wait(5) { shell.cwd == tmp || realPath(shell.cwd) == tmp }, shell.cwd)
 
+        // Only shells that mark their commands (OSC 133) report their end.
+        var finished: (exitCode: Int?, seconds: TimeInterval)?
+        let onCommandFinished = t.onCommandFinished
+        t.onCommandFinished = { exitCode, seconds in
+            finished = (exitCode, seconds)
+            onCommandFinished?(exitCode, seconds)
+        }
         t.run("sleep 3")
         check("sees the foreground job", await wait(5) { t.hasForegroundJob })
         check("quit counts a shell running a command", ws.quitCounts().commands == 1)
         ws.requestScan?()
         check("shell named after its job", await wait(5) { shell.title == "sleep" }, shell.title)
         check("job ends", await wait(8) { !t.hasForegroundJob })
+        _ = await wait(2) { finished != nil }
+        lines.append("info command finished: " + (finished.map { "exit \($0.exitCode.map(String.init) ?? "?") after \(elapsed($0.seconds))" } ?? "not reported by \(Launch.shellName)"))
         check("shell name back", await wait(8) { shell.title == Launch.shellName }, shell.title)
 
         // An agent started from the idle shell takes its place and folder.
@@ -139,6 +148,32 @@ final class SmokeTest {
         check("restore starts saved tabs", ws.tabs.count == 1 && ws.currentTab?.cwd == tmp)
         check("restore returns tabs it could not open", failed.tabs.map(\.cwd) == [missing])
         if let key = ws.currentTab?.key { ws.close(key) }
+
+        // An agent that quits while the user looks at another tab: the user
+        // is told, and its row stays until closed.
+        ws.newSession(.shell, cwd: tmp)
+        guard let shown = ws.currentTab else { return finish("no shell to look at") }
+        ws.newSession(.codex, cwd: tmp)
+        guard let quitter = ws.currentTab, quitter.key.agent == .codex else { return finish("no codex tab to quit") }
+        let quitKey = quitter.key
+        // As a click in the list does; the list follows its selection.
+        ws.selection = shown.key
+        ws.open(shown.key)
+        check("back on the shell", ws.current == shown.key)
+        // Past the first seconds, where a quit means it failed to start.
+        _ = await wait(3.5) { false }
+        quitter.terminal.run("")
+        _ = await wait(0.3) { false }
+        quitter.terminal.run("")
+        check("notice when an agent quits while away", await wait(5) {
+            self.notices.contains { $0.key == quitKey && $0.message?.hasPrefix("It quit") == true }
+        })
+        check("quit agent's row stays, marked", ws.quitKeys.contains(quitKey) && ws.tabs.contains { $0 === quitter })
+        ws.cycle(1)
+        check("moving around keeps the quit agent's row", ws.quitKeys.contains(quitKey))
+        ws.close(quitKey)
+        check("closing the quit agent's row removes it", !ws.quitKeys.contains(quitKey) && ws.tabs.count == 1)
+        ws.close(shown.key)
 
         finish(nil)
     }

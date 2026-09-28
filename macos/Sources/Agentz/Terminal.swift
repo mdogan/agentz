@@ -24,6 +24,10 @@ final class Terminal: NSObject {
     var onSignal: ((TerminalSignal) -> Void)?
     /// Called once when the program exits.
     var onExit: (() -> Void)?
+    /// Called when a command the shell ran ends, with its exit code (nil
+    /// if not reported) and how long it ran. Needs the shell to mark its
+    /// commands (OSC 133): Ghostty's shell integration or fish 4 does.
+    var onCommandFinished: ((_ exitCode: Int?, _ seconds: TimeInterval) -> Void)?
     private var knownPid: Int32?
     private var exitWatch: DispatchSourceProcess?
     private let startedAt = Date()
@@ -111,6 +115,7 @@ final class Terminal: NSObject {
         exitWatch = nil
         isRunning = false
         onExit = nil
+        onCommandFinished = nil
         view.controller = nil
         // Ghostty finds a surface's queued messages by its address, and a new
         // surface often gets the freed one's. A "child exited" still queued
@@ -131,6 +136,7 @@ final class Terminal: NSObject {
 extension Terminal:
     TerminalSurfaceTitleDelegate,
     TerminalSurfaceProgressReportDelegate,
+    TerminalSurfaceCommandFinishedDelegate,
     TerminalSurfaceDesktopNotificationDelegate,
     TerminalSurfacePwdDelegate,
     TerminalSurfaceMouseShapeDelegate,
@@ -146,6 +152,10 @@ extension Terminal:
         case .set, .indeterminate: onSignal?(.progress(true))
         case .remove, .error, .pause: onSignal?(.progress(false))
         }
+    }
+
+    func terminalDidFinishCommand(exitCode: Int?, durationNanos: UInt64) {
+        onCommandFinished?(exitCode, TimeInterval(durationNanos) / 1e9)
     }
 
     func terminalDidRequestDesktopNotification(title: String, body: String) {
@@ -276,6 +286,12 @@ enum GhosttyApp {
     private static var usesDefaultTheme = true
     /// The user's Ghostty config, read once at launch.
     private static var userText: String?
+
+    /// What to do when a command in a shell ends, from the config the
+    /// terminals use.
+    static var commandFinish: CommandFinishSettings {
+        CommandFinishSettings(config: configText)
+    }
 
     /// The terminals' colors in the light or dark appearance.
     static func colors(dark: Bool) -> TerminalColors {

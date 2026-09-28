@@ -82,8 +82,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         if window.title != title { window.title = title }
         if window.subtitle != subtitle { window.subtitle = subtitle }
-        // Sessions that finished while the user was away.
-        let waiting = workspace.waitingKeys.count
+        // Sessions that finished or quit while the user was away.
+        let waiting = workspace.waitingKeys.count + workspace.quitKeys.count
         let badge = waiting > 0 ? String(waiting) : nil
         if NSApp.dockTile.badgeLabel != badge { NSApp.dockTile.badgeLabel = badge }
     }

@@ -69,8 +69,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         windowController = controller
         controller.showWindow(nil)
 
-        workspace.notify = { [weak self] agent, title, message, key in
-            self?.notify(agent: agent, title: title, message: message, key: key)
+        workspace.notify = { [weak self] heading, title, message, key in
+            self?.notify(heading: heading, title: title, message: message, key: key)
         }
         let scanner = Scanner(workspace)
         self.scanner = scanner
@@ -434,12 +434,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 // MARK: - Notifications
 
 extension AppDelegate: UNUserNotificationCenterDelegate {
-    /// Tells the user that an agent is waiting. `message` is what the agent
-    /// itself said, e.g. Codex's last reply.
-    private func notify(agent: Agent, title: String, message: String?, key: SessionKey) {
+    /// Tells the user about a session, e.g. that its agent is waiting.
+    /// `message` is what the agent itself said, e.g. Codex's last reply.
+    private func notify(heading: String, title: String, message: String?, key: SessionKey) {
         guard Bundle.main.bundleIdentifier != nil else { return }
         let content = UNMutableNotificationContent()
-        content.title = "\(agent.displayName) is waiting"
+        content.title = heading
         content.body = message.map { "\(title): \(short($0, 200))" } ?? title
         content.sound = .default
         content.userInfo = ["agent": key.agent.name, "id": key.id]

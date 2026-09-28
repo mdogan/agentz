@@ -228,6 +228,7 @@ struct SidebarView: View {
                 LazyVStack(spacing: 2) {
                     ForEach(workspace.rows) { row in
                         let running = workspace.runningKeys.contains(row.key)
+                        let quit = workspace.quitKeys.contains(row.key)
                         RowView(
                             row: row,
                             look: look,
@@ -237,6 +238,7 @@ struct SidebarView: View {
                             running: running,
                             busy: workspace.busyKeys.contains(row.key),
                             waiting: workspace.waitingKeys.contains(row.key),
+                            quit: quit,
                             hovered: hovered == row.key,
                             now: workspace.now
                         )
@@ -253,7 +255,7 @@ struct SidebarView: View {
                             if hovered == row.key {
                                 RowButtons(
                                     look: look,
-                                    closable: running,
+                                    closable: running || quit,
                                     start: { agent in workspace.newSession(agent, cwd: row.cwd) },
                                     close: { actions.close(row.key) }
                                 )
@@ -323,7 +325,7 @@ struct SidebarView: View {
     private func rowMenu(_ key: SessionKey) -> some View {
         let running = workspace.runningKeys.contains(key)
         Button(running ? "Show" : "Resume") { workspace.open(key) }
-        if running {
+        if running || workspace.quitKeys.contains(key) {
             Button("Close") { actions.close(key) }
         }
         Divider()
@@ -418,6 +420,8 @@ private struct RowView: View {
     let running: Bool
     let busy: Bool
     let waiting: Bool
+    /// The agent quit while the user was away.
+    let quit: Bool
     /// The list shows its buttons where the state would be.
     let hovered: Bool
     let now: Date
@@ -442,7 +446,7 @@ private struct RowView: View {
             state
                 .opacity(hovered ? 0 : 1)
                 // Room for the buttons, so the text stops before them.
-                .frame(width: hovered ? RowButtons.width(closable: running) - 2 : 14)
+                .frame(width: hovered ? RowButtons.width(closable: running || quit) - 2 : 14)
         }
         .padding(.leading, 8)
         .padding(.trailing, 6)
@@ -478,6 +482,11 @@ private struct RowView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(look.accent)
                 .help("Done while you were away")
+        } else if quit {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(look.red)
+                .help("Quit while you were away. Open it to resume.")
         } else if running {
             Circle()
                 .fill(look.green)
