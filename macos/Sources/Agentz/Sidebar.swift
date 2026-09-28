@@ -226,9 +226,12 @@ struct SidebarView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 2) {
+                    // Pinned rows come first; a line sets them apart.
+                    let lastPinned = workspace.rows.last(where: \.pinned)?.key
                     ForEach(workspace.rows) { row in
                         let running = workspace.runningKeys.contains(row.key)
                         let quit = workspace.quitKeys.contains(row.key)
+                        let closable = (running || quit) && !row.pinned
                         RowView(
                             row: row,
                             look: look,
@@ -239,6 +242,7 @@ struct SidebarView: View {
                             busy: workspace.busyKeys.contains(row.key),
                             waiting: workspace.waitingKeys.contains(row.key),
                             quit: quit,
+                            closable: closable,
                             hovered: hovered == row.key,
                             now: workspace.now
                         )
@@ -255,7 +259,7 @@ struct SidebarView: View {
                             if hovered == row.key {
                                 RowButtons(
                                     look: look,
-                                    closable: running || quit,
+                                    closable: closable,
                                     start: { agent in workspace.newSession(agent, cwd: row.cwd) },
                                     close: { actions.close(row.key) }
                                 )
@@ -270,6 +274,13 @@ struct SidebarView: View {
                             } else if hovered == row.key {
                                 hovered = nil
                             }
+                        }
+                        if row.key == lastPinned, workspace.rows.last?.key != row.key {
+                            Rectangle()
+                                .fill(look.divider)
+                                .frame(height: 1)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
                         }
                     }
                 }
@@ -324,8 +335,12 @@ struct SidebarView: View {
     @ViewBuilder
     private func rowMenu(_ key: SessionKey) -> some View {
         let running = workspace.runningKeys.contains(key)
+        let pinned = workspace.isPinned(key)
         Button(running ? "Show" : "Resume") { workspace.open(key) }
-        if running || workspace.quitKeys.contains(key) {
+        if running || pinned || workspace.quitKeys.contains(key) {
+            Button(pinned ? "Unpin" : "Pin") { workspace.setPinned(key, !pinned) }
+        }
+        if (running || workspace.quitKeys.contains(key)) && !pinned {
             Button("Close") { actions.close(key) }
         }
         Divider()
@@ -422,6 +437,8 @@ private struct RowView: View {
     let waiting: Bool
     /// The agent quit while the user was away.
     let quit: Bool
+    /// It has a close button when hovered.
+    let closable: Bool
     /// The list shows its buttons where the state would be.
     let hovered: Bool
     let now: Date
@@ -433,10 +450,18 @@ private struct RowView: View {
                 .foregroundStyle(look.color(for: row.key.agent))
                 .frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.title)
-                    .font(.system(size: 12.5, weight: isCurrent ? .semibold : .regular))
-                    .foregroundStyle(running || selected ? look.text : look.text.opacity(0.75))
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Text(row.title)
+                        .font(.system(size: 12.5, weight: isCurrent ? .semibold : .regular))
+                        .foregroundStyle(running || selected ? look.text : look.text.opacity(0.75))
+                        .lineLimit(1)
+                    if row.pinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(look.secondary)
+                            .help("Pinned. Unpin it to close it.")
+                    }
+                }
                 Text("\(row.place) · \(age(now: now, row.updated))")
                     .font(.system(size: 11))
                     .foregroundStyle(look.secondary)
@@ -446,7 +471,7 @@ private struct RowView: View {
             state
                 .opacity(hovered ? 0 : 1)
                 // Room for the buttons, so the text stops before them.
-                .frame(width: hovered ? RowButtons.width(closable: running || quit) - 2 : 14)
+                .frame(width: hovered ? RowButtons.width(closable: closable) - 2 : 14)
         }
         .padding(.leading, 8)
         .padding(.trailing, 6)

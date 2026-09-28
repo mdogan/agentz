@@ -24,7 +24,7 @@ mod usage;
 mod worktree;
 
 use sessions::{Session, SessionKey};
-use state::SavedState;
+use state::{SavedState, SavedTab};
 use turns::{TerminalSignal, TurnUpdate};
 use usage::Limits;
 use worktree::{Branch, NewWorktree, Worktree};
@@ -337,6 +337,18 @@ pub fn save_tabs(state: SavedState) -> Result<(), CoreError> {
 #[uniffi::export]
 pub fn take_tabs() -> Result<Option<SavedState>, CoreError> {
     Ok(state::take()?)
+}
+
+/// Keeps the pinned tabs, for launches after a crash. Empty removes them.
+#[uniffi::export]
+pub fn save_pinned_tabs(tabs: Vec<SavedTab>) -> Result<(), CoreError> {
+    Ok(state::save_pins(tabs)?)
+}
+
+/// The pinned tabs last kept. They stay until unpinned.
+#[uniffi::export]
+pub fn pinned_tabs() -> Result<Vec<SavedTab>, CoreError> {
+    Ok(state::pins()?)
 }
 
 // ---------- turns ----------

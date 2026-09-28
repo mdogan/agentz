@@ -28,7 +28,8 @@ The list shows sessions from all repos. At start it shows only sessions with a r
 
 - **Click** a running session to show it. **Double-click** or press **Return** on any session to open it: it switches to it if it runs, otherwise it resumes it.
 - A spinner means the agent is working. A green dot means it waits for you. A bell means it finished while you were away. The Dock icon shows how many are waiting.
-- Right-click a session to close it, show its folder, or copy its id.
+- Right-click a session to close it, pin it, show its folder, or copy its id.
+- A pinned session stays at the top of the list, above a line, and can't be closed until you unpin it (right-click, or **File › Unpin Session**). If its agent or shell ends, its row stays; open it to start it again. Pinned sessions come back on every launch, even after a crash.
 
 | Shortcut | Action |
 | --- | --- |

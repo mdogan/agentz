@@ -40,6 +40,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             saved = nil
             problem = "Could not restore tabs: \(error)"
         }
+        // No tabs saved on quit: agentz crashed or was killed. The pinned
+        // tabs still come back.
+        if saved == nil, SmokeTest.logPath == nil {
+            do {
+                let pins = try pinnedTabs()
+                if !pins.isEmpty { saved = SavedState(tabs: pins) }
+            } catch {
+                problem = "Could not restore pinned tabs: \(error)"
+            }
+        }
         let dir = pendingProject
             ?? argumentProject()
             ?? saved?.project
@@ -71,6 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
         workspace.notify = { [weak self] heading, title, message, key in
             self?.notify(heading: heading, title: title, message: message, key: key)
+        }
+        if SmokeTest.logPath == nil {
+            workspace.savePins = { [weak workspace] pins in
+                do { try savePinnedTabs(pins) } catch { workspace?.setStatus("Could not save pinned tabs: \(error)") }
+            }
         }
         let scanner = Scanner(workspace)
         self.scanner = scanner
@@ -253,6 +268,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     private func closeSession(_ key: SessionKey) {
         guard let workspace, let tab = workspace.tabs.first(where: { $0.shows(key) }) else { return }
+        if tab.pinned {
+            NSSound.beep()
+            workspace.setStatus("The session is pinned. Unpin it to close it.")
+            return
+        }
         let agent = tab.linked?.agent ?? tab.key.agent
         if tab.isBusy {
             guard confirm("\(agent.displayName) is working.", "Closing stops it.", button: "Close") else { return }
@@ -260,6 +280,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             guard confirm("The shell is running a command.", "Closing stops it.", button: "Close") else { return }
         }
         workspace.close(key)
+    }
+
+    @objc func togglePin(_: Any?) {
+        guard let workspace, let tab = workspace.currentTab else { return }
+        workspace.setPinned(tab.key, !tab.pinned)
     }
 
     /// ⇧⌘I: all sessions, or back to only active ones.
@@ -342,6 +367,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item.state = workspace.range == .all ? .on : .off
         case #selector(selectRange(_:)):
             item.state = workspace.range == SessionRange.allCases[item.tag] ? .on : .off
+        case #selector(togglePin(_:)):
+            item.title = workspace.currentTab?.pinned == true ? "Unpin Session" : "Pin Session"
+            return workspace.currentTab != nil
         case #selector(closeCurrent(_:)), #selector(focusTerminal(_:)):
             return workspace.currentTab != nil
         default:
@@ -376,6 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         file.addItem(.separator())
         add(file, "Open Folder…", #selector(openFolder(_:)), "o")
         file.addItem(.separator())
+        add(file, "Pin Session", #selector(togglePin(_:)))
         add(file, "Close Session", #selector(closeCurrent(_:)), "w")
 
         let edit = submenu(main, "Edit")

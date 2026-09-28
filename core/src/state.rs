@@ -1,4 +1,5 @@
-//! Open tabs saved on normal quit and claimed by the next interactive launch.
+//! Open tabs saved on normal quit and claimed by the next interactive launch,
+//! and pinned tabs, kept until unpinned so they come back after any start.
 
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -19,6 +20,14 @@ pub struct SavedTab {
     pub id: Option<String>,
     pub cwd: PathBuf,
     pub title: String,
+    /// Pinned tabs can't be closed, and come back even after a crash.
+    #[uniffi(default = false)]
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pinned: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
@@ -36,6 +45,8 @@ pub struct SavedState {
 
 /// The name of the state file, and of its lock.
 const STEM: &str = "open-tabs";
+/// The pinned tabs, rewritten each time they change.
+const PINS: &str = "pinned-tabs.json";
 
 fn state_dir() -> Result<PathBuf> {
     Ok(dirs::data_local_dir()
@@ -52,6 +63,39 @@ pub fn save(state: SavedState) -> Result<()> {
 
 pub fn take() -> Result<Option<SavedState>> {
     take_in(&state_dir()?)
+}
+
+pub fn save_pins(tabs: Vec<SavedTab>) -> Result<()> {
+    save_pins_in(&state_dir()?, tabs)
+}
+
+pub fn pins() -> Result<Vec<SavedTab>> {
+    pins_in(&state_dir()?)
+}
+
+fn save_pins_in(dir: &Path, tabs: Vec<SavedTab>) -> Result<()> {
+    with_lock(dir, || {
+        let path = dir.join(PINS);
+        if tabs.is_empty() {
+            return match fs::remove_file(&path) {
+                Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
+                _ => Ok(()),
+            };
+        }
+        write_atomic(&path, &tabs)
+    })
+}
+
+fn pins_in(dir: &Path) -> Result<Vec<SavedTab>> {
+    with_lock(dir, || {
+        let path = dir.join(PINS);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+    })
 }
 
 fn save_in(dir: &Path, state: SavedState) -> Result<()> {
@@ -117,7 +161,7 @@ fn read(path: &Path) -> Result<Option<SavedState>> {
         .map(Some)
 }
 
-fn write_atomic(path: &Path, state: &SavedState) -> Result<()> {
+fn write_atomic(path: &Path, state: &impl Serialize) -> Result<()> {
     let dir = path.parent().context("state path has no parent")?;
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("state");
     let tmp = dir.join(format!(".{stem}-{}.tmp", uuid::Uuid::new_v4()));
@@ -174,6 +218,7 @@ mod tests {
             id: id.map(str::to_string),
             cwd: PathBuf::from("/tmp"),
             title: "tab".into(),
+            pinned: false,
         };
         save_in(
             &dir,
@@ -221,6 +266,7 @@ mod tests {
             id: Some("one".into()),
             cwd: PathBuf::from("/repo"),
             title: "tab".into(),
+            pinned: false,
         };
         let state = SavedState {
             tabs: vec![tab.clone()],
@@ -232,6 +278,28 @@ mod tests {
         assert_eq!(saved.tabs[0].id, None);
         assert_eq!(saved.tabs[1], tab);
         assert_eq!(saved.project, Some(PathBuf::from("/repo")));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pins_are_kept_until_unpinned() {
+        let dir = std::env::temp_dir().join(format!("agentz-state-{}", uuid::Uuid::new_v4()));
+        assert_eq!(pins_in(&dir).unwrap(), vec![]);
+        let tab = SavedTab {
+            agent: Agent::Claude,
+            id: Some("one".into()),
+            cwd: PathBuf::from("/repo"),
+            title: "tab".into(),
+            pinned: true,
+        };
+        save_pins_in(&dir, vec![tab.clone()]).unwrap();
+        // Reading does not take them, unlike the open tabs.
+        assert_eq!(pins_in(&dir).unwrap(), vec![tab.clone()]);
+        assert_eq!(pins_in(&dir).unwrap(), vec![tab]);
+        save_pins_in(&dir, vec![]).unwrap();
+        assert!(!dir.join(PINS).exists());
+        save_pins_in(&dir, vec![]).unwrap();
+        assert_eq!(pins_in(&dir).unwrap(), vec![]);
         fs::remove_dir_all(dir).unwrap();
     }
 

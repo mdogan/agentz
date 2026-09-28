@@ -175,6 +175,30 @@ final class SmokeTest {
         check("closing the quit agent's row removes it", !ws.quitKeys.contains(quitKey) && ws.tabs.count == 1)
         ws.close(shown.key)
 
+        // A pinned tab can't be closed, goes first in the list, and stays
+        // when its program ends, until the user opens it again.
+        ws.newSession(.shell, cwd: tmp)
+        guard let pinned = ws.currentTab else { return finish("no shell to pin") }
+        ws.newSession(.shell, cwd: tmp)
+        guard let unpinned = ws.currentTab else { return finish("no second shell") }
+        ws.setPinned(pinned.key, true)
+        check("pinned row goes first", ws.rows.first?.key == pinned.key && ws.rows.first?.pinned == true)
+        ws.close(pinned.key)
+        check("pinned tab is not closed", ws.tabs.contains { $0 === pinned })
+        check("saved state keeps the pin", ws.savedState().tabs.first?.pinned == true)
+        pinned.terminal.run("exit")
+        check("pinned tab stays when its shell exits", await wait(5) { !pinned.isRunning && ws.tabs.contains { $0 === pinned } })
+        ws.open(unpinned.key)
+        check("moving around keeps the ended pinned tab", ws.tabs.contains { $0 === pinned })
+        ws.open(pinned.key)
+        check("opening the ended pinned tab starts it again", ws.currentTab.map { $0.pinned && $0.isRunning && $0 !== pinned } ?? false)
+        if let key = ws.currentTab?.key {
+            ws.setPinned(key, false)
+            ws.close(key)
+        }
+        ws.close(unpinned.key)
+        check("unpinned tab closes", ws.tabs.isEmpty, "\(ws.tabs.count) left")
+
         finish(nil)
     }
 
