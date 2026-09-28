@@ -34,9 +34,8 @@ pub struct SavedState {
     pub project: Option<PathBuf>,
 }
 
-/// The name of the state file, and of its lock. `mac-` because a terminal
-/// UI once kept its tabs in `open-tabs`.
-const STEM: &str = "mac-open-tabs";
+/// The name of the state file, and of its lock.
+const STEM: &str = "open-tabs";
 
 fn state_dir() -> Result<PathBuf> {
     Ok(dirs::data_local_dir()
@@ -213,7 +212,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         // Written by an older build: sidebar fields, no null ids.
         fs::write(
-            dir.join("mac-open-tabs.json"),
+            dir.join("open-tabs.json"),
             br#"{"tabs":[{"agent":"shell","cwd":"/tmp","title":"fish"}],"active":0,"sidebar_focused":false,"sidebar_width":0,"project":"/repo"}"#,
         )
         .unwrap();
@@ -240,9 +239,9 @@ mod tests {
     fn malformed_state_is_not_consumed() {
         let dir = std::env::temp_dir().join(format!("agentz-state-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("mac-open-tabs.json"), b"broken").unwrap();
+        fs::write(dir.join("open-tabs.json"), b"broken").unwrap();
         assert!(take_in(&dir).is_err());
-        assert!(dir.join("mac-open-tabs.json").exists());
+        assert!(dir.join("open-tabs.json").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 }

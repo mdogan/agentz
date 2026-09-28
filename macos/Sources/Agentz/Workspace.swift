@@ -64,6 +64,32 @@ struct Row: Identifiable, Equatable {
     var id: SessionKey { key }
 }
 
+/// Which sessions the list shows, by when they were last used. Sessions
+/// with a running agent or shell show in all of them.
+enum SessionRange: CaseIterable {
+    case active, today, week, month, all
+
+    var title: String {
+        switch self {
+        case .active: "Only Active Sessions"
+        case .today: "Today's Sessions"
+        case .week: "Last 7 Days' Sessions"
+        case .month: "Last 30 Days' Sessions"
+        case .all: "All Sessions"
+        }
+    }
+
+    func includes(_ updated: Date, now: Date) -> Bool {
+        switch self {
+        case .active: false
+        case .today: updated >= Calendar.current.startOfDay(for: now)
+        case .week: updated >= now.addingTimeInterval(-7 * 86400)
+        case .month: updated >= now.addingTimeInterval(-30 * 86400)
+        case .all: true
+        }
+    }
+}
+
 /// The repo the list is limited to: all its worktrees, or one folder
 /// outside a repo.
 struct RepoFilter: Equatable {
@@ -102,8 +128,8 @@ final class Workspace {
     private(set) var worktrees: [Worktree] = []
     /// Show only this repo's sessions; nil shows all repos.
     var repo: RepoFilter? { didSet { rebuildRows() } }
-    /// Show only sessions with a running agent or shell.
-    var hideInactive = true { didSet { rebuildRows() } }
+    /// At start, only sessions with a running agent or shell.
+    var range = SessionRange.active { didSet { rebuildRows() } }
     var filter = "" { didSet { rebuildRows() } }
     private(set) var rows: [Row] = []
     /// The row the user picked in the list.
@@ -361,12 +387,13 @@ final class Workspace {
     }
 
     func rebuildRows() {
-        // Rows with a process of ours stay visible even when inactive ones
-        // are hidden, so a running agent can't get lost.
+        // Rows with a process of ours stay visible whatever the range, so a
+        // running agent can't get lost.
+        let now = Date()
         var rows: [Row] = sessions.compactMap { s in
             let key = s.key
             let tab = tabs.first { $0.shows(key) }
-            guard tab != nil || !hideInactive else { return nil }
+            guard tab != nil || range.includes(s.updated, now: now) else { return nil }
             let order = tab?.spawnedAt ?? s.updated
             return Row(key: key, title: s.title, cwd: s.cwd, place: place(s.cwd), updated: s.updated, order: order)
         }

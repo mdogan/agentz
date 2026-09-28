@@ -22,7 +22,7 @@ To put the link somewhere else, use `make link PREFIX=...`.
 
 ## Using it
 
-The list shows sessions from all repos. At start it shows only sessions with a running agent or shell. The filter button at the top right limits the list to one recent repo (its main checkout and all its worktrees; outside a repo, only that folder), and shows or hides inactive sessions.
+The list shows sessions from all repos. At start it shows only sessions with a running agent or shell. The filter button at the top right limits the list to one recent repo (its main checkout and all its worktrees; outside a repo, only that folder), and picks which sessions to show: only active ones, today's, the last 7 or 30 days', or all. Sessions with a running agent or shell always show.
 
 **Claude**, **Codex** and **Shell** at the top of the list start a new session. Each opens a menu of recent folders, the one you used last first, and **Open Folder…**. A git repo in it has a submenu of its worktrees: the session starts in the one you pick. **New Worktree…** checks out an existing branch, or makes a new branch from a worktree, in `<repo>.worktrees/<branch>` next to the repo. It copies git-ignored files like `.env` and `node_modules` into the new worktree as APFS clones (instant, no extra disk space until a file changes), and, if you ask, the uncommitted changes too, then starts the session in it.
 
@@ -38,7 +38,7 @@ The list shows sessions from all repos. At start it shows only sessions with a r
 | ⌘] / ⌘[ | next / previous running session |
 | ⌘L / ⌘J | go to the session list / the terminal |
 | ⌘F | filter sessions |
-| ⇧⌘I | show inactive sessions too |
+| ⇧⌘I | show all sessions, or only active ones again |
 | ⌃⌘S | hide or show the session list |
 | ⌘+ / ⌘- / ⌘0 | font size |
 | ⌘K | clear the screen |

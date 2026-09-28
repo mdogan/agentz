@@ -262,10 +262,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         workspace.close(key)
     }
 
-    @objc func toggleInactive(_: Any?) {
+    /// ⇧⌘I: all sessions, or back to only active ones.
+    @objc func toggleAllSessions(_: Any?) {
         guard let workspace else { return }
-        workspace.hideInactive.toggle()
-        workspace.setStatus(workspace.hideInactive ? "Hiding inactive sessions" : "Showing inactive sessions")
+        workspace.range = workspace.range == .all ? .active : .all
+        workspace.setStatus("Showing \(workspace.range == .all ? "all" : "only active") sessions")
+    }
+
+    /// The View menu items for the other ranges, by their tag.
+    @objc func selectRange(_ sender: NSMenuItem) {
+        workspace?.range = SessionRange.allCases[sender.tag]
     }
 
     @objc func focusList(_: Any?) { windowController?.focusSidebar(.list) }
@@ -332,8 +338,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let workspace else { return false }
         switch item.action {
-        case #selector(toggleInactive(_:)):
-            item.state = workspace.hideInactive ? .off : .on
+        case #selector(toggleAllSessions(_:)):
+            item.state = workspace.range == .all ? .on : .off
+        case #selector(selectRange(_:)):
+            item.state = workspace.range == SessionRange.allCases[item.tag] ? .on : .off
         case #selector(closeCurrent(_:)), #selector(focusTerminal(_:)):
             return workspace.currentTab != nil
         default:
@@ -377,7 +385,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         let view = submenu(main, "View")
-        add(view, "Inactive Sessions", #selector(toggleInactive(_:)), "I")
+        for (i, range) in SessionRange.allCases.enumerated() {
+            if range == .all {
+                add(view, range.title, #selector(toggleAllSessions(_:)), "I")
+            } else {
+                add(view, range.title, #selector(selectRange(_:))).tag = i
+            }
+        }
         view.addItem(.separator())
         add(view, "Go to Session List", #selector(focusList(_:)), "l")
         add(view, "Go to Terminal", #selector(focusTerminal(_:)), "j")

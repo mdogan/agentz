@@ -210,10 +210,13 @@ struct SidebarView: View {
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        let inactive = MenuAction("Inactive Sessions") { workspace.hideInactive.toggle() }
-        inactive.state = workspace.hideInactive ? .off : .on
-        inactive.keyEquivalent = "I"
-        menu.addItem(inactive)
+        menu.addItem(.sectionHeader(title: "Sessions"))
+        for range in SessionRange.allCases {
+            let item = MenuAction(range.title) { workspace.range = range }
+            item.state = workspace.range == range ? .on : .off
+            if range == .all { item.keyEquivalent = "I" }
+            menu.addItem(item)
+        }
         return menu
     }
 
@@ -341,7 +344,13 @@ struct SidebarView: View {
 
     private var emptyMessage: String {
         if !workspace.loaded { return "Loading sessions…" }
-        if workspace.hideInactive { return "No running sessions.\nShow inactive ones with ⇧⌘I." }
+        switch workspace.range {
+        case .active: return "No running sessions.\nShow all with ⇧⌘I."
+        case .today: return "No sessions today.\nShow all with ⇧⌘I."
+        case .week: return "No sessions in the last 7 days.\nShow all with ⇧⌘I."
+        case .month: return "No sessions in the last 30 days.\nShow all with ⇧⌘I."
+        case .all: break
+        }
         if let repo = workspace.repo { return "No sessions in \(repo.name).\nShow all repos from the filter menu." }
         return "No sessions"
     }
@@ -657,7 +666,7 @@ struct EmptyPaneView: View {
                     hint("⌘N", "New Claude session")
                     hint("⇧⌘N", "New Codex session")
                     hint("⌘T", "New shell")
-                    hint("⇧⌘I", "Show inactive sessions")
+                    hint("⇧⌘I", "Show all sessions, or only active ones")
                     hint("⌘O", "Pick the folder these start in")
                 }
             }
