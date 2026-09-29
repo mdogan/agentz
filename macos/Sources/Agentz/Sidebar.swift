@@ -528,10 +528,11 @@ struct FolderApp: Identifiable {
     let title: String
     let url: URL
 
-    /// Finder, and Zed when it is installed. Looked up once.
+    /// Finder, and Zed and GitFork when they are installed. Looked up once.
     static let installed: [FolderApp] = [
         ("com.apple.finder", "Open in Finder"),
         ("dev.zed.Zed", "Open in Zed"),
+        ("io.dogan.gitfork", "Open in GitFork"),
     ].compactMap { id, title in
         NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { FolderApp(id: id, title: title, url: $0) }
     }
@@ -540,6 +541,14 @@ struct FolderApp: Identifiable {
         let folder = URL(fileURLWithPath: dir)
         if id == "com.apple.finder" {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder.path)
+        } else if id == "io.dogan.gitfork" {
+            // GitFork takes gitfork://open?path=<dir> and finds the repository root itself.
+            var link = URLComponents()
+            link.scheme = "gitfork"
+            link.host = "open"
+            link.queryItems = [URLQueryItem(name: "path", value: folder.standardizedFileURL.path)]
+            guard let link = link.url else { return }
+            NSWorkspace.shared.open([link], withApplicationAt: url, configuration: NSWorkspace.OpenConfiguration())
         } else {
             NSWorkspace.shared.open([folder], withApplicationAt: url, configuration: NSWorkspace.OpenConfiguration())
         }
