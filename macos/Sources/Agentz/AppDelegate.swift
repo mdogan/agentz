@@ -287,11 +287,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         workspace.setPinned(tab.key, !tab.pinned)
     }
 
-    /// ⇧⌘I: all sessions, or back to only active ones.
+    /// ⇧⌘I: all sessions, or back to today's.
     @objc func toggleAllSessions(_: Any?) {
         guard let workspace else { return }
-        workspace.range = workspace.range == .all ? .active : .all
-        workspace.setStatus("Showing \(workspace.range == .all ? "all" : "only active") sessions")
+        workspace.range = workspace.range == .all ? .today : .all
+        workspace.setStatus(workspace.range == .all ? "Showing all sessions" : "Showing today's sessions")
     }
 
     /// The View menu items for the other ranges, by their tag.

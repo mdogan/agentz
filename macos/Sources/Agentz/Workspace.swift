@@ -66,7 +66,13 @@ struct Row: Identifiable, Equatable {
     var order: Date
     /// Pinned rows come first.
     var pinned = false
+    /// Has a tab of ours: a running agent or shell, or one that just
+    /// ended. Active rows come before the rest, whatever their time.
+    var active = false
     var id: SessionKey { key }
+
+    /// The list's groups, in order: pinned, active, the rest.
+    var group: Int { pinned ? 0 : active ? 1 : 2 }
 }
 
 /// Which sessions the list shows, by when they were last used. Sessions
@@ -133,8 +139,8 @@ final class Workspace {
     private(set) var worktrees: [Worktree] = []
     /// Show only this repo's sessions; nil shows all repos.
     var repo: RepoFilter? { didSet { rebuildRows() } }
-    /// At start, only sessions with a running agent or shell.
-    var range = SessionRange.active { didSet { rebuildRows() } }
+    /// At start, today's sessions.
+    var range = SessionRange.today { didSet { rebuildRows() } }
     var filter = "" { didSet { rebuildRows() } }
     private(set) var rows: [Row] = []
     /// The row the user picked in the list.
@@ -430,12 +436,12 @@ final class Workspace {
             let tab = tabs.first { $0.shows(key) }
             guard tab != nil || range.includes(s.updated, now: now) else { return nil }
             let order = tab?.spawnedAt ?? s.updated
-            return Row(key: key, title: s.title, cwd: s.cwd, place: place(s.cwd), updated: s.updated, order: order, pinned: tab?.pinned ?? false)
+            return Row(key: key, title: s.title, cwd: s.cwd, place: place(s.cwd), updated: s.updated, order: order, pinned: tab?.pinned ?? false, active: tab != nil)
         }
         // Sessions we started that have no transcript yet, and shells. A
         // shell running an agent is shown as that agent's session.
         for r in tabs where !rows.contains(where: { r.shows($0.key) }) {
-            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.spawnedAt, pinned: r.pinned))
+            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.spawnedAt, pinned: r.pinned, active: true))
         }
         if let repo {
             rows = rows.filter { repo.contains($0.cwd) }
@@ -446,7 +452,7 @@ final class Workspace {
                 $0.title.lowercased().contains(q) || $0.cwd.lowercased().contains(q) || $0.key.agent.name.contains(q)
             }
         }
-        rows.sort { $0.pinned != $1.pinned ? $0.pinned : $0.order > $1.order }
+        rows.sort { $0.group != $1.group ? $0.group < $1.group : $0.order > $1.order }
         if rows != self.rows { self.rows = rows }
         refreshStates()
     }

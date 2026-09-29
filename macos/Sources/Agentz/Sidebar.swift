@@ -226,8 +226,10 @@ struct SidebarView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    // Pinned rows come first; a line sets them apart.
-                    let lastPinned = workspace.rows.last(where: \.pinned)?.key
+                    // Pinned rows, then active ones, then the rest. Only the
+                    // passive rows have a line before them.
+                    let dividerAfter = Set(zip(workspace.rows, workspace.rows.dropFirst())
+                        .filter { $0.group != 2 && $1.group == 2 }.map(\.0.key))
                     ForEach(workspace.rows) { row in
                         let running = workspace.runningKeys.contains(row.key)
                         let quit = workspace.quitKeys.contains(row.key)
@@ -275,7 +277,7 @@ struct SidebarView: View {
                                 hovered = nil
                             }
                         }
-                        if row.key == lastPinned, workspace.rows.last?.key != row.key {
+                        if dividerAfter.contains(row.key) {
                             Rectangle()
                                 .fill(look.divider)
                                 .frame(height: 1)
@@ -712,7 +714,7 @@ struct EmptyPaneView: View {
                     hint("⌘N", "New Claude session")
                     hint("⇧⌘N", "New Codex session")
                     hint("⌘T", "New shell")
-                    hint("⇧⌘I", "Show all sessions, or only active ones")
+                    hint("⇧⌘I", "Show all sessions, or only today's")
                     hint("⌘O", "Pick the folder these start in")
                 }
             }
