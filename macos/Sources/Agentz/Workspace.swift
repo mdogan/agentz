@@ -101,6 +101,28 @@ enum SessionRange: CaseIterable {
     }
 }
 
+/// What the pane area shows: one tab, or two after a split.
+struct PaneLayout: Equatable {
+    /// The tab in each pane, by its own key, left or top first. Nil for a
+    /// pane with no terminal.
+    var keys: [SessionKey?] = [nil]
+    /// Nil with one pane.
+    var split: SplitDirection?
+    /// The pane the user works in: the list picks what it shows, and new
+    /// and resumed sessions open there.
+    var focused = 0
+
+    var current: SessionKey? {
+        get { keys[focused] }
+        set { keys[focused] = newValue }
+    }
+
+    /// The tab in the pane the user does not work in.
+    var other: SessionKey? {
+        split == nil ? nil : keys[1 - focused]
+    }
+}
+
 /// The repo the list is limited to: all its worktrees, or one folder
 /// outside a repo.
 struct RepoFilter: Equatable {
@@ -145,15 +167,24 @@ final class Workspace {
     private(set) var rows: [Row] = []
     /// The row the user picked in the list.
     var selection: SessionKey?
-    /// The tab shown in the pane, by its own key.
-    private(set) var current: SessionKey? {
+    /// The tabs on screen.
+    private(set) var panes = PaneLayout() {
         didSet {
-            if let tab = currentTab { waiting.remove(ObjectIdentifier(tab)) }
+            for r in tabs where panes.keys.contains(r.key) {
+                waiting.remove(ObjectIdentifier(r))
+            }
             onLayout?()
         }
     }
+    /// The tab shown in the focused pane, by its own key.
+    private(set) var current: SessionKey? {
+        get { panes.current }
+        set { panes.current = newValue }
+    }
     /// The session of the agent running inside the shown shell.
     private(set) var currentLinked: SessionKey?
+    /// The same for the shell in the other pane.
+    private(set) var otherLinked: SessionKey?
     private(set) var runningKeys: Set<SessionKey> = []
     private(set) var busyKeys: Set<SessionKey> = []
     /// Rows whose agent finished while the user was not looking, until the
@@ -218,6 +249,11 @@ final class Workspace {
         tabs.first { $0.key == current }
     }
 
+    /// The tab in the pane the user does not work in, while split.
+    var otherTab: Tab? {
+        tabs.first { $0.key == panes.other }
+    }
+
     /// Pids of our running shells, for the process scan.
     var shellPids: [Int32] {
         tabs.filter { $0.key.agent == .shell && $0.isRunning }.compactMap(\.terminal.pid)
@@ -266,14 +302,23 @@ final class Workspace {
 
     // MARK: - Saving and restoring
 
-    /// Save only tabs that still have a process, and pinned ones. The
-    /// screen and shell history are transient; agents continue from their
-    /// transcripts.
+    /// Save only tabs that still have a process, and pinned ones, and the
+    /// split. The screen and shell history are transient; agents continue
+    /// from their transcripts.
     func savedState() -> SavedState {
         var state = SavedState(project: projectDir)
+        var index: [SessionKey: UInt32] = [:]
         for r in tabs where r.isRunning || r.pinned {
-            if current == r.key { state.active = UInt32(state.tabs.count) }
+            index[r.key] = UInt32(state.tabs.count)
             state.tabs.append(saved(r))
+        }
+        state.active = current.flatMap { index[$0] }
+        if let split = panes.split {
+            state.split = SavedSplit(
+                direction: split,
+                panes: panes.keys.map { $0.flatMap { index[$0] } },
+                focused: UInt32(panes.focused)
+            )
         }
         return state
     }
@@ -305,21 +350,32 @@ final class Workspace {
     }
 
     /// Recreates saved tabs in their original order, then shows the tab that
-    /// was selected on quit. Returns tabs that could not be opened so the
-    /// next launch can try them again.
+    /// was selected on quit, or the split. Returns tabs that could not be
+    /// opened so the next launch can try them again.
     func restore(_ saved: SavedState) -> SavedState {
-        var selected: SessionKey?
+        // The new tabs' keys, by their index in `saved.tabs`.
+        var started: [Int: SessionKey] = [:]
         var failed = SavedState(project: saved.project)
         for (i, tab) in saved.tabs.enumerated() {
             if start(tab.agent, resume: tab.id, cwd: tab.cwd, title: tab.title, focus: false) {
                 tabs.last?.pinned = tab.pinned
-                if saved.active.map(Int.init) == i { selected = current }
+                started[i] = current
             } else {
                 if saved.active.map(Int.init) == i { failed.active = UInt32(failed.tabs.count) }
                 failed.tabs.append(tab)
             }
         }
-        if let selected {
+        let layout = saved.split.flatMap { split -> PaneLayout? in
+            let keys = split.panes.map { $0.flatMap { started[Int($0)] } }
+            // Not if both its tabs are gone.
+            guard keys.count == 2, split.focused < 2, keys.contains(where: { $0 != nil }) else { return nil }
+            return PaneLayout(keys: keys, split: split.direction, focused: Int(split.focused))
+        }
+        if let layout {
+            panes = layout
+            // Nil leaves an empty focused pane as it is.
+            selection = current
+        } else if let selected = saved.active.flatMap({ started[Int($0)] }) {
             selection = selected
             current = selected
         }
@@ -332,8 +388,8 @@ final class Workspace {
 
     /// Runs a few times a second. Reads what every program signaled, and
     /// tells the user about agents that want attention while the user is
-    /// not looking at them: the window is in the background, or another tab
-    /// is shown.
+    /// not looking at them: the window is in the background, or the agent
+    /// is in no pane.
     func tick() {
         var cwdChanged = false
         let focused = isWindowFocused()
@@ -341,7 +397,7 @@ final class Workspace {
             r.terminal.poll()
         }
         for r in tabs {
-            let looking = focused && current == r.key
+            let looking = focused && panes.keys.contains(r.key)
             let update = r.turns.update(r.isRunning)
             r.busy = update.busy
             if let cwd = update.cwd, r.key.agent == .shell, cwd != r.cwd {
@@ -422,7 +478,7 @@ final class Workspace {
             guard !tabs.contains(where: { $0 !== r && $0.shows(key) }) else { continue }
             let old = r.key
             r.key = key
-            if current == old { current = key }
+            if let pane = panes.keys.firstIndex(of: old) { panes.keys[pane] = key }
             if selection == old { selection = key }
         }
     }
@@ -490,10 +546,18 @@ final class Workspace {
         if count != runningCount { runningCount = count }
         let linked = currentTab?.linked
         if linked != currentLinked { currentLinked = linked }
+        let other = otherTab?.linked
+        if other != otherLinked { otherLinked = other }
     }
 
     func isCurrent(_ key: SessionKey) -> Bool {
         key == current || key == currentLinked
+    }
+
+    /// True if the session shows in the pane the user does not work in.
+    func isInOtherPane(_ key: SessionKey) -> Bool {
+        guard let other = panes.other else { return false }
+        return key == other || key == otherLinked
     }
 
     // MARK: - Starting and switching
@@ -502,8 +566,7 @@ final class Workspace {
     /// it; otherwise we resume it in a new terminal.
     func open(_ key: SessionKey) {
         if let r = tabs.first(where: { $0.shows(key) && $0.isRunning }) {
-            prune(keep: key)
-            current = r.key
+            show(r, for: key)
             focusTerminal?()
             return
         }
@@ -539,7 +602,7 @@ final class Workspace {
         guard let r = tabs.first(where: { $0.shows(key) }), r.pinned != pinned else { return }
         r.pinned = pinned
         r.placeholder = false
-        if !pinned, !r.isRunning, !quit.contains(ObjectIdentifier(r)), current != r.key {
+        if !pinned, !r.isRunning, !quit.contains(ObjectIdentifier(r)), !panes.keys.contains(r.key) {
             // An ended tab was only kept for its pin.
             tabs.removeAll { $0 === r }
         }
@@ -556,15 +619,24 @@ final class Workspace {
             current = nil
             return
         }
-        if current != r.key {
+        show(r, for: key)
+    }
+
+    /// Shows the running tab `r`, for the session `key`, in the focused
+    /// pane. One already in a pane stays there, and its pane gets the focus.
+    private func show(_ r: Tab, for key: SessionKey) {
+        if let pane = panes.keys.firstIndex(of: r.key) {
+            panes.focused = pane
+        } else {
             prune(keep: key)
             current = r.key
         }
     }
 
-    /// Shows the next (or previous) running session in list order.
+    /// Shows the next (or previous) running session in list order. The
+    /// session in the other pane stays there and is skipped.
     func cycle(_ delta: Int) {
-        let keys = rows.map(\.key).filter { runningKeys.contains($0) }
+        let keys = rows.map(\.key).filter { runningKeys.contains($0) && !isInOtherPane($0) }
         guard !keys.isEmpty else { return }
         let at = keys.firstIndex { isCurrent($0) } ?? (delta > 0 ? -1 : 0)
         let key = keys[(at + delta + keys.count) % keys.count]
@@ -616,18 +688,129 @@ final class Workspace {
     }
 
     /// Placeholder shells are kept only until the user moves on. Drops
-    /// them and ended tabs, except the one showing `keep`, pinned ones, and
-    /// agents that quit while the user was away.
+    /// them and ended tabs, except the one showing `keep`, the one in the
+    /// other pane, pinned ones, and agents that quit while the user was
+    /// away.
     private func prune(keep: SessionKey?) {
+        let other = panes.other
         tabs.removeAll { r in
-            !(keep.map(r.shows) ?? false) && !r.pinned && !quit.contains(ObjectIdentifier(r)) && (!r.isRunning || r.placeholder)
+            r.key != other && !(keep.map(r.shows) ?? false) && !r.pinned && !quit.contains(ObjectIdentifier(r))
+                && (!r.isRunning || r.placeholder)
         }
     }
 
-    /// Spawns an agent or shell. `resume` is the session id to resume, or
-    /// nil for a new session. Returns false if it could not start.
+    // MARK: - Splitting
+
+    /// Splits the pane area in two. The new pane gets the focus and a new
+    /// shell in the folder of the shown tab; ⌘N there starts an agent in its
+    /// place. Already split, it turns the split to `direction`.
+    func split(_ direction: SplitDirection) {
+        guard panes.split == nil else {
+            panes.split = direction
+            return
+        }
+        let cwd = currentTab.map { r in
+            r.key.agent == .shell ? r.terminal.pid.flatMap(workingDirectory) ?? r.cwd : r.cwd
+        } ?? root
+        panes = PaneLayout(keys: [current, nil], split: direction, focused: 1)
+        // Like the shell that replaces an agent that quit, it goes away if
+        // the user moves on without typing into it.
+        if start(.shell, resume: nil, cwd: cwd, title: Launch.shellName) {
+            tabs.last?.placeholder = true
+        }
+    }
+
+    /// What ⌘D and ⇧⌘D do: splits the pane that way, turns the split, or
+    /// unsplits it if it is split that way already.
+    func toggleSplit(_ direction: SplitDirection) {
+        if panes.split == direction {
+            unsplit()
+        } else {
+            split(direction)
+        }
+    }
+
+    /// False for the session shown in the only pane: it can't be split off
+    /// from itself.
+    func canOpenInSplit(_ key: SessionKey) -> Bool {
+        panes.split != nil || !isCurrent(key)
+    }
+
+    /// Shows the session in a pane of a split `direction`, the right or
+    /// bottom one unless `pane` is 0, and works there. A running session
+    /// moves there; others are resumed there. If it is in the other pane
+    /// already, the two trade places.
+    func openInSplit(_ key: SessionKey, _ direction: SplitDirection, pane: Int = 1) {
+        guard canOpenInSplit(key), pane == 0 || pane == 1 else { return }
+        let running = tabs.first { $0.shows(key) && $0.isRunning }
+        if panes.split == nil {
+            var keys = [current, current]
+            keys[pane] = nil
+            panes = PaneLayout(keys: keys, split: direction, focused: pane)
+            open(key)
+            // It could not be resumed, e.g. its folder is gone.
+            guard current != nil else {
+                panes = PaneLayout(keys: [panes.keys[1 - pane]])
+                return
+            }
+        } else if let r = running, panes.keys[1 - pane] == r.key {
+            panes = PaneLayout(keys: panes.keys.reversed(), split: direction, focused: pane)
+            open(key)
+        } else {
+            panes.split = direction
+            panes.focused = pane
+            open(key)
+        }
+        if currentTab?.shows(key) == true { selection = key }
+    }
+
+    /// Back to one pane, with the focused pane's tab, or the other one's if
+    /// the focused pane is empty. The tab that goes off screen keeps
+    /// running, in the list.
+    func unsplit() {
+        guard panes.split != nil else { return }
+        let hadFocus = [currentTab, otherTab].contains { $0?.terminal.isFocused == true }
+        dropPane(current == nil ? panes.focused : 1 - panes.focused)
+        prune(keep: current)
+        if hadFocus { focusTerminal?() }
+    }
+
+    /// Ends the split without pane `i`. The other pane fills the space and
+    /// gets the focus.
+    private func dropPane(_ i: Int) {
+        let moved = panes.focused == i
+        panes = PaneLayout(keys: [panes.keys[1 - i]])
+        if moved, let r = currentTab { selection = r.linked ?? r.key }
+    }
+
+    /// Makes pane `i` the one the user works in, and moves the keyboard to
+    /// its terminal, or to the list if it has none.
+    func focusPane(_ i: Int) {
+        guard panes.split != nil, panes.keys.indices.contains(i) else { return }
+        if panes.focused != i {
+            panes.focused = i
+            if let r = currentTab { selection = r.linked ?? r.key }
+        }
+        focusTerminal?()
+    }
+
+    func focusOtherPane() {
+        focusPane(1 - panes.focused)
+    }
+
+    /// The user clicked into the terminal of a tab: its pane becomes the
+    /// one the user works in, and the list selects its session.
+    private func terminalFocused(_ tab: Tab) {
+        guard let pane = panes.keys.firstIndex(of: tab.key), pane != panes.focused else { return }
+        panes.focused = pane
+        selection = tab.linked ?? tab.key
+    }
+
+    /// Spawns an agent or shell, in the focused pane unless `pane` says
+    /// another. `resume` is the session id to resume, or nil for a new
+    /// session. Returns false if it could not start.
     @discardableResult
-    func start(_ agent: Agent, resume: String?, cwd: String, title: String, focus: Bool = true) -> Bool {
+    func start(_ agent: Agent, resume: String?, cwd: String, title: String, focus: Bool = true, pane: Int? = nil) -> Bool {
         guard isDirectory(cwd) else {
             setStatus("Folder no longer exists: \(tilde(cwd))")
             return false
@@ -666,9 +849,15 @@ final class Workspace {
                 self.commandFinished(tab, exitCode: exitCode, seconds: seconds)
             }
         }
+        terminal.onFocus = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.terminalFocused(tab)
+        }
+        // The pane first, so the terminal starts at the pane's size.
+        let pane = pane ?? panes.focused
+        panes.keys[pane] = key
         tabs.append(tab)
-        current = key
-        selection = key
+        if pane == panes.focused { selection = key }
         rebuildRows()
         if focus { focusTerminal?() }
         return true
@@ -677,6 +866,7 @@ final class Workspace {
     private func exited(_ tab: Tab) {
         guard let i = tabs.firstIndex(where: { $0 === tab }) else { return }
         let key = tab.key
+        let pane = panes.keys.firstIndex(of: key)
         let hadFocus = tab.terminal.isFocused
         let early = Date().timeIntervalSince(tab.spawnedAt) < 3
         if key.agent != .shell, early {
@@ -684,7 +874,7 @@ final class Workspace {
         }
         // An agent only quits when told to, in its own tab. Quitting while
         // nobody looks means it crashed or something killed it.
-        let unexpected = key.agent != .shell && !early && !(isWindowFocused() && current == key)
+        let unexpected = key.agent != .shell && !early && !(isWindowFocused() && pane != nil)
         if unexpected {
             let title = sessions.first { $0.key == key }?.title ?? tab.fallbackTitle
             notify?("\(key.agent.displayName) quit", title, "It quit while you were away. Open the session to resume it.", key)
@@ -693,25 +883,30 @@ final class Workspace {
             // A pinned tab stays, without a process, until the user opens
             // it again. The pane offers to resume it.
             if unexpected { quit.insert(ObjectIdentifier(tab)) }
-            if current == key { current = nil }
-        } else if current != key {
-            if unexpected {
-                quit.insert(ObjectIdentifier(tab))
+            if let pane { panes.keys[pane] = nil }
+        } else if let pane {
+            tabs.remove(at: i)
+            if key.agent == .shell {
+                // Like closing a terminal tab, or a split.
+                if panes.split != nil {
+                    dropPane(pane)
+                    if hadFocus { focusTerminal?() }
+                } else {
+                    panes.keys[pane] = nil
+                }
             } else {
-                tabs.remove(at: i)
+                // The shown agent quit. A fresh shell takes its place, in
+                // the same pane and folder, so the user can start `claude`
+                // or `codex` by hand.
+                panes.keys[pane] = nil
+                if start(.shell, resume: nil, cwd: tab.cwd, title: Launch.shellName, focus: hadFocus, pane: pane) {
+                    tabs.last?.placeholder = true
+                }
             }
-        } else if key.agent == .shell {
-            // Like closing a terminal tab.
-            tabs.remove(at: i)
-            current = nil
+        } else if unexpected {
+            quit.insert(ObjectIdentifier(tab))
         } else {
-            // The shown agent quit. A fresh shell takes its place, in the
-            // same folder, so the user can start `claude` or `codex` by hand.
             tabs.remove(at: i)
-            current = nil
-            if start(.shell, resume: nil, cwd: tab.cwd, title: Launch.shellName, focus: hadFocus) {
-                tabs.last?.placeholder = true
-            }
         }
         rebuildRows()
     }
@@ -720,7 +915,7 @@ final class Workspace {
     /// Ghostty config's `notify-on-command-finish` settings say.
     private func commandFinished(_ tab: Tab, exitCode: Int?, seconds: TimeInterval) {
         let settings = GhosttyApp.commandFinish
-        let looking = isWindowFocused() && current == tab.key
+        let looking = isWindowFocused() && panes.keys.contains(tab.key)
         guard settings.applies(seconds: seconds, looking: looking), settings.bell || settings.notify else { return }
         if !looking {
             waiting.insert(ObjectIdentifier(tab))
@@ -740,13 +935,21 @@ final class Workspace {
     }
 
     /// Stops the session's agent or shell and closes its tab, then shows the
-    /// next running one. Pinned tabs have to be unpinned first.
+    /// next running one. In a split, the other pane takes the space instead.
+    /// Pinned tabs have to be unpinned first.
     func close(_ key: SessionKey) {
         guard let i = tabs.firstIndex(where: { $0.shows(key) }), !tabs[i].pinned else { return }
-        let wasShown = current == tabs[i].key
+        let pane = panes.keys.firstIndex(of: tabs[i].key)
+        let wasShown = pane == panes.focused
         // Dropping the terminal frees Ghostty's surface, which hangs up on
         // the program.
         tabs.remove(at: i)
+        if let pane, panes.split != nil {
+            dropPane(pane)
+            rebuildRows()
+            if wasShown { focusTerminal?() }
+            return
+        }
         rebuildRows()
         if wasShown {
             let next = rows.lazy.compactMap { row in

@@ -240,6 +240,7 @@ struct SidebarView: View {
                             selected: workspace.selection == row.key,
                             listFocused: listFocused,
                             isCurrent: workspace.isCurrent(row.key),
+                            inOtherPane: workspace.isInOtherPane(row.key),
                             running: running,
                             busy: workspace.busyKeys.contains(row.key),
                             waiting: workspace.waitingKeys.contains(row.key),
@@ -249,6 +250,8 @@ struct SidebarView: View {
                             now: workspace.now
                         )
                         .id(row.key)
+                        // Onto the terminal, to show it in a split.
+                        .onDrag { SessionDrag.provider(row.key) }
                         .onTapGesture(count: 2) { workspace.open(row.key) }
                         .simultaneousGesture(TapGesture().onEnded {
                             workspace.selection = row.key
@@ -339,6 +342,11 @@ struct SidebarView: View {
         let running = workspace.runningKeys.contains(key)
         let pinned = workspace.isPinned(key)
         Button(running ? "Show" : "Resume") { workspace.open(key) }
+        let splittable = workspace.canOpenInSplit(key)
+        Button("Open in Split Right") { workspace.openInSplit(key, .right) }
+            .disabled(!splittable)
+        Button("Open in Split Down") { workspace.openInSplit(key, .down) }
+            .disabled(!splittable)
         if running || pinned || workspace.quitKeys.contains(key) {
             Button(pinned ? "Unpin" : "Pin") { workspace.setPinned(key, !pinned) }
         }
@@ -433,7 +441,10 @@ private struct RowView: View {
     let look: Look
     let selected: Bool
     let listFocused: Bool
+    /// Shown in the pane the user works in.
     let isCurrent: Bool
+    /// Shown in the other pane of a split.
+    let inOtherPane: Bool
     let running: Bool
     let busy: Bool
     let waiting: Bool
@@ -454,7 +465,7 @@ private struct RowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(row.title)
-                        .font(.system(size: 12.5, weight: isCurrent ? .semibold : .regular))
+                        .font(.system(size: 12.5, weight: isCurrent || inOtherPane ? .semibold : .regular))
                         .foregroundStyle(running || selected ? look.text : look.text.opacity(0.75))
                         .lineLimit(1)
                     if row.pinned {
@@ -480,9 +491,9 @@ private struct RowView: View {
         .padding(.vertical, 6)
         .background(background, in: RoundedRectangle(cornerRadius: 7))
         .overlay(alignment: .leading) {
-            if isCurrent {
+            if isCurrent || inOtherPane {
                 Capsule()
-                    .fill(look.accent)
+                    .fill(isCurrent ? look.accent : look.faint)
                     .frame(width: 3)
                     .padding(.vertical, 7)
                     .offset(x: -1)
@@ -685,14 +696,16 @@ private struct Bar: View {
 
 // MARK: - Empty pane
 
-/// Shown in the pane when no terminal is.
+/// Shown in a pane when no terminal is.
 struct EmptyPaneView: View {
     let workspace: Workspace
     let look: Look
+    /// Which pane it fills: 0, or 1 for the second pane of a split.
+    let pane: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let key = workspace.selection, !workspace.runningKeys.contains(key),
+            if workspace.panes.focused == pane, let key = workspace.selection, !workspace.runningKeys.contains(key),
                let row = workspace.rows.first(where: { $0.key == key })
             {
                 HStack(spacing: 8) {
@@ -714,6 +727,7 @@ struct EmptyPaneView: View {
                     hint("⌘N", "New Claude session")
                     hint("⇧⌘N", "New Codex session")
                     hint("⌘T", "New shell")
+                    hint("⌘D / ⇧⌘D", "Split the pane right / down, or unsplit")
                     hint("⇧⌘I", "Show all sessions, or only today's")
                     hint("⌘O", "Pick the folder these start in")
                 }
@@ -723,6 +737,9 @@ struct EmptyPaneView: View {
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(look.background)
+        // A click in an empty pane of a split works in that pane.
+        .contentShape(Rectangle())
+        .onTapGesture { workspace.focusPane(pane) }
     }
 
     private func hint(_ keys: String, _ text: String) -> some View {

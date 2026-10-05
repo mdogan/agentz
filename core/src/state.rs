@@ -30,17 +30,42 @@ fn is_false(b: &bool) -> bool {
     !b
 }
 
+/// Where the second pane goes when the pane area is split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "lowercase")]
+pub enum SplitDirection {
+    /// Side by side.
+    Right,
+    /// One above the other.
+    Down,
+}
+
+/// Two panes that were shown at once.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
+pub struct SavedSplit {
+    pub direction: SplitDirection,
+    /// The tab in the left or top pane, then in the right or bottom one, as
+    /// indexes into `SavedState::tabs`. None for a pane with no terminal.
+    pub panes: Vec<Option<u32>>,
+    /// The pane the user worked in: 0 or 1.
+    pub focused: u32,
+}
+
 #[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Record)]
 pub struct SavedState {
     #[uniffi(default)]
     pub tabs: Vec<SavedTab>,
-    /// The index of the tab that was shown.
+    /// The index of the tab that was shown, in the focused pane of a split.
     #[uniffi(default)]
     pub active: Option<u32>,
     /// The folder the window showed.
     #[uniffi(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<PathBuf>,
+    /// The split, if the window showed two panes.
+    #[uniffi(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<SavedSplit>,
 }
 
 /// The name of the state file, and of its lock.
@@ -107,12 +132,12 @@ fn save_in(dir: &Path, state: SavedState) -> Result<()> {
         let mut saved = read(&path)?.unwrap_or_default();
         let base = saved.tabs.len();
         saved.tabs.extend(state.tabs);
-        let shown = state.active.map(|i| base + i as usize);
         saved.project = state.project.or(saved.project);
         // Two agentz windows can show the same agent. Resume that session
-        // once, using the last window's tab and selection.
+        // once, using the last window's tab, selection and split.
         let mut unique = Vec::new();
-        let mut active: Option<usize> = None;
+        // Where each tab in `unique` was in `saved.tabs`.
+        let mut origin = Vec::new();
         for (i, tab) in saved.tabs.into_iter().enumerate() {
             if let Some(id) = &tab.id
                 && let Some(previous) = unique.iter().position(|other: &SavedTab| {
@@ -120,21 +145,22 @@ fn save_in(dir: &Path, state: SavedState) -> Result<()> {
                 })
             {
                 unique.remove(previous);
-                if let Some(selected) = active.as_mut() {
-                    if *selected == previous {
-                        active = None;
-                    } else if *selected > previous {
-                        *selected -= 1;
-                    }
-                }
-            }
-            if shown == Some(i) {
-                active = Some(unique.len());
+                origin.remove(previous);
             }
             unique.push(tab);
+            origin.push(i);
         }
+        // An index into the last window's tabs, as an index into `unique`.
+        let kept = |i: u32| {
+            let i = origin.iter().position(|&o| o == base + i as usize)?;
+            Some(i as u32)
+        };
         saved.tabs = unique;
-        saved.active = active.map(|i| i as u32);
+        saved.active = state.active.and_then(kept);
+        saved.split = state.split.map(|split| SavedSplit {
+            panes: split.panes.iter().map(|p| p.and_then(kept)).collect(),
+            ..split
+        });
         write_atomic(&path, &saved)
     })
 }
@@ -278,6 +304,62 @@ mod tests {
         assert_eq!(saved.tabs[0].id, None);
         assert_eq!(saved.tabs[1], tab);
         assert_eq!(saved.project, Some(PathBuf::from("/repo")));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn keeps_the_last_split_with_its_tabs() {
+        let dir = std::env::temp_dir().join(format!("agentz-state-{}", uuid::Uuid::new_v4()));
+        let tab = |id: &str| SavedTab {
+            agent: Agent::Claude,
+            id: Some(id.into()),
+            cwd: PathBuf::from("/tmp"),
+            title: "tab".into(),
+            pinned: false,
+        };
+        save_in(
+            &dir,
+            SavedState {
+                tabs: vec![tab("one"), tab("two")],
+                split: Some(SavedSplit {
+                    direction: SplitDirection::Down,
+                    panes: vec![Some(0), Some(1)],
+                    focused: 0,
+                }),
+                ..SavedState::default()
+            },
+        )
+        .unwrap();
+        // The second window shows "one" too, so the first window's copy
+        // goes, and the second window's tabs move down by one.
+        save_in(
+            &dir,
+            SavedState {
+                tabs: vec![tab("three"), tab("one")],
+                active: Some(1),
+                split: Some(SavedSplit {
+                    direction: SplitDirection::Right,
+                    panes: vec![Some(0), Some(1)],
+                    focused: 1,
+                }),
+                ..SavedState::default()
+            },
+        )
+        .unwrap();
+        let text = fs::read_to_string(dir.join("open-tabs.json")).unwrap();
+        assert!(text.contains(r#""direction":"right""#), "{text}");
+        let saved = take_in(&dir).unwrap().unwrap();
+        let ids: Vec<_> = saved.tabs.iter().filter_map(|t| t.id.as_deref()).collect();
+        assert_eq!(ids, ["two", "three", "one"]);
+        assert_eq!(saved.active, Some(2));
+        assert_eq!(
+            saved.split,
+            Some(SavedSplit {
+                direction: SplitDirection::Right,
+                panes: vec![Some(1), Some(2)],
+                focused: 1,
+            })
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 

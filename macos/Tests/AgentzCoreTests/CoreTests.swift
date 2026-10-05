@@ -34,6 +34,10 @@ final class BridgeTests: XCTestCase {
         XCTAssertEqual(shellQuote("it's"), #"'it'\''s'"#)
         XCTAssertEqual(workingDirectory(getpid()), realPath(FileManager.default.currentDirectoryPath))
         XCTAssertEqual(SessionKey(.codex, "x").description, "codex:x")
+        XCTAssertEqual(SessionKey(parsing: "claude:a:b"), SessionKey(.claude, "a:b"))
+        XCTAssertNil(SessionKey(parsing: "vim:x"))
+        XCTAssertNil(SessionKey(parsing: "shell:"))
+        XCTAssertNil(SessionKey(parsing: "shell"))
         XCTAssertEqual(Agent(name: "shell"), .shell)
         XCTAssertNil(Agent(name: "vim"))
         XCTAssertEqual(Limits(), Limits(claude: nil, codex: nil))
@@ -128,6 +132,34 @@ final class CommandFinishTests: XCTestCase {
         XCTAssertEqual(elapsed(63), "1m 3s")
         XCTAssertEqual(elapsed(7500), "2h 5m")
         XCTAssertEqual(elapsed(7200), "2h")
+    }
+}
+
+final class SplitLookTests: XCTestCase {
+    func testGhosttyDefaults() {
+        let look = SplitLook(config: "")
+        XCTAssertEqual(look, SplitLook())
+        XCTAssertEqual(look.unfocusedOpacity, 0.7)
+        XCTAssertNil(look.unfocusedFill)
+        XCTAssertNil(look.divider)
+    }
+
+    func testReadsTheConfig() {
+        let look = SplitLook(config: """
+        unfocused-split-opacity = 0.5
+        unfocused-split-opacity = 0.9
+        unfocused-split-fill = #102030
+        split-divider-color = 405060
+        """)
+        XCTAssertEqual(look.unfocusedOpacity, 0.9)
+        XCTAssertEqual(look.unfocusedFill, RGB(hex: "102030"))
+        XCTAssertEqual(look.divider, RGB(hex: "405060"))
+    }
+
+    func testOpacityStaysInGhosttysRange() {
+        XCTAssertEqual(SplitLook(config: "unfocused-split-opacity = 0").unfocusedOpacity, 0.15)
+        XCTAssertEqual(SplitLook(config: "unfocused-split-opacity = 2").unfocusedOpacity, 1)
+        XCTAssertEqual(SplitLook(config: "unfocused-split-opacity = half").unfocusedOpacity, 0.7)
     }
 }
 

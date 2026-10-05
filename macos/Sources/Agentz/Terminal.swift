@@ -28,6 +28,8 @@ final class Terminal: NSObject {
     /// if not reported) and how long it ran. Needs the shell to mark its
     /// commands (OSC 133): Ghostty's shell integration or fish 4 does.
     var onCommandFinished: ((_ exitCode: Int?, _ seconds: TimeInterval) -> Void)?
+    /// Called when the terminal gets the keyboard, e.g. from a click.
+    var onFocus: (() -> Void)?
     private var knownPid: Int32?
     private var exitWatch: DispatchSourceProcess?
     private let startedAt = Date()
@@ -37,6 +39,7 @@ final class Terminal: NSObject {
     init(command: String, cwd: String, env: [String: String]) {
         super.init()
         view.delegate = self
+        view.onFocus = { [weak self] in self?.onFocus?() }
         view.controller = GhosttyApp.controller
         view.configuration = TerminalSurfaceOptions(
             workingDirectory: cwd,
@@ -116,6 +119,7 @@ final class Terminal: NSObject {
         isRunning = false
         onExit = nil
         onCommandFinished = nil
+        onFocus = nil
         view.controller = nil
         // Ghostty finds a surface's queued messages by its address, and a new
         // surface often gets the freed one's. A "child exited" still queued
@@ -223,6 +227,14 @@ extension Terminal:
 /// Ghostty's view, plus what Ghostty.app adds around it: the mouse cursor
 /// the terminal asks for, and dropping files to type their paths.
 final class SurfaceView: TerminalView {
+    var onFocus: (() -> Void)?
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onFocus?() }
+        return became
+    }
+
     /// Ghostty starts with the text cursor and says when that changes,
     /// e.g. to a pointing hand over a link.
     var cursor: NSCursor = .iBeam {
@@ -291,6 +303,11 @@ enum GhosttyApp {
     /// terminals use.
     static var commandFinish: CommandFinishSettings {
         CommandFinishSettings(config: configText)
+    }
+
+    /// How split panes look, from the config the terminals use.
+    static var splitLook: SplitLook {
+        SplitLook(config: configText)
     }
 
     /// The terminals' colors in the light or dark appearance.

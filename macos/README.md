@@ -28,8 +28,20 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 
 - **Click** a running session to show it. **Double-click** or press **Return** on any session to open it: it switches to it if it runs, otherwise it resumes it.
 - A spinner means the agent is working. A green dot means it waits for you. A bell means it finished while you were away. The Dock icon shows how many are waiting.
-- Right-click a session to close it, pin it, show its folder, or copy its id.
+- Right-click a session to open it in a split, close it, pin it, show its folder, or copy its id.
 - A pinned session stays at the top of the list and can't be closed until you unpin it (right-click, or **File › Unpin Session**). A line separates pinned and active sessions from other sessions when both are shown. If its agent or shell ends, its row stays; open it to start it again. Pinned sessions come back on every launch, even after a crash.
+
+To see two sessions at once, split the pane: ⌘D puts a second pane to the right, ⇧⌘D puts it below. The two buttons at the right end of the title bar do the same. The new pane opens a shell in the same folder as the shown session; press ⌘N or ⇧⌘N there to start an agent in its place. To put a session from the list there instead, right-click it and pick **Open in Split Right** or **Open in Split Down**: it moves there if it runs, and is resumed there if not.
+
+You can also drag a session from the list onto the terminal. With one pane, it goes to the edge you drop it near (left, right, top or bottom) and the pane splits that way. In a split, it goes into the pane you drop it on. A highlight shows where it will land.
+
+- One pane is the focused one; the other is faded. Click a pane, or press ⌥⌘J, to work in it. The list then picks what that pane shows, and ⌘N, ⌘T and ⌘W act on it.
+- A session already shown in one pane is not opened twice: picking it moves you to its pane.
+- In the list, the focused pane's session has a colored bar, and the other pane's session a gray one.
+- Drag the line between the panes to resize them. Double-click it to make them even again.
+- ⌘D or ⇧⌘D turns the split the other way, and the same key again unsplits it. The title bar button for the current split is filled in; click it to unsplit. **View › Unsplit** does the same. The session that goes off screen keeps running in the list. A shell the split opened and you never typed in is closed.
+- Closing the session in a pane (⌘W), or exiting its shell, also ends the split, and the other pane takes the space.
+- The split comes back on the next launch, with the open tabs.
 
 | Shortcut | Action |
 | --- | --- |
@@ -38,6 +50,8 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 | ⌘W | close the shown session (asks first if it is working) |
 | ⌘] / ⌘[ | next / previous running session |
 | ⌘L / ⌘J | go to the session list / the terminal |
+| ⌘D / ⇧⌘D | split the pane right / down; again to unsplit |
+| ⌥⌘J | go to the other pane of a split |
 | ⌘F | filter sessions |
 | ⇧⌘I | show all sessions, or only today's again |
 | ⌃⌘S | hide or show the session list |
@@ -58,6 +72,6 @@ Rate limits for Claude and Codex show at the bottom of the list. To also get Cla
 ## Settings
 
 - The app uses your login shell's environment, so `PATH` and variables from your shell config work. `AGENTZ_CLAUDE_ARGS` and `AGENTZ_CODEX_ARGS` add flags to the agents, e.g. `AGENTZ_CLAUDE_ARGS="--model opus"`.
-- Terminals use your Ghostty config (`~/.config/ghostty/config`), including themes from Ghostty.app or `~/.config/ghostty/themes`. The session list takes its colors from the same theme. View > Theme picks any other Ghostty theme instead, and keeps it until you pick Follow Ghostty. Without Ghostty.app, the themes that come with the Ghostty library are used instead. `AGENTZ_GHOSTTY_CONFIG` points to another file (empty for none).
+- Terminals use your Ghostty config (`~/.config/ghostty/config`), including themes from Ghostty.app or `~/.config/ghostty/themes`. The session list takes its colors from the same theme. View > Theme picks any other Ghostty theme instead, and keeps it until you pick Follow Ghostty. Without Ghostty.app, the themes that come with the Ghostty library are used instead. `AGENTZ_GHOSTTY_CONFIG` points to another file (empty for none). Split panes follow Ghostty's `unfocused-split-opacity`, `unfocused-split-fill` and `split-divider-color`.
 - Terminals have Ghostty's macOS keybindings for editing, selecting and scrolling (⌘←, ⌥←, ⌘⌫, ⌘↑, ⇧→, …). Those for windows, tabs, splits and search are off, so ⌘N, ⌘T and ⌘W reach the menu. Your own keybinds still work.
 - Dropping files on a terminal types their paths, as in Ghostty.

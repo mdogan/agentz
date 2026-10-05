@@ -22,6 +22,13 @@ public extension SessionKey {
     init(_ agent: Agent, _ id: String) {
         self.init(agent: agent, id: id)
     }
+
+    /// From its `description`, `agent:id`.
+    init?(parsing text: String) {
+        let parts = text.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let agent = Agent(name: parts[0]), !parts[1].isEmpty else { return nil }
+        self.init(agent, parts[1])
+    }
 }
 
 extension SessionKey: CustomStringConvertible {

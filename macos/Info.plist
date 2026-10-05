@@ -28,6 +28,19 @@
     <string>NSApplication</string>
     <key>NSSupportsAutomaticTermination</key>
     <false/>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>io.dogan.agentz.session</string>
+            <key>UTTypeDescription</key>
+            <string>Agentz session</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+        </dict>
+    </array>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

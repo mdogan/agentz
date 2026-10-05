@@ -306,6 +306,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     @objc func previousSession(_: Any?) { workspace?.cycle(-1) }
     @objc func toggleSessionList(_ sender: Any?) { windowController?.toggleSidebar(sender) }
 
+    @objc func splitRight(_: Any?) { workspace?.toggleSplit(.right) }
+    @objc func splitDown(_: Any?) { workspace?.toggleSplit(.down) }
+    @objc func unsplit(_: Any?) { workspace?.unsplit() }
+    @objc func focusOtherPane(_: Any?) { workspace?.focusOtherPane() }
+
     @objc func showShortcuts(_: Any?) {
         guard let menu = NSApp.mainMenu else { return }
         if shortcutsWindow == nil { shortcutsWindow = ShortcutsWindowController(menu: menu) }
@@ -372,6 +377,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return workspace.currentTab != nil
         case #selector(closeCurrent(_:)), #selector(focusTerminal(_:)):
             return workspace.currentTab != nil
+        case #selector(splitRight(_:)):
+            item.state = workspace.panes.split == .right ? .on : .off
+        case #selector(splitDown(_:)):
+            item.state = workspace.panes.split == .down ? .on : .off
+        case #selector(unsplit(_:)), #selector(focusOtherPane(_:)):
+            return workspace.panes.split != nil
         default:
             break
         }
@@ -424,12 +435,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         view.addItem(.separator())
         add(view, "Go to Session List", #selector(focusList(_:)), "l")
         add(view, "Go to Terminal", #selector(focusTerminal(_:)), "j")
+        add(view, "Go to Other Pane", #selector(focusOtherPane(_:)), "j").keyEquivalentModifierMask = [.command, .option]
         add(view, "Filter Sessions", #selector(focusFilter(_:)), "f")
         add(view, "Next Session", #selector(nextSession(_:)), "]")
         add(view, "Previous Session", #selector(previousSession(_:)), "[")
         view.addItem(.separator())
         let sidebar = add(view, "Toggle Session List", #selector(toggleSessionList(_:)), "s")
         sidebar.keyEquivalentModifierMask = [.command, .control]
+        view.addItem(.separator())
+        add(view, "Split Right", #selector(splitRight(_:)), "d")
+        add(view, "Split Down", #selector(splitDown(_:)), "D")
+        add(view, "Unsplit", #selector(unsplit(_:)))
         view.addItem(.separator())
         submenu(view, "Theme").delegate = self
 
