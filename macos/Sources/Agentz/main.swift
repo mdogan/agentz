@@ -7,6 +7,9 @@ usage: agentz [folder]                  open the app for a folder (default: here
        agentz statusline install        report limits from every manual `claude` launch
        agentz statusline uninstall      restore the earlier status line
        agentz --list                    list this project's sessions
+       agentz server                    run the server that keeps agents and shells running (the app starts it)
+       agentz server list               list what it runs
+       agentz server stop               hang up on all of it
 """
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -23,6 +26,9 @@ case "statusline":
         }
     }
     exit(runStatusLine())
+
+case "server":
+    exit(runServer(Array(args.dropFirst())))
 
 case "--list":
     for s in SessionScanner().sessions(FileManager.default.currentDirectoryPath) where s.inProject {

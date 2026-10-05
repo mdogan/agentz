@@ -50,6 +50,21 @@ public enum ShellEnvironment {
         setenv("SHELL", shell, 1)
     }
 
+    /// This process's environment as it is now, with what `load` and
+    /// `setenv` changed.
+    public static func current() -> [String: String] {
+        var env: [String: String] = [:]
+        var entry = environ
+        while let pointer = entry.pointee {
+            let s = String(cString: pointer)
+            if let eq = s.firstIndex(of: "="), eq != s.startIndex {
+                env[String(s[..<eq])] = String(s[s.index(after: eq)...])
+            }
+            entry += 1
+        }
+        return env
+    }
+
     /// Runs `shell -l -i -c env`. Interactive, so settings from `.zshrc`
     /// and `config.fish` count too. nil if the shell fails or takes too long.
     static func resolve(shell: String, timeout: TimeInterval) -> [String: String]? {

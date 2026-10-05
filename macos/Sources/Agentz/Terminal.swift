@@ -1,17 +1,15 @@
 // One program running in its own Ghostty terminal. This is the only file
 // that uses the libghostty wrapper, so replacing it touches nothing else.
 //
-// Ghostty owns the PTY. It starts the command as
-// `login -flp $USER bash --noprofile --norc -c "exec -l <command>"`, and
-// `exec` keeps the pid, so the program we asked for is the child of a
-// `login` that is our child (see `mainProcess(onTTY:)`).
-//
-// Ghostty does not close a surface when its program exits: the embedding
-// API turns on `wait-after-command` for every surface given a command. So
-// we watch the program's pid ourselves.
+// Programs run in the agentz server (core/src/server), which owns their
+// PTYs, so they can keep running when the app quits. Ghostty runs nothing:
+// the surface shows what the server sends, and what the user types goes
+// back to the server (Ghostty's host-managed backend, see `ServerLink`).
+// The server tells the program's pid and when it ends.
 
 import AgentzCore
 import AppKit
+import GhosttyKit
 import GhosttyTerminal
 import GhosttyTheme
 
@@ -28,57 +26,57 @@ final class Terminal: NSObject {
     /// if not reported) and how long it ran. Needs the shell to mark its
     /// commands (OSC 133): Ghostty's shell integration or fish 4 does.
     var onCommandFinished: ((_ exitCode: Int?, _ seconds: TimeInterval) -> Void)?
-    private var knownPid: Int32?
-    private var exitWatch: DispatchSourceProcess?
-    private let startedAt = Date()
+    /// For a program that was already running: called once its screen is
+    /// drawn again, before its live output.
+    var onReplayed: (() -> Void)?
+    /// The program's process id, once it started.
+    private(set) var pid: Int32?
+    private let link: ServerLink
 
-    /// `command` is run by `bash -c`, so quote its arguments. `env` is added
-    /// to this app's environment.
-    init(command: String, cwd: String, env: [String: String]) {
+    /// Starts a program in the agentz server, or shows one that runs there
+    /// already.
+    init(_ start: ServerLink.Start) {
+        link = ServerLink(start)
         super.init()
         view.delegate = self
         view.controller = GhosttyApp.controller
-        view.configuration = TerminalSurfaceOptions(
-            workingDirectory: cwd,
-            envVars: env,
-            command: command
-        )
+        view.configuration = TerminalSurfaceOptions(backend: .inMemory(link.session))
         view.autoresizingMask = [.width, .height]
+        if case let .attach(session) = start { pid = session.pid }
+        link.onStart = { [weak self] session in self?.pid = session.pid }
+        link.onReplayed = { [weak self] in self?.onReplayed?() }
+        link.onEnd = { [weak self] in self?.exited() }
     }
 
-    /// The program's process id, once Ghostty has started it.
-    var pid: Int32? {
-        poll()
-        return knownPid
+    /// The server's id for the program, once it runs there.
+    var serverId: String? { link.serverId }
+
+    /// Why the program could not be started or shown, if it could not.
+    var failure: String? { link.failure }
+
+    /// The visible text.
+    var screenText: String? { link.session.readViewportText() }
+
+    /// Tells the server what the app now knows about the session.
+    func update(_ meta: SessionMeta) {
+        link.update(meta)
     }
 
-    /// Finds the program's pid and notices when it is gone. Called on every
-    /// tick; the pid watch reports exits right away after that.
-    func poll() {
-        guard isRunning, knownPid == nil, let tty = view.ttyName else { return }
-        if let pid = mainProcess(onTTY: tty) {
-            watch(pid)
-        } else if Date().timeIntervalSince(startedAt) > 3, !ttyHasProcesses(tty) {
-            // It quit before we saw it, e.g. a command that was not found.
-            exited()
-        }
+    /// Lets go of the program without stopping it, as quitting the app
+    /// does.
+    func detach() {
+        link.detach()
     }
 
-    private func watch(_ pid: Int32) {
-        knownPid = pid
-        let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
-        source.setEventHandler { [weak self] in
-            MainActor.assumeIsolated { self?.exited() }
-        }
-        source.resume()
-        exitWatch = source
-        // It may have exited before the watch started.
-        if kill(pid, 0) != 0, errno == ESRCH { exited() }
+    /// Hangs up on the program, as closing its tab does, but keeps the tab.
+    func stop() {
+        link.kill()
     }
 
     /// The process group that owns the terminal right now.
     var foregroundGroup: Int32? {
-        isRunning ? view.foregroundPid : nil
+        guard isRunning, let pid else { return nil }
+        return terminalForegroundGroup(of: pid)
     }
 
     /// True if the program started another one in the foreground, like a
@@ -86,6 +84,14 @@ final class Terminal: NSObject {
     var hasForegroundJob: Bool {
         guard let pid, let group = foregroundGroup else { return false }
         return group != pid
+    }
+
+    /// True if anything but the program runs on its terminal, in the
+    /// foreground or not: a shell's jobs, or an agent the user started in
+    /// it.
+    var hasJobs: Bool {
+        guard isRunning, let pid else { return false }
+        return terminalHasOthers(pid)
     }
 
     /// Hidden terminals keep running; they only stop drawing.
@@ -108,14 +114,15 @@ final class Terminal: NSObject {
         view.sendKey(.enter)
     }
 
-    /// Frees Ghostty's surface, which hangs up on the program. Call it when
+    /// Hangs up on the program and frees Ghostty's surface. Call it when
     /// the tab goes away; waiting for the view to be freed is not enough.
     func close() {
-        exitWatch?.cancel()
-        exitWatch = nil
+        if isRunning { link.kill() }
+        link.detach()
         isRunning = false
         onExit = nil
         onCommandFinished = nil
+        onReplayed = nil
         view.controller = nil
         // Ghostty finds a surface's queued messages by its address, and a new
         // surface often gets the freed one's. A "child exited" still queued
@@ -127,8 +134,6 @@ final class Terminal: NSObject {
     private func exited() {
         guard isRunning else { return }
         isRunning = false
-        exitWatch?.cancel()
-        exitWatch = nil
         onExit?()
     }
 }
@@ -220,6 +225,174 @@ extension Terminal:
     }
 }
 
+/// Connects a Ghostty surface to a program in the agentz server. Ghostty
+/// runs nothing for the surface: the program's output comes from the
+/// server, and what the surface sends (typed keys, replies to the
+/// program's queries) and its size go back to the server.
+///
+/// It connects once the surface first reports its size, so a new program
+/// starts at the right size, and a replayed screen lands in a surface that
+/// exists. Ghostty calls `send` and `resize` on its own thread, and the
+/// server's output arrives on one of the core's, hence the lock. The
+/// `on...` callbacks run on the main thread.
+final class ServerLink: TerminalSink, @unchecked Sendable {
+    enum Start {
+        /// Starts a program. Its size is set once the surface knows it.
+        case spawn(Spawn)
+        /// Shows a program that runs already.
+        case attach(ServerSession)
+    }
+
+    /// What Ghostty shows.
+    private(set) var session: InMemoryTerminalSession!
+    var onStart: ((ServerSession) -> Void)?
+    var onReplayed: (() -> Void)?
+    var onEnd: (() -> Void)?
+
+    private let start: Start
+    private let lock = NSLock()
+    private var connection: ServerTerminal?
+    private var connecting = false
+    private var size: TermSize?
+    /// Typed before the connection was made.
+    private var pending = Data()
+    /// The surface answers the queries in a replayed screen again. Those
+    /// answers are old news to the program, so they are dropped until the
+    /// replay is parsed.
+    private var replaying = false
+    private var closing = Closing.no
+    private var id: String?
+    private var failureMessage: String?
+
+    private enum Closing { case no, detach, kill }
+
+    init(_ start: Start) {
+        self.start = start
+        if case let .attach(session) = start { id = session.id }
+        session = InMemoryTerminalSession(
+            write: { [weak self] data in self?.send(data) },
+            resize: { [weak self] viewport in self?.resize(viewport) }
+        )
+    }
+
+    var serverId: String? { locked { id } }
+    var failure: String? { locked { failureMessage } }
+
+    func update(_ meta: SessionMeta) {
+        locked { connection }?.update(meta)
+    }
+
+    func detach() {
+        let connection = locked {
+            if closing == .no { closing = .detach }
+            return self.connection
+        }
+        connection?.detach()
+    }
+
+    func kill() {
+        let connection = locked {
+            // After a detach, the program is no longer ours to stop.
+            guard closing != .detach else { return nil as ServerTerminal? }
+            closing = .kill
+            return self.connection
+        }
+        connection?.kill()
+        connection?.detach()
+    }
+
+    private func send(_ data: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !replaying, closing == .no else { return }
+        // Written under the lock, so typing stays in order with what was
+        // typed while connecting.
+        if let connection {
+            connection.write(data)
+        } else {
+            pending.append(data)
+        }
+    }
+
+    private func resize(_ viewport: InMemoryTerminalViewport) {
+        let size = TermSize(cols: viewport.columns, rows: viewport.rows, widthPx: viewport.widthPixels, heightPx: viewport.heightPixels)
+        guard size.cols > 0, size.rows > 0 else { return }
+        let (connection, first) = locked {
+            self.size = size
+            let first = self.connection == nil && !connecting && closing == .no
+            if first {
+                connecting = true
+                if case .attach = start { replaying = true }
+            }
+            return (self.connection, first)
+        }
+        if let connection {
+            connection.resize(size)
+        } else if first {
+            DispatchQueue.global(qos: .userInitiated).async { self.connect(size) }
+        }
+    }
+
+    private func connect(_ size: TermSize) {
+        let connection: ServerTerminal
+        do {
+            switch start {
+            case var .spawn(spawn):
+                spawn.size = size
+                connection = try ServerTerminal.spawn(Bundle.main.executablePath ?? CommandLine.arguments[0], spawn, self)
+            case let .attach(session):
+                connection = try ServerTerminal.attach(session.id, size, self)
+            }
+        } catch {
+            locked {
+                failureMessage = errorMessage(error)
+                replaying = false
+            }
+            DispatchQueue.main.async { self.onEnd?() }
+            return
+        }
+        let info = connection.session()
+        let closing = locked {
+            id = info.id
+            if self.closing == .no {
+                self.connection = connection
+                if !pending.isEmpty { connection.write(pending) }
+                pending = Data()
+                // The surface changed size while connecting.
+                if let latest = self.size, latest != size { connection.resize(latest) }
+            }
+            return self.closing
+        }
+        // The tab went away while connecting.
+        if closing == .kill { connection.kill() }
+        if closing != .no { connection.detach() }
+        DispatchQueue.main.async { self.onStart?(info) }
+    }
+
+    // MARK: TerminalSink, on the core's thread
+
+    func output(_ data: Data) {
+        session.receive(data)
+    }
+
+    func replayed() {
+        // Waits until the surface parsed the replay, and replied to it.
+        session.waitForPendingOutput()
+        locked { replaying = false }
+        DispatchQueue.main.async { self.onReplayed?() }
+    }
+
+    func exited(_: Int32?) {
+        DispatchQueue.main.async { self.onEnd?() }
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
 /// Ghostty's view, plus what Ghostty.app adds around it: the mouse cursor
 /// the terminal asks for, and dropping files to type their paths.
 final class SurfaceView: TerminalView {
@@ -292,6 +465,112 @@ enum GhosttyApp {
     static var commandFinish: CommandFinishSettings {
         CommandFinishSettings(config: configText)
     }
+
+    /// The environment Ghostty gives the programs it starts: `base`, with
+    /// what Ghostty adds. The programs the agentz server starts get it, so
+    /// they can't tell the difference: Claude, for one, only reports
+    /// progress to Ghostty.
+    static func programEnvironment(_ base: [String: String]) -> [String: String] {
+        var env = base
+        env["TERM"] = "xterm-ghostty"
+        env["COLORTERM"] = "truecolor"
+        env["TERM_PROGRAM"] = "ghostty"
+        env["TERM_PROGRAM_VERSION"] = version
+        env["GHOSTTY_SHELL_FEATURES"] = shellFeatures
+        if let exe = Bundle.main.executableURL { env["GHOSTTY_BIN_DIR"] = exe.deletingLastPathComponent().path }
+        if let dir = GhosttyRuntimeResources.terminfoDirectoryURL?.path { env["TERMINFO"] = dir }
+        if let dir = GhosttyRuntimeResources.directoryURL?.path {
+            env["GHOSTTY_RESOURCES_DIR"] = dir
+            // Ghostty's data folder goes last, as Ghostty does it.
+            let data = dir + "/.."
+            let current = env["XDG_DATA_DIRS"].flatMap { $0.isEmpty ? nil : $0 } ?? "/usr/local/share:/usr/share"
+            var dirs = current.split(separator: ":").map(String.init)
+            if !dirs.contains(data) { dirs.append(data) }
+            env["XDG_DATA_DIRS"] = dirs.joined(separator: ":")
+        }
+        return env
+    }
+
+    /// How Ghostty starts `shell`, given its environment `env`: the command
+    /// line, and what to add to the environment for Ghostty's shell
+    /// integration, which marks prompts and commands (OSC 133) and reports
+    /// the folder (OSC 7). It comes for zsh and bash; fish 4 does both by
+    /// itself. Like Ghostty, it leaves `/bin/bash` alone: Apple's bash 3.2
+    /// can't load it.
+    static func shellLaunch(_ shell: String, env: [String: String]) -> (argv: [String], env: [String: String]) {
+        let setting = configValues("shell-integration").last ?? "detect"
+        let kind = setting == "detect" ? baseName(shell) : setting
+        guard let dir = GhosttyRuntimeResources.directoryURL?.appendingPathComponent("shell-integration").path else {
+            return ([shell], [:])
+        }
+        var added: [String: String] = [:]
+        switch kind {
+        case "zsh":
+            // zsh reads Ghostty's .zshenv, which puts the user's ZDOTDIR back.
+            if let user = env["ZDOTDIR"] { added["GHOSTTY_ZSH_ZDOTDIR"] = user }
+            added["ZDOTDIR"] = dir + "/zsh"
+            return ([shell], added)
+        case "bash" where shell != "/bin/bash":
+            // In POSIX mode, bash reads only $ENV: Ghostty's script, which
+            // then reads the user's startup files.
+            added["GHOSTTY_BASH_INJECT"] = "1"
+            added["ENV"] = dir + "/bash/ghostty.bash"
+            if let user = env["ENV"] { added["GHOSTTY_BASH_ENV"] = user }
+            if env["HISTFILE"] == nil {
+                // POSIX mode would keep history in ~/.sh_history.
+                added["HISTFILE"] = (env["HOME"] ?? NSHomeDirectory()) + "/.bash_history"
+                added["GHOSTTY_BASH_UNEXPORT_HISTFILE"] = "1"
+            }
+            return ([shell, "--posix"], added)
+        default:
+            return ([shell], [:])
+        }
+    }
+
+    /// `shell-integration-features` as Ghostty passes it on: the features
+    /// that are on, sorted, e.g. `path,ssh-env,title`.
+    private static var shellFeatures: String {
+        // Ghostty's defaults.
+        var on = ["cursor": true, "sudo": false, "title": true, "ssh-env": false, "ssh-terminfo": false, "path": true]
+        for value in configValues("shell-integration-features") {
+            for item in value.split(separator: ",").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+                switch item {
+                case "true", "false":
+                    for key in on.keys { on[key] = item == "true" }
+                default:
+                    let off = item.hasPrefix("no-")
+                    let key = off ? String(item.dropFirst(3)) : item
+                    if on[key] != nil { on[key] = !off }
+                }
+            }
+        }
+        var names = on.filter(\.value).map(\.key)
+        if let i = names.firstIndex(of: "cursor") {
+            switch configValues("cursor-style-blink").last {
+            case "true": names[i] = "cursor:blink"
+            case "false": names[i] = "cursor:steady"
+            default: break
+            }
+        }
+        return names.sorted().joined(separator: ",")
+    }
+
+    /// The values of `key` in the config the terminals use, in order.
+    private static func configValues(_ key: String) -> [String] {
+        configText.split(separator: "\n").compactMap { line in
+            let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count == 2, parts[0] == key else { return nil }
+            return parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        }
+    }
+
+    /// The library's Ghostty version, e.g. `1.3.2-HEAD-+3c47ca159`.
+    private static let version: String = {
+        _ = controller
+        let info = ghostty_info()
+        guard let text = info.version else { return "" }
+        return String(decoding: UnsafeRawBufferPointer(start: text, count: Int(info.version_len)), as: UTF8.self)
+    }()
 
     /// The terminals' colors in the light or dark appearance.
     static func colors(dark: Bool) -> TerminalColors {

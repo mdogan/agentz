@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private var tickTimer: Timer?
     private var keyMonitor: Any?
     private var shortcutsWindow: ShortcutsWindowController?
+    /// Quitting from "Quit and Stop All Sessions".
+    private var stoppingAll = false
 
     // MARK: - Launch
 
@@ -48,6 +50,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 if !pins.isEmpty { saved = SavedState(tabs: pins) }
             } catch {
                 problem = "Could not restore pinned tabs: \(error)"
+            }
+        }
+        // Agents that kept running in the agentz server since the last quit.
+        var running: [ServerSession] = []
+        if SmokeTest.logPath == nil {
+            do {
+                running = try serverSessions()
+            } catch {
+                problem = "Could not reach the agentz server: \(errorMessage(error))"
             }
         }
         let dir = pendingProject
@@ -107,8 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
         if let log = SmokeTest.logPath {
             Task { await SmokeTest(workspace: workspace, logPath: log).run() }
-        } else if let saved {
-            let failed = workspace.restore(saved)
+        } else if saved != nil || !running.isEmpty {
+            let failed = workspace.restore(saved ?? SavedState(), running: running)
             do { try saveTabs(failed) } catch { problem = "Could not keep unopened tabs: \(error)" }
         }
         if let issue = GhosttyApp.configIssue {
@@ -199,9 +210,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         true
     }
 
+    /// Agents, and shells that run something, keep running in the agentz
+    /// server when the app quits; this stops them too.
+    @objc func quitAndStopAll(_ sender: Any?) {
+        stoppingAll = true
+        NSApp.terminate(sender)
+        // Still running: the user cancelled.
+        stoppingAll = false
+    }
+
+    /// Quitting stops nothing that works, so it only asks when it would
+    /// stop everything.
     func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
         guard let workspace, SmokeTest.logPath == nil else { return .terminateNow }
-        let (working, idle, commands) = workspace.quitCounts()
+        let (working, idle, commands) = stoppingAll ? workspace.stopCounts() : (0, 0, 0)
         if working > 0 {
             guard confirm(
                 "\(plural(working, "agent is", "agents are")) working.",
@@ -226,6 +248,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 "\(error)\n\nIf you quit, they will not come back next time.",
                 button: "Quit Anyway"
             ) else { return .terminateCancel }
+        }
+        if stoppingAll {
+            workspace.stopAll()
+        } else {
+            workspace.stopIdleShells()
         }
         return .terminateNow
     }
@@ -276,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let agent = tab.linked?.agent ?? tab.key.agent
         if tab.isBusy {
             guard confirm("\(agent.displayName) is working.", "Closing stops it.", button: "Close") else { return }
-        } else if tab.key.agent == .shell, tab.linked == nil, tab.terminal.hasForegroundJob {
+        } else if tab.key.agent == .shell, tab.linked == nil, tab.terminal.hasJobs {
             guard confirm("The shell is running a command.", "Closing stops it.", button: "Close") else { return }
         }
         workspace.close(key)
@@ -396,6 +423,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         app.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         app.addItem(.separator())
         app.addItem(withTitle: "Quit Agentz", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        // Shown in place of Quit while Option is down.
+        let stop = add(app, "Quit and Stop All Sessions", #selector(quitAndStopAll(_:)), "q")
+        stop.keyEquivalentModifierMask = [.command, .option]
+        stop.isAlternate = true
 
         let file = submenu(main, "File")
         add(file, "New Claude Session", #selector(newClaude(_:)), "n")

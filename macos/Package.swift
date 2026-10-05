@@ -15,14 +15,15 @@ let package = Package(
     targets: [
         // The Rust core (../core). Built by build-core.sh.
         .binaryTarget(name: "AgentzFFI", path: "Frameworks/AgentzFFI.xcframework"),
-        // Transcripts, projects, saved tabs, rate limits, process scanning
-        // and busy tracking: the Swift side UniFFI generates for the Rust
-        // core (Generated/), plus a few Swift helpers.
+        // Transcripts, projects, saved tabs, rate limits, process scanning,
+        // busy tracking and the agentz server: the Swift side UniFFI
+        // generates for the Rust core (Generated/), plus a few Swift helpers.
         .target(name: "AgentzCore", dependencies: ["AgentzFFI"], swiftSettings: swift5),
         .executableTarget(
             name: "agentz",
             dependencies: [
                 "AgentzCore",
+                .product(name: "GhosttyKit", package: "libghostty-spm"),
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
                 .product(name: "GhosttyTheme", package: "libghostty-spm"),
             ],

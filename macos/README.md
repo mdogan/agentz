@@ -44,6 +44,7 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 | ⌘+ / ⌘- / ⌘0 | font size |
 | ⌘K | clear the screen |
 | ⌘/ | list all shortcuts (**Help › Keyboard Shortcuts**) |
+| ⌥⌘Q | quit and stop all sessions |
 
 When an agent finishes or waits for your permission while you are not looking at it, you get a notification. Click it to go to that session. If notifications are off, the session list shows a button to turn them on.
 
@@ -51,13 +52,25 @@ An agent only quits when you tell it to, in its own tab. If one quits while you 
 
 A shell can tell you when a long command ends, as Ghostty does: set `notify-on-command-finish` (`unfocused` or `always`) in your Ghostty config. `notify-on-command-finish-after` sets how long a command must run (5s by default). `notify-on-command-finish-action` picks `bell` (bounce the Dock icon and mark the row), `notify` (a notification), or both. Like in Ghostty, `bell` is on unless you write `no-bell`. The shell has to mark its commands: fish 4 does this by itself, and Ghostty's shell integration does it for zsh and bash.
 
-**Quit** (⌘Q) asks first if an agent or a command is still running. The open tabs come back on the next launch.
+### Work keeps running when you quit
+
+Agents and shells run in a small background server, like tmux or [herdr](https://herdr.dev). **Quit** (⌘Q) closes the window and keeps everything that works:
+
+- Claude and Codex keep running.
+- A shell keeps running if something runs in it: a command, a job in the background, or an agent you started by hand. A shell that runs nothing is closed, and opens fresh in the same folder next time.
+
+Open Agentz again and they are back, with their screens and scrollback, and it tells you when an agent is done. The app starts the server with the first session, and the server exits by itself once nothing runs and the app has been closed for a few seconds.
+
+- **Quit and Stop All Sessions** (⌥⌘Q, or hold Option in the Agentz menu) stops everything, and asks first if something works. Agents resume from their transcripts next time.
+- Closing a session (⌘W) stops it, as before.
+- After a restart of the Mac, agents resume from their transcripts, and shells open fresh, like the other open tabs.
+- `agentz server list` lists what the server runs, and `agentz server stop` stops all of it. The server's log is `~/Library/Application Support/agentz/server.log`.
 
 Rate limits for Claude and Codex show at the bottom of the list. To also get Claude's limits from a `claude` you start by hand, use **Agentz › Install Claude Status Line**.
 
 ## Settings
 
-- The app uses your login shell's environment, so `PATH` and variables from your shell config work. `AGENTZ_CLAUDE_ARGS` and `AGENTZ_CODEX_ARGS` add flags to the agents, e.g. `AGENTZ_CLAUDE_ARGS="--model opus"`.
+- The app uses your login shell's environment, so `PATH` and variables from your shell config work. An agent or shell keeps the environment from when it started, so after changing your shell config, restart it (close it and open it again), not just the app. `AGENTZ_CLAUDE_ARGS` and `AGENTZ_CODEX_ARGS` add flags to the agents, e.g. `AGENTZ_CLAUDE_ARGS="--model opus"`.
 - Terminals use your Ghostty config (`~/.config/ghostty/config`), including themes from Ghostty.app or `~/.config/ghostty/themes`. The session list takes its colors from the same theme. View > Theme picks any other Ghostty theme instead, and keeps it until you pick Follow Ghostty. Without Ghostty.app, the themes that come with the Ghostty library are used instead. `AGENTZ_GHOSTTY_CONFIG` points to another file (empty for none).
 - Terminals have Ghostty's macOS keybindings for editing, selecting and scrolling (⌘←, ⌥←, ⌘⌫, ⌘↑, ⇧→, …). Those for windows, tabs, splits and search are off, so ⌘N, ⌘T and ⌘W reach the menu. Your own keybinds still work.
 - Dropping files on a terminal types their paths, as in Ghostty.

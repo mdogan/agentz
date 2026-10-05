@@ -4,7 +4,8 @@ import AppKit
 /// A scripted check of the real app with real Ghostty terminals, started by
 /// `make smoke`. It opens shells and a stand-in `codex`, types commands and
 /// checks what agentz sees, then writes PASS or FAIL lines to
-/// `AGENTZ_SMOKE_LOG` and quits. It neither restores nor saves tabs.
+/// `AGENTZ_SMOKE_LOG` and quits. It neither restores nor saves the user's
+/// tabs, and runs its shells and agents in an agentz server of its own.
 @MainActor
 final class SmokeTest {
     private let workspace: Workspace
@@ -22,10 +23,13 @@ final class SmokeTest {
         self.logPath = logPath
     }
 
-    /// Stands in for Codex: a title spinner while "working", a notification
-    /// after the next Enter, and an exit after the one after that.
+    /// Stands in for Codex: a line of text, a title spinner while
+    /// "working", a notification after the next Enter, and an exit after the
+    /// one after that.
     private static let fakeCodex = #"""
     #!/bin/sh
+    [ -n "$AGENTZ_SMOKE_AGENT_ENV" ] && printf '%s %s' "$TERM_PROGRAM" "$TERM" > "$AGENTZ_SMOKE_AGENT_ENV"
+    echo 'codex ready'
     printf '\033]2;\342\240\213 Working\007'
     sleep 1
     printf '\033]2;Codex\007'
@@ -49,6 +53,10 @@ final class SmokeTest {
         FileManager.default.createFile(atPath: bin + "/codex", contents: Data(Self.fakeCodex.utf8), attributes: [.posixPermissions: 0o755])
         setenv("PATH", bin + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? ""), 1)
         let envFile = tmp + "/env"
+        let agentEnvFile = tmp + "/agent-env"
+        setenv("AGENTZ_SMOKE_AGENT_ENV", agentEnvFile, 1)
+        // Not the user's server, which runs their agents.
+        setenv("AGENTZ_SERVER_DIR", tmp, 1)
 
         lines.append("info ghostty config: \(GhosttyApp.configIssue.map { "not used: \($0)" } ?? "used")")
 
@@ -61,6 +69,7 @@ final class SmokeTest {
         let shellKey = shell.key
         let t = shell.terminal
         check("shell pid found", await wait(10) { t.pid != nil })
+        check("shell runs in the server", t.serverId != nil)
         let name = t.pid.flatMap(processName)
         check("pid is the login shell", name.map { $0.hasSuffix(Launch.shellName) } ?? false, "name=\(name ?? "nil") shell=\(Launch.shellName)")
         check("idle shell has no foreground job", await wait(5) { !t.hasForegroundJob && t.foregroundGroup != nil })
@@ -82,7 +91,7 @@ final class SmokeTest {
         }
         t.run("sleep 3")
         check("sees the foreground job", await wait(5) { t.hasForegroundJob })
-        check("quit counts a shell running a command", ws.quitCounts().commands == 1)
+        check("stopping all counts a shell running a command", ws.stopCounts().commands == 1)
         ws.requestScan?()
         check("shell named after its job", await wait(5) { shell.title == "sleep" }, shell.title)
         check("job ends", await wait(8) { !t.hasForegroundJob })
@@ -97,8 +106,12 @@ final class SmokeTest {
         codex.turns.userInput()
         check("agent replaces the idle shell", !ws.tabs.contains { $0.key == shellKey })
         check("agent starts in the shell's folder", codex.cwd == tmp || realPath(codex.cwd) == tmp, codex.cwd)
+        check("agent runs in the server", await wait(5) { codex.terminal.serverId != nil && codex.terminal.pid != nil })
+        check("agent environment", await wait(5) {
+            (try? String(contentsOfFile: agentEnvFile, encoding: .utf8)) == "ghostty xterm-ghostty"
+        }, (try? String(contentsOfFile: agentEnvFile, encoding: .utf8)) ?? "no file")
         check("agent busy from its title", await wait(5) { codex.isBusy })
-        check("quit counts a working agent", ws.quitCounts().working == 1)
+        check("stopping all counts a working agent", ws.stopCounts().working == 1)
 
         // Another tab, so the agent is not looked at and may notify.
         ws.newSession(.shell)
@@ -175,6 +188,50 @@ final class SmokeTest {
         check("closing the quit agent's row removes it", !ws.quitKeys.contains(quitKey) && ws.tabs.count == 1)
         ws.close(shown.key)
 
+        // An agent in the server keeps running when the app lets go of it,
+        // as when the app quits, and comes back with its screen.
+        ws.newSession(.codex, cwd: tmp)
+        guard let kept = ws.currentTab, kept.key.agent == .codex else { return finish("no codex tab to keep") }
+        check("agent's screen", await wait(5) { kept.terminal.screenText?.contains("codex ready") == true }, kept.terminal.screenText ?? "nil")
+        let keptPid = kept.terminal.pid ?? 0
+        let keptTab = ws.savedState().tabs.first { $0.server != nil && $0.server == kept.terminal.serverId }
+        check("saved state names the agent in the server", keptTab != nil)
+        kept.terminal.detach()
+        ws.close(kept.key)
+        _ = await wait(1) { false }
+        check("agent keeps running without the app", keptPid > 0 && kill(keptPid, 0) == 0)
+        let running = (try? serverSessions()) ?? []
+        check("server lists the agent", running.contains { $0.pid == keptPid }, "\(running.count) running")
+        _ = ws.restore(SavedState(tabs: keptTab.map { [$0] } ?? [], active: 0), running: running)
+        guard let back = ws.currentTab, back.key.agent == .codex else { return finish("agent not shown again") }
+        check("restore attaches to the running agent", back.terminal.pid == keptPid)
+        check("its screen comes back", await wait(5) { back.terminal.screenText?.contains("codex ready") == true }, back.terminal.screenText ?? "nil")
+        back.terminal.run("")
+        _ = await wait(0.3) { false }
+        back.terminal.run("")
+        check("typing reaches it, and its exit is seen", await wait(5) { !back.isRunning })
+        if ws.currentTab?.placeholder == true, let key = ws.currentTab?.key { ws.close(key) }
+
+        // Quitting stops only shells that run nothing. One with a job, even
+        // in the background, keeps running, like the agents.
+        ws.newSession(.shell, cwd: tmp)
+        guard let idleShell = ws.currentTab else { return finish("no idle shell") }
+        ws.newSession(.shell, cwd: tmp)
+        guard let jobShell = ws.currentTab, jobShell !== idleShell else { return finish("no shell for a job") }
+        check("shells start", await wait(10) { idleShell.terminal.pid != nil && jobShell.terminal.pid != nil })
+        jobShell.terminal.run("sleep 30 &")
+        check("a background job counts as running something", await wait(5) {
+            jobShell.terminal.hasJobs && !jobShell.terminal.hasForegroundJob && !idleShell.terminal.hasJobs
+        })
+        let idlePid = idleShell.terminal.pid ?? 0
+        let jobPid = jobShell.terminal.pid ?? 0
+        ws.stopIdleShells()
+        check("quitting stops a shell that runs nothing", await wait(5) { idlePid > 0 && kill(idlePid, 0) != 0 })
+        check("quitting keeps a shell with a job", jobPid > 0 && kill(jobPid, 0) == 0 && jobShell.isRunning)
+        ws.close(jobShell.key)
+        check("closing it ends the shell", await wait(5) { kill(jobPid, 0) != 0 })
+        check("no tabs left", await wait(5) { ws.tabs.isEmpty }, "\(ws.tabs.count) left")
+
         // A pinned tab can't be closed, goes first in the list, and stays
         // when its program ends, until the user opens it again.
         ws.newSession(.shell, cwd: tmp)
@@ -235,6 +292,8 @@ final class SmokeTest {
             lines.append("FAIL \(error)")
         }
         lines.append(failed ? "FAIL" : "PASS")
+        // Ends the server's agents; then it exits by itself.
+        _ = try? stopServerSessions()
         try? (lines.joined(separator: "\n") + "\n").write(toFile: logPath, atomically: true, encoding: .utf8)
         exit(failed ? 1 : 0)
     }

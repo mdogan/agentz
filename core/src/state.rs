@@ -24,6 +24,11 @@ pub struct SavedTab {
     #[uniffi(default = false)]
     #[serde(default, skip_serializing_if = "is_false")]
     pub pinned: bool,
+    /// The agentz server's id for the agent, if it ran there. If it still
+    /// runs, the app attaches to it instead of resuming the session.
+    #[uniffi(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -219,6 +224,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             title: "tab".into(),
             pinned: false,
+            server: None,
         };
         save_in(
             &dir,
@@ -267,6 +273,7 @@ mod tests {
             cwd: PathBuf::from("/repo"),
             title: "tab".into(),
             pinned: false,
+            server: None,
         };
         let state = SavedState {
             tabs: vec![tab.clone()],
@@ -291,6 +298,7 @@ mod tests {
             cwd: PathBuf::from("/repo"),
             title: "tab".into(),
             pinned: true,
+            server: None,
         };
         save_pins_in(&dir, vec![tab.clone()]).unwrap();
         // Reading does not take them, unlike the open tabs.

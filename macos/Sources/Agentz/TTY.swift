@@ -1,11 +1,11 @@
-// Finds the program Ghostty started on a terminal, and whether anything
-// still runs on it. Ghostty starts programs through `login`, so this is
-// about how Ghostty works, not about the agents.
+// What runs on a program's terminal, from the kernel. The agentz server
+// holds the terminals, not the app, so the app asks about the processes on
+// them instead of the terminals themselves.
 
 import Darwin
 
 /// Processes from `sysctl(KERN_PROC_...)`. Unlike `proc_pidinfo`, this
-/// also works for processes of other users, like the setuid `login`.
+/// also works for processes of other users, like a setuid `sudo`.
 private func kinfoProcs(_ mib: [Int32]) -> [kinfo_proc] {
     var mib = mib
     var size = 0
@@ -17,33 +17,19 @@ private func kinfoProcs(_ mib: [Int32]) -> [kinfo_proc] {
     return Array(procs.prefix(size / MemoryLayout<kinfo_proc>.stride))
 }
 
-private func command(_ p: kinfo_proc) -> String {
-    var comm = p.kp_proc.p_comm
-    return withUnsafeBytes(of: &comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+/// The foreground process group of the terminal `pid` runs on. Nil if it
+/// has none, or `pid` is gone.
+func terminalForegroundGroup(of pid: Int32) -> Int32? {
+    let group = kinfoProcs([CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]).first?.kp_eproc.e_tpgid ?? -1
+    return group > 0 ? group : nil
 }
 
-/// The program we started on the terminal `ttyPath`. Ghostty runs it as
-/// `login -> bash -c "exec -l ..."`, and `exec` keeps the pid, so it is the
-/// child of a `login` that is our child, on that terminal.
-func mainProcess(onTTY ttyPath: String, under parent: Int32 = getpid()) -> Int32? {
-    var st = stat()
-    guard stat(ttyPath, &st) == 0 else { return nil }
-    let procs = kinfoProcs([CTL_KERN, KERN_PROC, KERN_PROC_TTY, st.st_rdev])
-    let own = kinfoProcs([CTL_KERN, KERN_PROC, KERN_PROC_PID, parent]).first.map(command)
-    let logins = Set(procs.filter { $0.kp_eproc.e_ppid == parent && command($0) == "login" }.map(\.kp_proc.p_pid))
-    for p in procs {
-        let ppid = p.kp_eproc.e_ppid
-        if logins.contains(ppid) { return p.kp_proc.p_pid }
-        // No login in between. A child still named like us has not started
-        // its program yet.
-        if ppid == parent, command(p) != "login", command(p) != own { return p.kp_proc.p_pid }
-    }
-    return nil
-}
-
-/// True while any process has the terminal `ttyPath` open as its own.
-func ttyHasProcesses(_ ttyPath: String) -> Bool {
-    var st = stat()
-    guard stat(ttyPath, &st) == 0 else { return false }
-    return !kinfoProcs([CTL_KERN, KERN_PROC, KERN_PROC_TTY, st.st_rdev]).isEmpty
+/// True if another process runs on the terminal of `pid`: the jobs of a
+/// shell, in the foreground or not, and what they started, unless they
+/// left the terminal.
+func terminalHasOthers(_ pid: Int32) -> Bool {
+    guard let own = kinfoProcs([CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]).first,
+          own.kp_eproc.e_tdev != -1
+    else { return false }
+    return kinfoProcs([CTL_KERN, KERN_PROC, KERN_PROC_TTY, own.kp_eproc.e_tdev]).contains { $0.kp_proc.p_pid != pid }
 }

@@ -1,6 +1,7 @@
 # agentz has two parts:
 #   core/    the Rust core (sessions, processes, rate limits, saved tabs,
-#            busy tracking) and its bridge to Swift
+#            busy tracking, the server that runs the agents) and its bridge
+#            to Swift
 #   macos/   the macOS app, in Swift (see macos/Makefile)
 # These targets cover both.
 

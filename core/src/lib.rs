@@ -1,6 +1,7 @@
 //! Everything agentz knows about Claude Code and Codex, without any UI:
 //! session transcripts, projects, saved tabs, rate limits and the status
-//! line, and the processes running inside our shells.
+//! line, the processes running inside our shells, and the server that runs
+//! the agents so they outlive the app.
 //!
 //! The app reaches it through UniFFI. `make` in `macos/` builds this as a
 //! static library and generates its Swift side, which becomes the app's
@@ -13,16 +14,18 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 mod procs;
 mod project;
+mod server;
 mod sessions;
 mod state;
 mod turns;
 mod usage;
 mod worktree;
 
+use server::{ServerSession, SessionMeta, Spawn, TermSize};
 use sessions::{Session, SessionKey};
 use state::{SavedState, SavedTab};
 use turns::{TerminalSignal, TurnUpdate};
@@ -390,5 +393,152 @@ impl TurnTracker {
     /// exited.
     pub fn update(&self, running: bool) -> TurnUpdate {
         lock(&self.0).update(running)
+    }
+}
+
+// ---------- the server ----------
+
+/// `agentz server`: runs the server until it has nothing left to do.
+/// `agentz server list` prints the programs it runs, and `agentz server
+/// stop` hangs up on all of them. Returns the exit code.
+#[uniffi::export]
+pub fn run_server(args: Vec<String>) -> i32 {
+    let result = server::dir().and_then(|dir| match args.first().map(String::as_str) {
+        None => server::run(&dir),
+        Some("list") => {
+            for s in server::list(&dir)? {
+                let id = s.meta.session_id.as_deref().unwrap_or("-");
+                println!(
+                    "{}\t{:?}\t{id}\t{}\t{}",
+                    s.pid,
+                    s.meta.agent,
+                    s.cwd.display(),
+                    s.meta.title
+                );
+            }
+            Ok(())
+        }
+        Some("stop") => {
+            let stopped = server::stop_all(&dir)?;
+            println!(
+                "hung up on {} {}",
+                stopped.len(),
+                if stopped.len() == 1 {
+                    "session"
+                } else {
+                    "sessions"
+                }
+            );
+            Ok(())
+        }
+        Some(other) => Err(anyhow::anyhow!("unknown server command: {other}")),
+    });
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("agentz server: {e:#}");
+            1
+        }
+    }
+}
+
+/// The agents and shells running in the server. Empty if it does not run.
+#[uniffi::export]
+pub fn server_sessions() -> Result<Vec<ServerSession>, CoreError> {
+    Ok(server::list(&server::dir()?)?)
+}
+
+/// Hangs up on everything in the server. Returns how many.
+#[uniffi::export]
+pub fn stop_server_sessions() -> Result<u32, CoreError> {
+    Ok(server::stop_all(&server::dir()?)?.len() as u32)
+}
+
+/// Where a program's output goes. The app implements it; it is called on a
+/// thread of the core's.
+#[uniffi::export(with_foreign)]
+pub trait TerminalSink: Send + Sync {
+    /// Output: first what redraws the screen when attaching, then live.
+    fn output(&self, data: Vec<u8>);
+    /// The screen is redrawn; what follows is live.
+    fn replayed(&self);
+    /// The program ended with `code`, or the connection broke (None).
+    fn exited(&self, code: Option<i32>);
+}
+
+struct Sink(Arc<dyn TerminalSink>);
+
+impl server::Events for Sink {
+    fn output(&self, data: Vec<u8>) {
+        self.0.output(data);
+    }
+    fn replayed(&self) {
+        self.0.replayed();
+    }
+    fn exited(&self, code: Option<i32>) {
+        self.0.exited(code);
+    }
+}
+
+/// A program running in the server, and the app's connection to it.
+#[derive(uniffi::Object)]
+pub struct ServerTerminal(server::Connection);
+
+#[uniffi::export]
+impl ServerTerminal {
+    /// Starts a program in the server. Starts the server first, as
+    /// `program server`, if it does not run.
+    #[uniffi::constructor]
+    pub fn spawn(
+        program: PathBuf,
+        spawn: Spawn,
+        sink: Arc<dyn TerminalSink>,
+    ) -> Result<Arc<Self>, CoreError> {
+        let dir = server::dir()?;
+        let request = server::Request::Spawn(spawn);
+        let conn = server::Connection::open(&dir, Some(&program), &request, Arc::new(Sink(sink)))?;
+        Ok(Arc::new(ServerTerminal(conn)))
+    }
+
+    /// Connects to a program that runs in the server. `size` is the size
+    /// of the app's terminal.
+    #[uniffi::constructor]
+    pub fn attach(
+        id: String,
+        size: TermSize,
+        sink: Arc<dyn TerminalSink>,
+    ) -> Result<Arc<Self>, CoreError> {
+        let dir = server::dir()?;
+        let request = server::Request::Attach { id, size };
+        let conn = server::Connection::open(&dir, None, &request, Arc::new(Sink(sink)))?;
+        Ok(Arc::new(ServerTerminal(conn)))
+    }
+
+    pub fn session(&self) -> ServerSession {
+        self.0.session()
+    }
+
+    /// Typed text and terminal replies.
+    pub fn write(&self, data: Vec<u8>) {
+        self.0.write(&data);
+    }
+
+    pub fn resize(&self, size: TermSize) {
+        self.0.resize(size);
+    }
+
+    /// Hangs up on the program, as closing its terminal would.
+    pub fn kill(&self) {
+        self.0.kill();
+    }
+
+    /// Tells the server what the app now knows about the session.
+    pub fn update(&self, meta: SessionMeta) {
+        self.0.update(meta);
+    }
+
+    /// Closes the connection; the program keeps running.
+    pub fn detach(&self) {
+        self.0.detach();
     }
 }

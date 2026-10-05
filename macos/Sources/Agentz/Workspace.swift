@@ -2,13 +2,15 @@ import AgentzCore
 import AppKit
 import Observation
 
-/// An agent or shell we started, keyed by the session it belongs to.
+/// An agent or shell we started or attached to, keyed by the session it
+/// belongs to.
 @MainActor
 final class Tab {
     var key: SessionKey
     let terminal: Terminal
     var cwd: String
-    let spawnedAt = Date()
+    /// When the program started, which may be before this launch.
+    let spawnedAt: Date
     var fallbackTitle: String
     /// Started by resuming an existing transcript.
     let resumed: Bool
@@ -26,12 +28,13 @@ final class Tab {
     /// every launch.
     var pinned = false
 
-    init(key: SessionKey, terminal: Terminal, cwd: String, title: String, resumed: Bool) {
+    init(key: SessionKey, terminal: Terminal, cwd: String, title: String, resumed: Bool, spawnedAt: Date = Date()) {
         self.key = key
         self.terminal = terminal
         self.cwd = cwd
         fallbackTitle = title
         self.resumed = resumed
+        self.spawnedAt = spawnedAt
     }
 
     /// True if this tab shows `key`: its own session, or the session of the
@@ -266,9 +269,9 @@ final class Workspace {
 
     // MARK: - Saving and restoring
 
-    /// Save only tabs that still have a process, and pinned ones. The
-    /// screen and shell history are transient; agents continue from their
-    /// transcripts.
+    /// Save only tabs that still have a process, and pinned ones. What
+    /// still runs in the agentz server next time is shown again; agents
+    /// that don't continue from their transcripts, and shells start fresh.
     func savedState() -> SavedState {
         var state = SavedState(project: projectDir)
         for r in tabs where r.isRunning || r.pinned {
@@ -291,7 +294,7 @@ final class Workspace {
             r.cwd
         }
         let title = session?.title ?? (agent == .shell ? Launch.shellName : r.fallbackTitle)
-        return SavedTab(agent: agent, id: id, cwd: cwd, title: title, pinned: r.pinned)
+        return SavedTab(agent: agent, id: id, cwd: cwd, title: title, pinned: r.pinned, server: r.terminal.serverId)
     }
 
     /// Hands the pinned tabs to `savePins` when they changed: pinned,
@@ -305,19 +308,32 @@ final class Workspace {
     }
 
     /// Recreates saved tabs in their original order, then shows the tab that
-    /// was selected on quit. Returns tabs that could not be opened so the
+    /// was selected on quit. A saved agent that still runs in the agentz
+    /// server (`running`) is shown again; others resume from their
+    /// transcripts. Agents in the server that no saved tab names, e.g. after
+    /// a crash, are shown too. Returns tabs that could not be opened so the
     /// next launch can try them again.
-    func restore(_ saved: SavedState) -> SavedState {
+    func restore(_ saved: SavedState, running: [ServerSession] = []) -> SavedState {
         var selected: SessionKey?
         var failed = SavedState(project: saved.project)
+        var running = running
         for (i, tab) in saved.tabs.enumerated() {
-            if start(tab.agent, resume: tab.id, cwd: tab.cwd, title: tab.title, focus: false) {
+            let live = running.firstIndex { s in
+                s.id == tab.server || (s.meta.agent == tab.agent && tab.id != nil && s.meta.sessionId == tab.id)
+            }
+            if let live {
+                attach(running.remove(at: live), pinned: tab.pinned)
+            } else if start(tab.agent, resume: tab.id, cwd: tab.cwd, title: tab.title, focus: false) {
                 tabs.last?.pinned = tab.pinned
-                if saved.active.map(Int.init) == i { selected = current }
             } else {
                 if saved.active.map(Int.init) == i { failed.active = UInt32(failed.tabs.count) }
                 failed.tabs.append(tab)
+                continue
             }
+            if saved.active.map(Int.init) == i { selected = tabs.last?.key }
+        }
+        for s in running {
+            attach(s, pinned: false)
         }
         if let selected {
             selection = selected
@@ -337,9 +353,6 @@ final class Workspace {
     func tick() {
         var cwdChanged = false
         let focused = isWindowFocused()
-        for r in tabs {
-            r.terminal.poll()
-        }
         for r in tabs {
             let looking = focused && current == r.key
             let update = r.turns.update(r.isRunning)
@@ -424,6 +437,8 @@ final class Workspace {
             r.key = key
             if current == old { current = key }
             if selection == old { selection = key }
+            // So the next launch knows the session too.
+            r.terminal.update(SessionMeta(agent: .codex, sessionId: id, title: r.fallbackTitle))
         }
     }
 
@@ -587,12 +602,12 @@ final class Workspace {
         agent == .shell ? Launch.shellName : "New \(agent.name) session"
     }
 
-    /// The shell shown in the pane can be replaced only when it is at its
-    /// prompt and not pinned. Reads its real folder because not every shell
-    /// reports it.
+    /// The shell shown in the pane can be replaced only when it runs
+    /// nothing, not even in the background, and is not pinned. Reads its
+    /// real folder because not every shell reports it.
     private func activeIdleShell() -> (key: SessionKey, cwd: String)? {
         guard let r = currentTab, r.key.agent == .shell, r.isRunning, r.linked == nil, !r.pinned,
-              !r.terminal.hasForegroundJob
+              !r.terminal.hasJobs
         else { return nil }
         return (r.key, r.terminal.pid.flatMap(workingDirectory) ?? r.cwd)
     }
@@ -652,20 +667,13 @@ final class Workspace {
             key = SessionKey(.shell, "shell-\(nextNewId)")
             nextNewId += 1
         }
+        // Everything runs in the agentz server, so it can keep running when
+        // the app quits.
         let launch = agent == .shell ? Launch.shell() : Launch.agent(agent, args: args, cwd: cwd)
-        let terminal = Terminal(command: launch.command, cwd: cwd, env: launch.env)
+        let id = agent == .shell || key.id.hasPrefix("new-") ? nil : key.id
+        let terminal = Terminal(.spawn(launch.spawn(cwd: cwd, meta: SessionMeta(agent: agent, sessionId: id, title: title))))
         let tab = Tab(key: key, terminal: terminal, cwd: cwd, title: title, resumed: resume != nil && agent != .shell)
-        terminal.onSignal = { [weak tab] signal in tab?.turns.receive(signal) }
-        terminal.onExit = { [weak self, weak tab] in
-            guard let self, let tab else { return }
-            self.exited(tab)
-        }
-        if agent == .shell {
-            terminal.onCommandFinished = { [weak self, weak tab] exitCode, seconds in
-                guard let self, let tab else { return }
-                self.commandFinished(tab, exitCode: exitCode, seconds: seconds)
-            }
-        }
+        follow(tab)
         tabs.append(tab)
         current = key
         selection = key
@@ -674,12 +682,61 @@ final class Workspace {
         return true
     }
 
+    /// Shows an agent or shell that runs in the agentz server, e.g. one
+    /// started before the app last quit.
+    private func attach(_ s: ServerSession, pinned: Bool) {
+        let key: SessionKey
+        if let id = s.meta.sessionId {
+            key = SessionKey(s.meta.agent, id)
+        } else {
+            // A shell, or a Codex session whose id we did not learn yet.
+            key = SessionKey(s.meta.agent, "\(s.meta.agent == .shell ? "shell" : "new")-\(nextNewId)")
+            nextNewId += 1
+        }
+        let terminal = Terminal(.attach(s))
+        let tab = Tab(key: key, terminal: terminal, cwd: s.cwd, title: s.meta.title, resumed: s.meta.sessionId != nil, spawnedAt: s.started)
+        tab.pinned = pinned
+        follow(tab)
+        terminal.onReplayed = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            // What the replay signaled happened before; don't tell the user.
+            let update = tab.turns.update(tab.isRunning)
+            tab.busy = update.busy
+            // Except where a shell is now.
+            if let cwd = update.cwd, tab.key.agent == .shell, cwd != tab.cwd {
+                tab.cwd = cwd
+                self.rebuildRows()
+            }
+            // The agent may be in the middle of a turn the user started
+            // before the app quit: it may still say when it is done.
+            tab.turns.userInput()
+        }
+        tabs.append(tab)
+    }
+
+    /// Listens to what the tab's program signals.
+    private func follow(_ tab: Tab) {
+        tab.terminal.onSignal = { [weak tab] signal in tab?.turns.receive(signal) }
+        tab.terminal.onExit = { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            self.exited(tab)
+        }
+        if tab.key.agent == .shell {
+            tab.terminal.onCommandFinished = { [weak self, weak tab] exitCode, seconds in
+                guard let self, let tab else { return }
+                self.commandFinished(tab, exitCode: exitCode, seconds: seconds)
+            }
+        }
+    }
+
     private func exited(_ tab: Tab) {
         guard let i = tabs.firstIndex(where: { $0 === tab }) else { return }
         let key = tab.key
         let hadFocus = tab.terminal.isFocused
         let early = Date().timeIntervalSince(tab.spawnedAt) < 3
-        if key.agent != .shell, early {
+        if let failure = tab.terminal.failure {
+            setStatus("\(key.agent.displayName): \(failure)")
+        } else if key.agent != .shell, early {
             setStatus("\(key.agent.name) quit right after starting. Is it installed and in your login shell's PATH?")
         }
         // An agent only quits when told to, in its own tab. Quitting while
@@ -767,18 +824,34 @@ final class Workspace {
         waiting.remove(ObjectIdentifier(r))
     }
 
-    /// What quitting would stop. Agents started by hand in a shell count as
-    /// agents; a shell counts only while it runs a command.
-    func quitCounts() -> (working: Int, idle: Int, commands: Int) {
+    /// What `stopAll` would stop: agents, including those started by hand
+    /// in a shell, and shells running a command.
+    func stopCounts() -> (working: Int, idle: Int, commands: Int) {
         var working = 0, idle = 0, commands = 0
         for r in tabs where r.isRunning && !r.placeholder {
             if r.key.agent != .shell || r.linked != nil {
                 if r.isBusy { working += 1 } else { idle += 1 }
-            } else if r.terminal.hasForegroundJob {
+            } else if r.terminal.hasJobs {
                 commands += 1
             }
         }
         return (working, idle, commands)
+    }
+
+    /// Hangs up on everything, e.g. before quitting.
+    func stopAll() {
+        for r in tabs where r.isRunning {
+            r.terminal.stop()
+        }
+    }
+
+    /// Hangs up on the shells that run nothing, as quitting does. Agents,
+    /// and shells with a command or an agent in them, keep running in the
+    /// agentz server; the stopped shells start fresh next time.
+    func stopIdleShells() {
+        for r in tabs where r.isRunning && r.key.agent == .shell && r.linked == nil && !r.terminal.hasJobs {
+            r.terminal.stop()
+        }
     }
 }
 
