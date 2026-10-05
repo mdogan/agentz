@@ -44,6 +44,8 @@ You can also drag a session from the list onto the terminal. With one pane, it g
 - Closing the session in a pane (⌘W), or exiting its shell, also ends the split, and the other pane takes the space. A hidden split ends the same way, and also when one of its agents quits.
 - The splits come back on the next launch with the open tabs, hidden ones too.
 
+**View › Auto-Hide Session List** gives the terminal the whole window. Rest the mouse at the window's left edge and the list slides in over the terminal; it slides away once the mouse leaves it. While you type in its filter, it stays. ⌘L, ⌘F and ⌃⌘S show it too, and then it stays until you go back to the terminal (⎋, ⌘J, or opening a session). A click outside it always hides it. The terminal keeps its size while the list comes and goes. Turn the setting off to put the list back next to the terminal.
+
 | Shortcut | Action |
 | --- | --- |
 | ⌘N / ⇧⌘N | new Claude / Codex session, in place of the shown shell if it is idle |

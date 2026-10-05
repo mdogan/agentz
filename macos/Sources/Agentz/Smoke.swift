@@ -8,6 +8,7 @@ import AppKit
 @MainActor
 final class SmokeTest {
     private let workspace: Workspace
+    private let window: MainWindowController
     private let logPath: String
     private var lines: [String] = []
     private var failed = false
@@ -17,8 +18,9 @@ final class SmokeTest {
         ProcessInfo.processInfo.environment["AGENTZ_SMOKE_LOG"]
     }
 
-    init(workspace: Workspace, logPath: String) {
+    init(workspace: Workspace, window: MainWindowController, logPath: String) {
         self.workspace = workspace
+        self.window = window
         self.logPath = logPath
     }
 
@@ -447,6 +449,49 @@ final class SmokeTest {
             && ws.currentTab?.key.agent == .codex && !ws.tabs.contains { $0 === second }, "\(ws.panes)")
         ws.newSession(.shell)
         check("a new shell leaves the split as it is", ws.panes.split == nil && ws.hiddenSplits.first?.keys.first == first.key)
+        for tab in ws.tabs {
+            ws.close(tab.key)
+        }
+
+        // Auto-hide: the list leaves the split and slides in over the
+        // terminal, which keeps its size. A point stands in for the mouse.
+        ws.newSession(.shell, cwd: tmp)
+        guard let under = ws.currentTab else { return finish("no shell for auto-hide") }
+        let underView = under.terminal.view
+        let overlay = window.overlay
+        let narrow = underView.frame.width
+        window.setAutoHide(true)
+        check("auto-hide gives the terminal the whole window", await wait(2) { underView.frame.width > narrow } && overlay.panel.isHidden,
+            "\(narrow) -> \(underView.frame.width)")
+        let wide = underView.frame.width
+        lines.append("info list width: \(overlay.panel.frame.width), terminal \(narrow) -> \(wide)")
+        window.focusSidebar(.list)
+        check("⌘L shows the list over the terminal", overlay.isShown && overlay.held && !overlay.panel.isHidden && underView.frame.width == wide)
+        check("the list gets the keyboard", await wait(2) { overlay.hasFocus })
+        window.focusTerminal()
+        check("going to the terminal hides it", !overlay.isShown && under.terminal.isFocused)
+        check("it slides away", await wait(1) { overlay.panel.isHidden })
+        let mouse = overlay.mouseLocation
+        var pointer = NSPoint(x: 2, y: 200)
+        overlay.mouseLocation = { pointer }
+        overlay.edgeEntered()
+        check("resting the mouse at the left edge shows it", await wait(1) { overlay.isShown } && !overlay.held)
+        pointer = NSPoint(x: overlay.panel.frame.width + 100, y: 200)
+        check("moving the mouse off it hides it", await wait(2) { !overlay.isShown })
+        pointer = NSPoint(x: 2, y: 200)
+        overlay.edgeEntered()
+        _ = await wait(1) { overlay.isShown }
+        window.sidebarFocus.request(.filter)
+        check("its filter can be typed in", await wait(2) { overlay.editingFilter })
+        pointer = NSPoint(x: overlay.panel.frame.width + 100, y: 200)
+        check("typing in the filter holds it", await wait(1.5) { overlay.held } && overlay.isShown)
+        click(underView, at: NSPoint(x: underView.bounds.width - 40, y: 40))
+        check("a click outside hides it", !overlay.isShown && under.terminal.isFocused)
+        overlay.mouseLocation = mouse
+        window.setAutoHide(false)
+        check("off again, the list is back in the split", await wait(2) { abs(underView.frame.width - narrow) <= 1 }
+            && overlay.panel.superview == nil, "\(narrow) -> \(underView.frame.width)")
+
         for tab in ws.tabs {
             ws.close(tab.key)
         }

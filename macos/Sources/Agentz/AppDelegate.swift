@@ -74,7 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 recentFolders: { UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? [] },
                 clearRecentFolders: { UserDefaults.standard.removeObject(forKey: Self.recentsKey) },
                 notificationSettings: { [weak self] in self?.notificationSettings(nil) }
-            )
+            ),
+            autoHide: SmokeTest.logPath == nil && UserDefaults.standard.bool(forKey: Self.autoHideKey)
         )
         windowController = controller
         controller.showWindow(nil)
@@ -106,7 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
 
         if let log = SmokeTest.logPath {
-            Task { await SmokeTest(workspace: workspace, logPath: log).run() }
+            Task { await SmokeTest(workspace: workspace, window: controller, logPath: log).run() }
         } else if let saved {
             let failed = workspace.restore(saved)
             do { try saveTabs(failed) } catch { problem = "Could not keep unopened tabs: \(error)" }
@@ -138,6 +139,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     private static let recentsKey = "recentFolders"
+    private static let autoHideKey = "autoHideSessionList"
 
     /// Shows the project of `dir`, and opens it there on the next launch.
     /// With `recent`, it goes to the top of the recent folders.
@@ -306,6 +308,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     @objc func previousSession(_: Any?) { workspace?.cycle(-1) }
     @objc func toggleSessionList(_ sender: Any?) { windowController?.toggleSidebar(sender) }
 
+    @objc func toggleAutoHide(_: Any?) {
+        guard let controller = windowController else { return }
+        controller.setAutoHide(!controller.autoHide)
+        if SmokeTest.logPath == nil { UserDefaults.standard.set(controller.autoHide, forKey: Self.autoHideKey) }
+    }
+
     @objc func splitRight(_: Any?) { workspace?.toggleSplit(.right) }
     @objc func splitDown(_: Any?) { workspace?.toggleSplit(.down) }
     @objc func unsplit(_: Any?) { workspace?.unsplit() }
@@ -383,6 +391,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item.state = workspace.panes.split == .down ? .on : .off
         case #selector(unsplit(_:)), #selector(focusOtherPane(_:)):
             return workspace.panes.split != nil
+        case #selector(toggleAutoHide(_:)):
+            item.state = windowController?.autoHide == true ? .on : .off
         default:
             break
         }
@@ -442,6 +452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         view.addItem(.separator())
         let sidebar = add(view, "Toggle Session List", #selector(toggleSessionList(_:)), "s")
         sidebar.keyEquivalentModifierMask = [.command, .control]
+        add(view, "Auto-Hide Session List", #selector(toggleAutoHide(_:)))
         view.addItem(.separator())
         add(view, "Split Right", #selector(splitRight(_:)), "d")
         add(view, "Split Down", #selector(splitDown(_:)), "D")

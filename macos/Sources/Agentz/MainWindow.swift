@@ -7,14 +7,25 @@ import SwiftUI
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let workspace: Workspace
     let look: Look
-    let sidebarFocus = SidebarFocus()
+    let sidebarFocus: SidebarFocus
     private let pane: PaneViewController
     private let split = NSSplitViewController()
+    private let sidebar: NSHostingController<SidebarView>
+    private let sidebarItem: NSSplitViewItem
+    /// The list over the terminal, in auto-hide mode.
+    let overlay = SidebarOverlay()
+    /// The list is out of the split, and shows over the terminal when
+    /// wanted.
+    private(set) var autoHide = false
 
-    init(workspace: Workspace, look: Look, actions: SidebarActions) {
+    init(workspace: Workspace, look: Look, actions: SidebarActions, autoHide: Bool) {
         self.workspace = workspace
         self.look = look
+        let focus = SidebarFocus()
+        sidebarFocus = focus
         pane = PaneViewController(workspace: workspace, look: look)
+        sidebar = NSHostingController(rootView: SidebarView(workspace: workspace, look: look, focus: focus, actions: actions))
+        sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -28,15 +39,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         super.init(window: window)
 
-        let sidebar = NSHostingController(rootView: SidebarView(workspace: workspace, look: look, focus: sidebarFocus, actions: actions))
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        sidebarItem.minimumThickness = 220
-        sidebarItem.maximumThickness = 520
+        sidebarItem.minimumThickness = Self.listWidths.lowerBound
+        sidebarItem.maximumThickness = Self.listWidths.upperBound
         sidebarItem.canCollapse = true
-        let paneItem = NSSplitViewItem(viewController: pane)
-        split.addSplitViewItem(sidebarItem)
-        split.addSplitViewItem(paneItem)
-        split.splitView.autosaveName = "agentz.split"
+        if autoHide {
+            self.autoHide = true
+            moveListToOverlay()
+        } else {
+            split.addSplitViewItem(sidebarItem)
+        }
+        split.addSplitViewItem(NSSplitViewItem(viewController: pane))
+        if !autoHide { split.splitView.autosaveName = Self.splitName }
         window.contentViewController = split
         window.setContentSize(NSSize(width: 1200, height: 760))
         window.center()
@@ -56,6 +69,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         workspace.onTick = { [weak self] in self?.updateTitle() }
         workspace.focusTerminal = { [weak self] in self?.focusTerminal() }
         workspace.isWindowFocused = { [weak window] in NSApp.isActive && window?.isKeyWindow == true }
+        overlay.onHide = { [weak self] hadFocus in
+            if hadFocus { self?.leaveList() }
+        }
+        // Dragging a session out of the list, to drop it on a pane.
+        pane.onSessionDrag = { [weak self] in self?.overlay.hide() }
         layout()
         restyle()
     }
@@ -63,7 +81,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// Follows the terminal colors, which change with the system appearance.
     private func restyle() {
         withObservationTracking { [weak self] in
-            if let self, let window { look.style(window) }
+            if let self, let window {
+                look.style(window)
+                overlay.panel.lineColor = NSColor(look.divider)
+            }
         } onChange: { [weak self] in
             DispatchQueue.main.async { self?.restyle() }
         }
@@ -100,6 +121,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func focusTerminal() {
         pane.sync()
         if let tab = workspace.currentTab {
+            // A list shown from the keyboard is done with.
+            if overlay.held { overlay.hide() }
             tab.terminal.focus()
         } else {
             // An empty pane: the list picks what it shows.
@@ -108,14 +131,83 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func focusSidebar(_ target: SidebarFocus.Target) {
-        if split.splitViewItems.first?.isCollapsed == true {
+        if autoHide {
+            overlay.show(held: true)
+        } else if sidebarItem.isCollapsed {
             split.toggleSidebar(nil)
         }
         sidebarFocus.request(target)
     }
 
     @objc func toggleSidebar(_ sender: Any?) {
-        split.toggleSidebar(sender)
+        if !autoHide {
+            split.toggleSidebar(sender)
+        } else if overlay.isShown {
+            overlay.hide()
+        } else {
+            overlay.show(held: true)
+        }
+    }
+
+    // MARK: - Auto-hide
+
+    private static let listWidths: ClosedRange<CGFloat> = 220 ... 520
+    /// Where the split keeps the list's width.
+    private static let splitName = "agentz.split"
+    private static let listWidthKey = "sessionListWidth"
+
+    /// The list's width over the terminal: the width it had in the split.
+    private var listWidth: CGFloat {
+        get {
+            let width = UserDefaults.standard.double(forKey: Self.listWidthKey)
+            return width > 0 ? min(max(width, Self.listWidths.lowerBound), Self.listWidths.upperBound) : 260
+        }
+        set { UserDefaults.standard.set(Double(newValue), forKey: Self.listWidthKey) }
+    }
+
+    /// With `on`, the list leaves the split, the terminal takes the whole
+    /// window, and the list slides in over it when wanted. Off, the list
+    /// is back in the split, shown.
+    func setAutoHide(_ on: Bool) {
+        guard on != autoHide else { return }
+        autoHide = on
+        if on {
+            let hadFocus = (window?.firstResponder as? NSView)?.isDescendant(of: sidebar.view) == true
+            if !sidebarItem.isCollapsed, sidebar.view.frame.width > 0 { listWidth = sidebar.view.frame.width }
+            // The split saves its layout as it changes. Without the list,
+            // that would lose the list's width.
+            split.splitView.autosaveName = nil
+            split.removeSplitViewItem(sidebarItem)
+            moveListToOverlay()
+            if hadFocus { leaveList() }
+        } else {
+            let hadFocus = overlay.hasFocus
+            overlay.detach()
+            sidebar.removeFromParent()
+            split.insertSplitViewItem(sidebarItem, at: 0)
+            sidebarItem.isCollapsed = false
+            split.splitView.layoutSubtreeIfNeeded()
+            split.splitView.setPosition(listWidth, ofDividerAt: 0)
+            split.splitView.autosaveName = Self.splitName
+            if hadFocus { sidebarFocus.request(.list) }
+        }
+    }
+
+    private func moveListToOverlay() {
+        sidebar.removeFromParent()
+        pane.addChild(sidebar)
+        overlay.attach(sidebar.view, width: listWidth, to: pane.view)
+    }
+
+    /// The list hid with the keyboard focus in it: the focus goes to the
+    /// terminal, or nowhere on an empty pane, whose Resume button then
+    /// takes Return.
+    private func leaveList() {
+        if let tab = workspace.currentTab {
+            tab.terminal.focus()
+        } else {
+            window?.makeFirstResponder(nil)
+        }
     }
 }
 
@@ -184,6 +276,8 @@ final class PaneViewController: NSViewController {
     /// Where the divider is while it is dragged. The split takes it when
     /// the drag ends.
     private var draggedRatio: CGFloat?
+    /// A session from the list is dragged over the pane area.
+    var onSessionDrag: (() -> Void)?
 
     init(workspace: Workspace, look: Look) {
         self.workspace = workspace
@@ -224,6 +318,7 @@ final class PaneViewController: NSViewController {
         divider.onReset = { [weak self] in self?.workspace.setRatio(0.5) }
         container.target = { [weak self] key, point in self?.dropTarget(key, at: point)?.frame }
         container.drop = { [weak self] key, point in self?.drop(key, at: point) }
+        container.entered = { [weak self] in self?.onSessionDrag?() }
         view = root
         restyle()
     }
@@ -414,6 +509,8 @@ final class PaneContainer: NSView {
     /// can't be dropped there.
     var target: ((SessionKey, NSPoint) -> NSRect?)?
     var drop: ((SessionKey, NSPoint) -> Void)?
+    /// A session came over the pane area.
+    var entered: (() -> Void)?
     let highlight = DropHighlight()
     /// The session being dragged over the pane area.
     private var dragged: SessionKey?
@@ -428,6 +525,7 @@ final class PaneContainer: NSView {
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         dragged = SessionDrag.key(of: sender)
+        if dragged != nil { entered?() }
         return draggingUpdated(sender)
     }
 
