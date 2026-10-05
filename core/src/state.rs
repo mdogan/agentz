@@ -66,6 +66,10 @@ pub struct SavedState {
     #[uniffi(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<SavedSplit>,
+    /// Splits the window kept off screen while it showed other sessions.
+    #[uniffi(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_splits: Vec<SavedSplit>,
 }
 
 /// The name of the state file, and of its lock.
@@ -155,12 +159,14 @@ fn save_in(dir: &Path, state: SavedState) -> Result<()> {
             let i = origin.iter().position(|&o| o == base + i as usize)?;
             Some(i as u32)
         };
-        saved.tabs = unique;
-        saved.active = state.active.and_then(kept);
-        saved.split = state.split.map(|split| SavedSplit {
+        let kept_split = |split: SavedSplit| SavedSplit {
             panes: split.panes.iter().map(|p| p.and_then(kept)).collect(),
             ..split
-        });
+        };
+        saved.tabs = unique;
+        saved.active = state.active.and_then(kept);
+        saved.split = state.split.map(kept_split);
+        saved.hidden_splits = state.hidden_splits.into_iter().map(kept_split).collect();
         write_atomic(&path, &saved)
     })
 }
@@ -335,13 +341,18 @@ mod tests {
         save_in(
             &dir,
             SavedState {
-                tabs: vec![tab("three"), tab("one")],
+                tabs: vec![tab("three"), tab("one"), tab("four"), tab("five")],
                 active: Some(1),
                 split: Some(SavedSplit {
                     direction: SplitDirection::Right,
                     panes: vec![Some(0), Some(1)],
                     focused: 1,
                 }),
+                hidden_splits: vec![SavedSplit {
+                    direction: SplitDirection::Down,
+                    panes: vec![Some(2), Some(3)],
+                    focused: 0,
+                }],
                 ..SavedState::default()
             },
         )
@@ -350,7 +361,7 @@ mod tests {
         assert!(text.contains(r#""direction":"right""#), "{text}");
         let saved = take_in(&dir).unwrap().unwrap();
         let ids: Vec<_> = saved.tabs.iter().filter_map(|t| t.id.as_deref()).collect();
-        assert_eq!(ids, ["two", "three", "one"]);
+        assert_eq!(ids, ["two", "three", "one", "four", "five"]);
         assert_eq!(saved.active, Some(2));
         assert_eq!(
             saved.split,
@@ -359,6 +370,14 @@ mod tests {
                 panes: vec![Some(1), Some(2)],
                 focused: 1,
             })
+        );
+        assert_eq!(
+            saved.hidden_splits,
+            [SavedSplit {
+                direction: SplitDirection::Down,
+                panes: vec![Some(3), Some(4)],
+                focused: 0,
+            }]
         );
         fs::remove_dir_all(dir).unwrap();
     }

@@ -69,10 +69,31 @@ struct Row: Identifiable, Equatable {
     /// Has a tab of ours: a running agent or shell, or one that just
     /// ended. Active rows come before the rest, whatever their time.
     var active = false
+    /// Where it is in a split, on screen or not.
+    var pane: SplitPane?
+    /// The list draws a split's two rows in one box: this row's half of it,
+    /// when the other row is right next to it.
+    var box: BoxHalf?
     var id: SessionKey { key }
 
     /// The list's groups, in order: pinned, active, the rest.
     var group: Int { pinned ? 0 : active ? 1 : 2 }
+}
+
+/// Where a session is in a split.
+struct SplitPane: Equatable {
+    var direction: SplitDirection
+    /// 0 for the left or top pane, 1 for the right or bottom one.
+    var index: Int
+    /// The row of the session in the other pane. Nil for an empty pane.
+    var partner: SessionKey?
+    /// The split is on screen.
+    var shown: Bool
+}
+
+/// The top or bottom half of the box around a split's two rows.
+enum BoxHalf {
+    case top, bottom
 }
 
 /// Which sessions the list shows, by when they were last used. Sessions
@@ -102,15 +123,22 @@ enum SessionRange: CaseIterable {
 }
 
 /// What the pane area shows: one tab, or two after a split.
+///
+/// A split works like a tab with two panes. Picking a session outside it
+/// shows that session on its own, and the split waits off screen, as it
+/// was, until one of its sessions is picked again.
 struct PaneLayout: Equatable {
     /// The tab in each pane, by its own key, left or top first. Nil for a
     /// pane with no terminal.
     var keys: [SessionKey?] = [nil]
     /// Nil with one pane.
     var split: SplitDirection?
-    /// The pane the user works in: the list picks what it shows, and new
-    /// and resumed sessions open there.
+    /// The pane the user works in. ⌘N there starts an agent in place of an
+    /// idle shell, and an empty one shows what the list picks.
     var focused = 0
+    /// Where the line between two panes is, as a share of the width or
+    /// height.
+    var ratio: CGFloat = 0.5
 
     var current: SessionKey? {
         get { keys[focused] }
@@ -173,8 +201,20 @@ final class Workspace {
             for r in tabs where panes.keys.contains(r.key) {
                 waiting.remove(ObjectIdentifier(r))
             }
+            // The list marks the sessions of each split.
+            if (panes.split != nil || oldValue.split != nil),
+               panes.keys != oldValue.keys || panes.split != oldValue.split
+            {
+                rebuildRows()
+            }
             onLayout?()
         }
+    }
+    /// Splits off screen, because the user picked a session outside them.
+    /// Picking one of their sessions shows them again. They never hold a
+    /// tab that ended.
+    private(set) var hiddenSplits: [PaneLayout] = [] {
+        didSet { rebuildRows() }
     }
     /// The tab shown in the focused pane, by its own key.
     private(set) var current: SessionKey? {
@@ -202,11 +242,13 @@ final class Workspace {
 
     @ObservationIgnored private(set) var tabs: [Tab] = [] {
         didSet {
-            // However a tab goes away, its terminal goes with it.
+            // However a tab goes away, its terminal goes with it, and a
+            // hidden split it was in ends.
             for old in oldValue where !tabs.contains(where: { $0 === old }) {
                 old.terminal.close()
                 waiting.remove(ObjectIdentifier(old))
                 quit.remove(ObjectIdentifier(old))
+                endHiddenSplit(with: old.key)
             }
             onLayout?()
         }
@@ -313,13 +355,17 @@ final class Workspace {
             state.tabs.append(saved(r))
         }
         state.active = current.flatMap { index[$0] }
-        if let split = panes.split {
-            state.split = SavedSplit(
-                direction: split,
-                panes: panes.keys.map { $0.flatMap { index[$0] } },
-                focused: UInt32(panes.focused)
-            )
+        func savedSplit(_ layout: PaneLayout) -> SavedSplit? {
+            layout.split.map { direction in
+                SavedSplit(
+                    direction: direction,
+                    panes: layout.keys.map { $0.flatMap { index[$0] } },
+                    focused: UInt32(layout.focused)
+                )
+            }
         }
+        state.split = savedSplit(panes)
+        state.hiddenSplits = hiddenSplits.compactMap(savedSplit)
         return state
     }
 
@@ -350,8 +396,9 @@ final class Workspace {
     }
 
     /// Recreates saved tabs in their original order, then shows the tab that
-    /// was selected on quit, or the split. Returns tabs that could not be
-    /// opened so the next launch can try them again.
+    /// was selected on quit, or the split, and keeps the hidden splits.
+    /// Returns tabs that could not be opened so the next launch can try them
+    /// again.
     func restore(_ saved: SavedState) -> SavedState {
         // The new tabs' keys, by their index in `saved.tabs`.
         var started: [Int: SessionKey] = [:]
@@ -365,19 +412,23 @@ final class Workspace {
                 failed.tabs.append(tab)
             }
         }
-        let layout = saved.split.flatMap { split -> PaneLayout? in
+        func layout(_ split: SavedSplit) -> PaneLayout? {
             let keys = split.panes.map { $0.flatMap { started[Int($0)] } }
             // Not if both its tabs are gone.
             guard keys.count == 2, split.focused < 2, keys.contains(where: { $0 != nil }) else { return nil }
             return PaneLayout(keys: keys, split: split.direction, focused: Int(split.focused))
         }
-        if let layout {
+        hiddenSplits += saved.hiddenSplits.compactMap(layout)
+        if let layout = saved.split.flatMap(layout) {
             panes = layout
             // Nil leaves an empty focused pane as it is.
             selection = current
         } else if let selected = saved.active.flatMap({ started[Int($0)] }) {
             selection = selected
             current = selected
+        } else if let last = current, hiddenSplits.contains(where: { $0.keys.contains(last) }) {
+            // The last tab started is in a hidden split, not on its own.
+            current = nil
         }
         rebuildRows()
         keepPins()
@@ -479,6 +530,9 @@ final class Workspace {
             let old = r.key
             r.key = key
             if let pane = panes.keys.firstIndex(of: old) { panes.keys[pane] = key }
+            for i in hiddenSplits.indices {
+                if let pane = hiddenSplits[i].keys.firstIndex(of: old) { hiddenSplits[i].keys[pane] = key }
+            }
             if selection == old { selection = key }
         }
     }
@@ -499,6 +553,11 @@ final class Workspace {
         for r in tabs where !rows.contains(where: { r.shows($0.key) }) {
             rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.spawnedAt, pinned: r.pinned, active: true))
         }
+        if panes.split != nil || !hiddenSplits.isEmpty {
+            for i in rows.indices where rows[i].active {
+                rows[i].pane = splitPane(rows[i].key, rows: rows)
+            }
+        }
         if let repo {
             rows = rows.filter { repo.contains($0.cwd) }
         }
@@ -509,8 +568,48 @@ final class Workspace {
             }
         }
         rows.sort { $0.group != $1.group ? $0.group < $1.group : $0.order > $1.order }
+        rows = pairSplits(rows)
         if rows != self.rows { self.rows = rows }
         refreshStates()
+    }
+
+    /// Where the session `key` is in a split, on screen or not. `rows` gives
+    /// the row of the session in the other pane.
+    private func splitPane(_ key: SessionKey, rows: [Row]) -> SplitPane? {
+        guard let tab = tabs.first(where: { $0.shows(key) }) else { return nil }
+        let shown = panes.split != nil ? [panes] : []
+        for (n, layout) in (shown + hiddenSplits).enumerated() {
+            guard let direction = layout.split, let i = layout.keys.firstIndex(of: tab.key) else { continue }
+            let other = layout.keys[1 - i].flatMap { k in tabs.first { $0.key == k } }
+            let partner = other.flatMap { o in rows.first { o.shows($0.key) }?.key }
+            return SplitPane(direction: direction, index: i, partner: partner, shown: n < shown.count)
+        }
+        return nil
+    }
+
+    /// Puts the two sessions of each split next to each other, left or top
+    /// first, where the first of them is in the list.
+    private func pairSplits(_ rows: [Row]) -> [Row] {
+        guard rows.contains(where: { $0.pane?.partner != nil }) else { return rows }
+        var placed = Set<SessionKey>()
+        var paired: [Row] = []
+        for row in rows where !placed.contains(row.key) {
+            var group = [row]
+            if let pane = row.pane, let other = rows.first(where: { $0.key == pane.partner }), !placed.contains(other.key) {
+                if pane.index == 0 { group.append(other) } else { group.insert(other, at: 0) }
+            }
+            for r in group {
+                placed.insert(r.key)
+                paired.append(r)
+            }
+        }
+        for i in paired.indices.dropLast()
+            where paired[i].pane?.partner == paired[i + 1].key && paired[i + 1].pane?.partner == paired[i].key
+        {
+            paired[i].box = .top
+            paired[i + 1].box = .bottom
+        }
+        return paired
     }
 
     private func place(_ cwd: String) -> String {
@@ -563,13 +662,21 @@ final class Workspace {
     // MARK: - Starting and switching
 
     /// Shows the session. If its agent is already running we just switch to
-    /// it; otherwise we resume it in a new terminal.
+    /// it; otherwise we resume it in a new terminal. A split on screen stays
+    /// as it is, unless the session goes into its empty pane.
     func open(_ key: SessionKey) {
         if let r = tabs.first(where: { $0.shows(key) && $0.isRunning }) {
             show(r, for: key)
             focusTerminal?()
             return
         }
+        makeRoom()
+        resume(key)
+    }
+
+    /// Resumes the session in the focused pane, in place of the idle shell
+    /// there if there is one.
+    private func resume(_ key: SessionKey) {
         // From a notification, the session may not be listed any more.
         guard let (cwd, title) = rows.first(where: { $0.key == key }).map({ ($0.cwd, $0.title) })
             ?? sessions.first(where: { $0.key == key }).map({ ($0.cwd, $0.title) })
@@ -602,7 +709,7 @@ final class Workspace {
         guard let r = tabs.first(where: { $0.shows(key) }), r.pinned != pinned else { return }
         r.pinned = pinned
         r.placeholder = false
-        if !pinned, !r.isRunning, !quit.contains(ObjectIdentifier(r)), !panes.keys.contains(r.key) {
+        if !pinned, !r.isRunning, !quit.contains(ObjectIdentifier(r)), !isLaidOut(r.key) {
             // An ended tab was only kept for its pin.
             tabs.removeAll { $0 === r }
         }
@@ -616,27 +723,49 @@ final class Workspace {
     func select(_ key: SessionKey?) {
         guard let key else { return }
         guard let r = tabs.first(where: { $0.shows(key) && $0.isRunning }) else {
+            makeRoom()
             current = nil
             return
         }
         show(r, for: key)
     }
 
-    /// Shows the running tab `r`, for the session `key`, in the focused
-    /// pane. One already in a pane stays there, and its pane gets the focus.
+    /// Shows the running tab `r`, for the session `key`. One already on
+    /// screen stays in its pane, which gets the focus, and one in a hidden
+    /// split brings that split back. Any other is shown on its own.
     private func show(_ r: Tab, for key: SessionKey) {
         if let pane = panes.keys.firstIndex(of: r.key) {
             panes.focused = pane
+            return
+        }
+        if let i = hiddenSplits.firstIndex(where: { $0.keys.contains(r.key) }) {
+            var split = hiddenSplits[i]
+            split.focused = split.keys.firstIndex(of: r.key) ?? split.focused
+            var hidden = hiddenSplits
+            hidden.remove(at: i)
+            if panes.split != nil { hidden.append(panes) }
+            hiddenSplits = hidden
+            panes = split
         } else {
-            prune(keep: key)
+            makeRoom()
             current = r.key
         }
+        prune()
     }
 
-    /// Shows the next (or previous) running session in list order. The
-    /// session in the other pane stays there and is skipped.
+    /// Frees the focused pane for a session from outside the split on
+    /// screen: the split is hidden, as it is, and one pane takes its place.
+    /// An empty pane of a split is free already.
+    private func makeRoom() {
+        guard panes.split != nil, current != nil else { return }
+        hiddenSplits.append(panes)
+        panes = PaneLayout()
+    }
+
+    /// Shows the next (or previous) running session in list order. A split
+    /// comes back when one of its sessions is next.
     func cycle(_ delta: Int) {
-        let keys = rows.map(\.key).filter { runningKeys.contains($0) && !isInOtherPane($0) }
+        let keys = rows.map(\.key).filter { runningKeys.contains($0) }
         guard !keys.isEmpty else { return }
         let at = keys.firstIndex { isCurrent($0) } ?? (delta > 0 ? -1 : 0)
         let key = keys[(at + delta + keys.count) % keys.count]
@@ -644,15 +773,33 @@ final class Workspace {
         open(key)
     }
 
+    /// Starts an agent in place of the idle shell in the focused pane, even
+    /// in a split. Anything else starts on its own, and a split on screen
+    /// stays as it is.
     func newSession(_ agent: Agent) {
+        if agent == .shell || activeIdleShell() == nil {
+            guard checkFolder(root) else { return }
+            makeRoom()
+        }
         startFromActiveShell(agent, resume: nil, cwd: root, shellCwd: true, title: newTitle(agent))
     }
 
     /// Starts a new session in `cwd`, e.g. the folder of another session.
     /// Unlike `newSession`, it never takes the place of the shown shell.
     func newSession(_ agent: Agent, cwd: String) {
-        prune(keep: nil)
+        guard checkFolder(cwd) else { return }
+        makeRoom()
         start(agent, resume: nil, cwd: cwd, title: newTitle(agent))
+        prune()
+    }
+
+    /// False, with a status line, if the folder is gone.
+    private func checkFolder(_ cwd: String) -> Bool {
+        guard isDirectory(cwd) else {
+            setStatus("Folder no longer exists: \(tilde(cwd))")
+            return false
+        }
+        return true
     }
 
     private func newTitle(_ agent: Agent) -> String {
@@ -675,7 +822,6 @@ final class Workspace {
     @discardableResult
     private func startFromActiveShell(_ agent: Agent, resume: String?, cwd: String, shellCwd: Bool, title: String) -> Bool {
         let shell = agent != .shell ? activeIdleShell() : nil
-        prune(keep: shell?.key)
         // A session opened from the list keeps its own folder: Claude finds
         // its transcript by folder, and Codex would carry on in another repo.
         let cwd = shellCwd ? shell?.cwd ?? cwd : cwd
@@ -684,19 +830,32 @@ final class Workspace {
             tabs.removeAll { $0.key == key }
             rebuildRows()
         }
+        prune()
         return true
     }
 
     /// Placeholder shells are kept only until the user moves on. Drops
-    /// them and ended tabs, except the one showing `keep`, the one in the
-    /// other pane, pinned ones, and agents that quit while the user was
+    /// them and ended tabs that are in no pane, on screen or in a hidden
+    /// split, except pinned ones and agents that quit while the user was
     /// away.
-    private func prune(keep: SessionKey?) {
-        let other = panes.other
+    private func prune() {
+        let count = tabs.count
         tabs.removeAll { r in
-            r.key != other && !(keep.map(r.shows) ?? false) && !r.pinned && !quit.contains(ObjectIdentifier(r))
-                && (!r.isRunning || r.placeholder)
+            !isLaidOut(r.key) && !r.pinned && !quit.contains(ObjectIdentifier(r)) && (!r.isRunning || r.placeholder)
         }
+        if tabs.count != count { rebuildRows() }
+    }
+
+    /// True if the tab `key` is in a pane, on screen or in a hidden split.
+    private func isLaidOut(_ key: SessionKey) -> Bool {
+        panes.keys.contains(key) || hiddenSplits.contains { $0.keys.contains(key) }
+    }
+
+    /// Ends the hidden split that holds the tab `key`. The other tab runs
+    /// on, on its own.
+    private func endHiddenSplit(with key: SessionKey) {
+        guard hiddenSplits.contains(where: { $0.keys.contains(key) }) else { return }
+        hiddenSplits.removeAll { $0.keys.contains(key) }
     }
 
     // MARK: - Splitting
@@ -738,29 +897,41 @@ final class Workspace {
 
     /// Shows the session in a pane of a split `direction`, the right or
     /// bottom one unless `pane` is 0, and works there. A running session
-    /// moves there; others are resumed there. If it is in the other pane
-    /// already, the two trade places.
+    /// moves there, and a hidden split it was in ends; others are resumed
+    /// there. If it is in the other pane already, the two trade places.
     func openInSplit(_ key: SessionKey, _ direction: SplitDirection, pane: Int = 1) {
         guard canOpenInSplit(key), pane == 0 || pane == 1 else { return }
         let running = tabs.first { $0.shows(key) && $0.isRunning }
+        if let r = running { endHiddenSplit(with: r.key) }
         if panes.split == nil {
+            let before = panes
             var keys = [current, current]
             keys[pane] = nil
             panes = PaneLayout(keys: keys, split: direction, focused: pane)
-            open(key)
-            // It could not be resumed, e.g. its folder is gone.
-            guard current != nil else {
-                panes = PaneLayout(keys: [panes.keys[1 - pane]])
-                return
+            if let r = running {
+                current = r.key
+            } else {
+                resume(key)
+                // It could not be resumed, e.g. its folder is gone.
+                guard current != nil else {
+                    panes = before
+                    return
+                }
             }
         } else if let r = running, panes.keys[1 - pane] == r.key {
-            panes = PaneLayout(keys: panes.keys.reversed(), split: direction, focused: pane)
-            open(key)
+            panes.keys.reverse()
+            panes.split = direction
+            panes.focused = pane
         } else {
             panes.split = direction
             panes.focused = pane
-            open(key)
+            if let r = running {
+                current = r.key
+            } else {
+                resume(key)
+            }
         }
+        prune()
         if currentTab?.shows(key) == true { selection = key }
     }
 
@@ -771,8 +942,15 @@ final class Workspace {
         guard panes.split != nil else { return }
         let hadFocus = [currentTab, otherTab].contains { $0?.terminal.isFocused == true }
         dropPane(current == nil ? panes.focused : 1 - panes.focused)
-        prune(keep: current)
+        prune()
         if hadFocus { focusTerminal?() }
+    }
+
+    /// Moves the line between the panes. `ratio` is the left or top pane's
+    /// share.
+    func setRatio(_ ratio: CGFloat) {
+        guard panes.split != nil else { return }
+        panes.ratio = min(max(ratio, 0.15), 0.85)
     }
 
     /// Ends the split without pane `i`. The other pane fills the space and
@@ -811,10 +989,7 @@ final class Workspace {
     /// session. Returns false if it could not start.
     @discardableResult
     func start(_ agent: Agent, resume: String?, cwd: String, title: String, focus: Bool = true, pane: Int? = nil) -> Bool {
-        guard isDirectory(cwd) else {
-            setStatus("Folder no longer exists: \(tilde(cwd))")
-            return false
-        }
+        guard checkFolder(cwd) else { return false }
         let key: SessionKey
         var args: [String] = []
         switch (agent, resume) {
@@ -875,6 +1050,8 @@ final class Workspace {
         // An agent only quits when told to, in its own tab. Quitting while
         // nobody looks means it crashed or something killed it.
         let unexpected = key.agent != .shell && !early && !(isWindowFocused() && pane != nil)
+        // A hidden split ends, as it would on screen. The other tab runs on.
+        if pane == nil { endHiddenSplit(with: key) }
         if unexpected {
             let title = sessions.first { $0.key == key }?.title ?? tab.fallbackTitle
             notify?("\(key.agent.displayName) quit", title, "It quit while you were away. Open the session to resume it.", key)
@@ -908,6 +1085,7 @@ final class Workspace {
         } else {
             tabs.remove(at: i)
         }
+        prune()
         rebuildRows()
     }
 
@@ -935,7 +1113,8 @@ final class Workspace {
     }
 
     /// Stops the session's agent or shell and closes its tab, then shows the
-    /// next running one. In a split, the other pane takes the space instead.
+    /// next running one. In a split, the other pane takes the space instead;
+    /// a hidden split ends.
     /// Pinned tabs have to be unpinned first.
     func close(_ key: SessionKey) {
         guard let i = tabs.firstIndex(where: { $0.shows(key) }), !tabs[i].pinned else { return }
@@ -944,6 +1123,8 @@ final class Workspace {
         // Dropping the terminal frees Ghostty's surface, which hangs up on
         // the program.
         tabs.remove(at: i)
+        // With a hidden split, the shell it opened if nobody typed in it.
+        prune()
         if let pane, panes.split != nil {
             dropPane(pane)
             rebuildRows()
@@ -953,9 +1134,9 @@ final class Workspace {
         rebuildRows()
         if wasShown {
             let next = rows.lazy.compactMap { row in
-                self.tabs.first { $0.shows(row.key) && $0.isRunning }.map { (row: row.key, tab: $0.key) }
+                self.tabs.first { $0.shows(row.key) && $0.isRunning }.map { (row: row.key, tab: $0) }
             }.first
-            current = next?.tab
+            if let next { show(next.tab, for: next.row) } else { current = nil }
             selection = next?.row
             if next != nil { focusTerminal?() }
         }

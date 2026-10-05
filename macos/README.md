@@ -31,17 +31,18 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 - Right-click a session to open it in a split, close it, pin it, show its folder, or copy its id.
 - A pinned session stays at the top of the list and can't be closed until you unpin it (right-click, or **File › Unpin Session**). A line separates pinned and active sessions from other sessions when both are shown. If its agent or shell ends, its row stays; open it to start it again. Pinned sessions come back on every launch, even after a crash.
 
-To see two sessions at once, split the pane: ⌘D puts a second pane to the right, ⇧⌘D puts it below. The two buttons at the right end of the title bar do the same. The new pane opens a shell in the same folder as the shown session; press ⌘N or ⇧⌘N there to start an agent in its place. To put a session from the list there instead, right-click it and pick **Open in Split Right** or **Open in Split Down**: it moves there if it runs, and is resumed there if not.
+To see two sessions at once, split the pane: ⌘D puts a second pane to the right, ⇧⌘D puts it below. The two buttons at the right end of the title bar do the same. The new pane opens a shell in the same folder as the shown session; press ⌘N or ⇧⌘N there to start an agent in its place. To put a session from the list there instead, right-click it and pick **Open in Split Right** or **Open in Split Down**: it moves there if it runs, and is resumed there if not. If it was in another split, that split ends.
 
 You can also drag a session from the list onto the terminal. With one pane, it goes to the edge you drop it near (left, right, top or bottom) and the pane splits that way. In a split, it goes into the pane you drop it on. A highlight shows where it will land.
 
-- One pane is the focused one; the other is faded. Click a pane, or press ⌥⌘J, to work in it. The list then picks what that pane shows, and ⌘N, ⌘T and ⌘W act on it.
-- A session already shown in one pane is not opened twice: picking it moves you to its pane.
-- In the list, the focused pane's session has a colored bar, and the other pane's session a gray one.
-- Drag the line between the panes to resize them. Double-click it to make them even again.
+- A split works like a tab with two panes: what its panes show changes only when you put a session there yourself. Picking another session in the list, going to it with ⌘] or ⌘[, or starting one with ⌘T shows it on its own. The split waits, as it was, until you pick one of its sessions again. You can keep several splits this way.
+- One pane is the focused one; the other is faded. Click a pane, or press ⌥⌘J, to work in it. ⌘N there starts an agent in place of an idle shell, and ⌘W closes its session. An empty pane shows the session you pick in the list.
+- A session already in a split is not opened twice: picking it shows its split and moves you to its pane.
+- In the list, the two sessions of a split sit next to each other in a box, and an icon shows which half each one is in. The box of the split on screen is colored. The focused pane's session has a colored bar, and the other pane's session a gray one.
+- Drag the line between the panes to resize them. Double-click it to make them even again. Each split keeps its own size.
 - ⌘D or ⇧⌘D turns the split the other way, and the same key again unsplits it. The title bar button for the current split is filled in; click it to unsplit. **View › Unsplit** does the same. The session that goes off screen keeps running in the list. A shell the split opened and you never typed in is closed.
-- Closing the session in a pane (⌘W), or exiting its shell, also ends the split, and the other pane takes the space.
-- The split comes back on the next launch, with the open tabs.
+- Closing the session in a pane (⌘W), or exiting its shell, also ends the split, and the other pane takes the space. A hidden split ends the same way, and also when one of its agents quits.
+- The splits come back on the next launch with the open tabs, hidden ones too.
 
 | Shortcut | Action |
 | --- | --- |

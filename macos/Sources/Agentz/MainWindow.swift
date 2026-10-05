@@ -181,10 +181,9 @@ final class PaneViewController: NSViewController {
     /// Fades the pane the user does not work in, as Ghostty does.
     private let fade = FadeView()
     private let divider = PaneDivider()
-    /// Where the divider is, as a share of the width or height.
-    private var ratio: CGFloat = 0.5
-    /// The split the views were last laid out for.
-    private var split: SplitDirection?
+    /// Where the divider is while it is dragged. The split takes it when
+    /// the drag ends.
+    private var draggedRatio: CGFloat?
 
     init(workspace: Workspace, look: Look) {
         self.workspace = workspace
@@ -217,10 +216,12 @@ final class PaneViewController: NSViewController {
         container.addSubview(divider)
         container.addSubview(container.highlight)
         divider.onDrag = { [weak self] point in self?.moveDivider(to: point) }
-        divider.onReset = { [weak self] in
-            self?.ratio = 0.5
-            self?.layoutPanes()
+        divider.onDragEnd = { [weak self] in
+            guard let self, let ratio = draggedRatio else { return }
+            draggedRatio = nil
+            workspace.setRatio(ratio)
         }
+        divider.onReset = { [weak self] in self?.workspace.setRatio(0.5) }
         container.target = { [weak self] key, point in self?.dropTarget(key, at: point)?.frame }
         container.drop = { [weak self] key, point in self?.drop(key, at: point) }
         view = root
@@ -236,7 +237,7 @@ final class PaneViewController: NSViewController {
         let b = container.bounds
         guard b.width > 0, b.height > 0 else { return nil }
         if let split = layout.split {
-            let rects = paneRects(split)
+            let rects = paneRects(split, ratio: layout.ratio)
             guard let i = rects.firstIndex(where: { $0.contains(point) }) else { return nil }
             if workspace.tabs.first(where: { $0.key == layout.keys[i] })?.shows(key) == true { return nil }
             return (rects[i], i, split)
@@ -248,7 +249,8 @@ final class PaneViewController: NSViewController {
             (fromLeft, .right, 0), (1 - fromLeft, .right, 1), (fromTop, .down, 0), (1 - fromTop, .down, 1),
         ]
         let edge = edges.min { $0.distance < $1.distance }!
-        return (paneRects(edge.direction)[edge.pane], edge.pane, edge.direction)
+        // A new split starts even.
+        return (paneRects(edge.direction, ratio: 0.5)[edge.pane], edge.pane, edge.direction)
     }
 
     private func drop(_ key: SessionKey, at point: NSPoint) {
@@ -272,18 +274,12 @@ final class PaneViewController: NSViewController {
         _ = view
         let tabs = workspace.tabs
         let layout = workspace.panes
-        if layout.split != split {
-            // A new split starts even. So do the halves a dragged session
-            // would go to.
-            if split == nil || layout.split == nil { ratio = 0.5 }
-            split = layout.split
-        }
         let live = Set(tabs.map { ObjectIdentifier($0.terminal.view) })
         for sub in terminals.subviews where !live.contains(ObjectIdentifier(sub)) {
             if view.window?.firstResponder === sub { view.window?.makeFirstResponder(nil) }
             sub.removeFromSuperview()
         }
-        let rects = paneRects(layout.split)
+        let rects = paneRects(layout.split, ratio: layout.ratio)
         for tab in tabs {
             let v = tab.terminal.view
             let pane = layout.keys.firstIndex(of: tab.key)
@@ -305,7 +301,7 @@ final class PaneViewController: NSViewController {
     /// where the panes are.
     private func layoutPanes() {
         let layout = workspace.panes
-        let rects = paneRects(layout.split)
+        let rects = paneRects(layout.split, ratio: draggedRatio ?? layout.ratio)
         var empty = Set(layout.keys.indices)
         for (i, key) in layout.keys.enumerated() {
             guard let v = workspace.tabs.first(where: { $0.key == key })?.terminal.view else { continue }
@@ -325,33 +321,34 @@ final class PaneViewController: NSViewController {
         divider.vertical = split == .right
         // The line is in the middle of the divider, which is wider so it is
         // easy to grab.
-        let grab: CGFloat = 3
+        let grab: CGFloat = 3, line = PaneDivider.thickness(split)
         divider.frame = switch split {
-        case .right: NSRect(x: rects[0].maxX - grab, y: 0, width: 1 + 2 * grab, height: container.bounds.height)
-        case .down: NSRect(x: 0, y: rects[1].maxY - grab, width: container.bounds.width, height: 1 + 2 * grab)
+        case .right: NSRect(x: rects[0].maxX - grab, y: 0, width: line + 2 * grab, height: container.bounds.height)
+        case .down: NSRect(x: 0, y: rects[1].maxY - grab, width: container.bounds.width, height: line + 2 * grab)
         }
         fade.isHidden = false
         fade.frame = rects[1 - layout.focused]
     }
 
-    /// Each pane's frame, left or top first, with a one-point line between
-    /// two.
-    private func paneRects(_ split: SplitDirection?) -> [NSRect] {
+    /// Each pane's frame, left or top first, with the divider's line
+    /// between two. `ratio` is the first pane's share.
+    private func paneRects(_ split: SplitDirection?, ratio: CGFloat) -> [NSRect] {
         let b = container.bounds
+        let line = split.map(PaneDivider.thickness) ?? 0
         switch split {
         case nil:
             return [b]
         case .right:
-            let first = ((b.width - 1) * ratio).rounded()
+            let first = ((b.width - line) * ratio).rounded()
             return [
                 NSRect(x: 0, y: 0, width: first, height: b.height),
-                NSRect(x: first + 1, y: 0, width: max(b.width - first - 1, 0), height: b.height),
+                NSRect(x: first + line, y: 0, width: max(b.width - first - line, 0), height: b.height),
             ]
         case .down:
-            let first = ((b.height - 1) * ratio).rounded()
+            let first = ((b.height - line) * ratio).rounded()
             return [
                 NSRect(x: 0, y: b.height - first, width: b.width, height: first),
-                NSRect(x: 0, y: 0, width: b.width, height: max(b.height - first - 1, 0)),
+                NSRect(x: 0, y: 0, width: b.width, height: max(b.height - first - line, 0)),
             ]
         }
     }
@@ -360,12 +357,13 @@ final class PaneViewController: NSViewController {
     private func moveDivider(to point: NSPoint) {
         let b = container.bounds
         guard b.width > 0, b.height > 0 else { return }
+        let ratio: CGFloat
         switch workspace.panes.split {
         case .right: ratio = point.x / b.width
         case .down: ratio = (b.height - point.y) / b.height
         case nil: return
         }
-        ratio = min(max(ratio, 0.15), 0.85)
+        draggedRatio = min(max(ratio, 0.15), 0.85)
         layoutPanes()
     }
 
@@ -376,6 +374,7 @@ final class PaneViewController: NSViewController {
             let colors = look.colors
             let splitLook = GhosttyApp.splitLook
             divider.color = NSColor(splitLook.divider ?? colors.background.mixed(with: colors.foreground, 0.15))
+            divider.thickColor = NSColor(splitLook.divider ?? colors.background.mixed(with: colors.foreground, 0.35))
             fade.color = NSColor(splitLook.unfocusedFill ?? colors.background).withAlphaComponent(1 - splitLook.unfocusedOpacity)
             container.highlight.color = NSColor(look.accent)
         } onChange: { [weak self] in
@@ -527,6 +526,12 @@ private final class FadeView: NSView {
 /// The line between two panes. Dragging it resizes them; a double-click
 /// makes them even.
 private final class PaneDivider: NSView {
+    /// How thick the line is. The one between panes above each other is
+    /// thicker, so it stands out from the terminal's own lines.
+    static func thickness(_ split: SplitDirection) -> CGFloat {
+        split == .down ? 2 : 1
+    }
+
     /// True with the panes side by side, so the line runs up and down.
     var vertical = true {
         didSet {
@@ -540,17 +545,24 @@ private final class PaneDivider: NSView {
         didSet { needsDisplay = true }
     }
 
+    /// The color of the thicker line, between panes above each other.
+    var thickColor = NSColor.separatorColor {
+        didSet { needsDisplay = true }
+    }
+
     /// Gets where the mouse is, in the divider's superview.
     var onDrag: ((NSPoint) -> Void)?
+    var onDragEnd: (() -> Void)?
     var onReset: (() -> Void)?
 
     private var cursor: NSCursor { vertical ? .resizeLeftRight : .resizeUpDown }
 
     override func draw(_: NSRect) {
-        color.setFill()
+        (vertical ? color : thickColor).setFill()
+        let t = Self.thickness(vertical ? .right : .down)
         let line = vertical
-            ? NSRect(x: (bounds.width / 2).rounded(.down), y: 0, width: 1, height: bounds.height)
-            : NSRect(x: 0, y: (bounds.height / 2).rounded(.down), width: bounds.width, height: 1)
+            ? NSRect(x: ((bounds.width - t) / 2).rounded(.down), y: 0, width: t, height: bounds.height)
+            : NSRect(x: 0, y: ((bounds.height - t) / 2).rounded(.down), width: bounds.width, height: t)
         line.fill()
     }
 
@@ -578,5 +590,9 @@ private final class PaneDivider: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard let superview else { return }
         onDrag?(superview.convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with _: NSEvent) {
+        onDragEnd?()
     }
 }

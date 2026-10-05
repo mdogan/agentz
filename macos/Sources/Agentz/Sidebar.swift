@@ -231,55 +231,21 @@ struct SidebarView: View {
                     let dividerAfter = Set(zip(workspace.rows, workspace.rows.dropFirst())
                         .filter { $0.group != 2 && $1.group == 2 }.map(\.0.key))
                     ForEach(workspace.rows) { row in
-                        let running = workspace.runningKeys.contains(row.key)
-                        let quit = workspace.quitKeys.contains(row.key)
-                        let closable = (running || quit) && !row.pinned
-                        RowView(
-                            row: row,
-                            look: look,
-                            selected: workspace.selection == row.key,
-                            listFocused: listFocused,
-                            isCurrent: workspace.isCurrent(row.key),
-                            inOtherPane: workspace.isInOtherPane(row.key),
-                            running: running,
-                            busy: workspace.busyKeys.contains(row.key),
-                            waiting: workspace.waitingKeys.contains(row.key),
-                            quit: quit,
-                            closable: closable,
-                            hovered: hovered == row.key,
-                            now: workspace.now
-                        )
-                        .id(row.key)
-                        // Onto the terminal, to show it in a split.
-                        .onDrag { SessionDrag.provider(row.key) }
-                        .onTapGesture(count: 2) { workspace.open(row.key) }
-                        .simultaneousGesture(TapGesture().onEnded {
-                            workspace.selection = row.key
-                            listFocused = true
-                        })
-                        .contextMenu { rowMenu(row.key) }
-                        // After the row's gestures, so a click on it does
-                        // not also select the row.
-                        .overlay(alignment: .trailing) {
-                            if hovered == row.key {
-                                RowButtons(
-                                    look: look,
-                                    closable: closable,
-                                    start: { agent in workspace.newSession(agent, cwd: row.cwd) },
-                                    close: { actions.close(row.key) }
-                                )
-                                .padding(.trailing, 4)
+                        item(row)
+                            // The two rows of a split share one box.
+                            .overlay {
+                                if let half = row.box {
+                                    BoxHalfShape(half: half)
+                                        .stroke(row.pane?.shown == true ? look.accent.opacity(0.6) : look.faint, lineWidth: 1)
+                                        .padding(.horizontal, -3)
+                                        .padding(.top, half == .top ? -3 : -1)
+                                        .padding(.bottom, half == .bottom ? -3 : -1)
+                                        .allowsHitTesting(false)
+                                }
                             }
-                        }
-                        // Around the button too, or moving onto it would
-                        // leave the row and hide it.
-                        .onHover { inside in
-                            if inside {
-                                hovered = row.key
-                            } else if hovered == row.key {
-                                hovered = nil
-                            }
-                        }
+                            .padding(.top, row.box == .top ? 3 : 0)
+                            .padding(.bottom, row.box == .bottom ? 3 : 0)
+                            .id(row.key)
                         if dividerAfter.contains(row.key) {
                             Rectangle()
                                 .fill(look.divider)
@@ -324,6 +290,57 @@ struct SidebarView: View {
             .onChange(of: workspace.selection) { _, key in
                 workspace.select(key)
                 if let key { proxy.scrollTo(key) }
+            }
+        }
+    }
+
+    private func item(_ row: Row) -> some View {
+        let running = workspace.runningKeys.contains(row.key)
+        let quit = workspace.quitKeys.contains(row.key)
+        let closable = (running || quit) && !row.pinned
+        return RowView(
+            row: row,
+            look: look,
+            selected: workspace.selection == row.key,
+            listFocused: listFocused,
+            isCurrent: workspace.isCurrent(row.key),
+            inOtherPane: workspace.isInOtherPane(row.key),
+            running: running,
+            busy: workspace.busyKeys.contains(row.key),
+            waiting: workspace.waitingKeys.contains(row.key),
+            quit: quit,
+            closable: closable,
+            hovered: hovered == row.key,
+            now: workspace.now
+        )
+        // Onto the terminal, to show it in a split.
+        .onDrag { SessionDrag.provider(row.key) }
+        .onTapGesture(count: 2) { workspace.open(row.key) }
+        .simultaneousGesture(TapGesture().onEnded {
+            workspace.selection = row.key
+            listFocused = true
+        })
+        .contextMenu { rowMenu(row.key) }
+        // After the row's gestures, so a click on it does not also select
+        // the row.
+        .overlay(alignment: .trailing) {
+            if hovered == row.key {
+                RowButtons(
+                    look: look,
+                    closable: closable,
+                    start: { agent in workspace.newSession(agent, cwd: row.cwd) },
+                    close: { actions.close(row.key) }
+                )
+                .padding(.trailing, 4)
+            }
+        }
+        // Around the button too, or moving onto it would leave the row and
+        // hide it.
+        .onHover { inside in
+            if inside {
+                hovered = row.key
+            } else if hovered == row.key {
+                hovered = nil
             }
         }
     }
@@ -422,6 +439,27 @@ struct SidebarView: View {
     }
 }
 
+/// One half of the box around a split's two rows. The top half has no
+/// bottom edge and the bottom half no top edge, so together they make one
+/// box.
+private struct BoxHalfShape: Shape {
+    let half: BoxHalf
+
+    func path(in rect: CGRect) -> Path {
+        // Inside the rect, so the line is not cut off.
+        let r = rect.insetBy(dx: 0.5, dy: 0)
+        let radius: CGFloat = 10
+        let closed = half == .top ? r.minY + 0.5 : r.maxY - 0.5
+        let open = half == .top ? r.maxY : r.minY
+        var path = Path()
+        path.move(to: CGPoint(x: r.minX, y: open))
+        path.addArc(tangent1End: CGPoint(x: r.minX, y: closed), tangent2End: CGPoint(x: r.maxX, y: closed), radius: radius)
+        path.addArc(tangent1End: CGPoint(x: r.maxX, y: closed), tangent2End: CGPoint(x: r.maxX, y: open), radius: radius)
+        path.addLine(to: CGPoint(x: r.maxX, y: open))
+        return path
+    }
+}
+
 /// A repo to make a new worktree in, and the agent to start there.
 private struct WorktreeRequest: Identifiable {
     let id = UUID()
@@ -468,6 +506,12 @@ private struct RowView: View {
                         .font(.system(size: 12.5, weight: isCurrent || inOtherPane ? .semibold : .regular))
                         .foregroundStyle(running || selected ? look.text : look.text.opacity(0.75))
                         .lineLimit(1)
+                    if let pane = row.pane {
+                        Image(systemName: pane.symbol)
+                            .font(.system(size: 10))
+                            .foregroundStyle(pane.shown ? look.accent : look.secondary)
+                            .help(pane.help)
+                    }
                     if row.pinned {
                         Image(systemName: "pin.fill")
                             .font(.system(size: 9))
@@ -531,6 +575,28 @@ private struct RowView: View {
                 .frame(width: 7, height: 7)
                 .help("Running, waiting for you")
         }
+    }
+}
+
+extension SplitPane {
+    /// A window with this pane's half filled in.
+    var symbol: String {
+        switch (direction, index) {
+        case (.right, 0): "rectangle.lefthalf.filled"
+        case (.right, _): "rectangle.righthalf.filled"
+        case (.down, 0): "rectangle.tophalf.filled"
+        case (.down, _): "rectangle.bottomhalf.filled"
+        }
+    }
+
+    var help: String {
+        let side = switch (direction, index) {
+        case (.right, 0): "left"
+        case (.right, _): "right"
+        case (.down, 0): "top"
+        case (.down, _): "bottom"
+        }
+        return shown ? "In the \(side) pane of the split on screen" : "In the \(side) pane of a split. Pick it to show the split."
     }
 }
 

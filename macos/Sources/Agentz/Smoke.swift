@@ -216,64 +216,122 @@ final class SmokeTest {
         left.terminal.focus()
         check("focus follows the terminal", ws.panes.focused == 0 && ws.selection == left.key)
 
-        // A new session opens in the focused pane; the other keeps its tab.
-        ws.newSession(.shell, cwd: tmp)
-        guard let third = ws.currentTab, third !== left else { return finish("no shell for the focused pane") }
-        let thirdView = third.terminal.view
-        check("new session opens in the focused pane", ws.panes.keys == [third.key, right.key])
-        check("the replaced tab runs on, hidden", left.isRunning && leftView.isHidden && ws.tabs.contains { $0 === left })
-        check("the other pane's untouched shell stays", ws.tabs.contains { $0 === right })
+        // The list puts the split's two sessions together and marks them.
+        let at = ws.rows.firstIndex { $0.key == left.key }
+        check("the list shows the split", at.map { ws.rows.indices.contains($0 + 1) && ws.rows[$0 + 1].key == right.key } ?? false
+            && ws.rows[at!].pane == SplitPane(direction: .right, index: 0, partner: right.key, shown: true)
+            && ws.rows[at!].box == .top && ws.rows[at! + 1].box == .bottom, "\(ws.rows.map(\.key))")
 
-        // Opening the session in the other pane moves there. Cycling skips
-        // the other pane, and drops the untouched shell it leaves.
+        // A new session opens on its own. The split waits off screen, as it
+        // was, divider and all.
+        ws.setRatio(0.3)
+        ws.newSession(.shell, cwd: tmp)
+        guard let third = ws.currentTab, third !== left, third !== right else { return finish("no shell to show on its own") }
+        let thirdView = third.terminal.view
+        check("a new session opens on its own", ws.panes == PaneLayout(keys: [third.key])
+            && ws.hiddenSplits == [PaneLayout(keys: [left.key, right.key], split: .right, focused: 0, ratio: 0.3)],
+            "\(ws.panes) \(ws.hiddenSplits)")
+        check("the split's tabs run on, hidden", left.isRunning && right.isRunning && leftView.isHidden && rightView.isHidden
+            && thirdView.frame == thirdView.superview?.bounds)
+        check("the list marks the hidden split", ws.rows.first { $0.key == right.key }?.pane
+            == SplitPane(direction: .right, index: 1, partner: left.key, shown: false))
+
+        // Picking one of its sessions brings it back. Picking another hides
+        // it again; its panes never change.
+        pick(right.key)
+        check("picking a split's session brings the split back",
+            ws.panes == PaneLayout(keys: [left.key, right.key], split: .right, focused: 1, ratio: 0.3) && ws.hiddenSplits.isEmpty,
+            "\(ws.panes)")
+        check("as it was", !leftView.isHidden && !rightView.isHidden && thirdView.isHidden
+            && leftView.frame.width < rightView.frame.width, "\(leftView.frame) \(rightView.frame)")
+        pick(third.key)
+        check("picking another session hides it again", ws.panes == PaneLayout(keys: [third.key])
+            && ws.hiddenSplits.map(\.keys) == [[left.key, right.key]])
+        var intact = true
+        for _ in 0 ..< 6 {
+            ws.cycle(1)
+            let splits = (ws.panes.split != nil ? [ws.panes] : []) + ws.hiddenSplits
+            intact = intact && splits.map(\.keys) == [[left.key, right.key]]
+        }
+        check("cycling leaves the split as it is", intact)
+
+        // Opening the session in the other pane moves there.
+        pick(left.key)
         ws.open(right.key)
-        check("opening a shown session focuses its pane", ws.panes.focused == 1 && ws.panes.keys == [third.key, right.key])
-        ws.cycle(1)
-        check("cycling skips the other pane's session", ws.panes.keys == [third.key, left.key], "\(ws.panes.keys)")
-        check("untouched split shell goes away", !ws.tabs.contains { $0 === right })
+        check("opening a shown session focuses its pane", ws.panes.focused == 1 && ws.panes.keys == [left.key, right.key])
 
         ws.split(.down)
-        check("split turns down", ws.panes.split == .down && thirdView.frame.minY > leftView.frame.maxY
-            && thirdView.frame.width == leftView.frame.width, "\(thirdView.frame) \(leftView.frame)")
-        // Saved with the tabs: `third` on top, `left` below and focused.
+        check("split turns down", ws.panes.split == .down && leftView.frame.minY > rightView.frame.maxY
+            && leftView.frame.width == rightView.frame.width, "\(leftView.frame) \(rightView.frame)")
+
+        // A second split, while the first waits off screen.
+        pick(third.key)
+        ws.split(.right)
+        guard let fourth = ws.currentTab, fourth !== third else { return finish("no shell in the second split") }
+        check("a second split", ws.panes.keys == [third.key, fourth.key] && ws.hiddenSplits.map(\.keys) == [[left.key, right.key]])
+        // Saved with the tabs: the shown split with `fourth` focused, and the
+        // hidden one with `right` focused.
         let splitState = ws.savedState()
-        let savedPanes = splitState.split?.panes.map { $0.map { splitState.tabs.indices.contains(Int($0)) } }
-        check("saved state keeps the split", splitState.split?.direction == .down && splitState.split?.focused == 1
-            && savedPanes == [true, true] && splitState.active == splitState.split?.panes[1],
-            "\(String(describing: splitState.split)) active=\(String(describing: splitState.active))")
+        let savedKeys = { (split: SavedSplit?) in
+            split?.panes.map { $0.flatMap { i in ws.tabs.indices.contains(Int(i)) ? ws.tabs[Int(i)].key : nil } }
+        }
+        check("saved state keeps both splits", splitState.split?.direction == .right && splitState.split?.focused == 1
+            && savedKeys(splitState.split) == [third.key, fourth.key] && splitState.active == splitState.split?.panes[1]
+            && splitState.hiddenSplits.map(\.direction) == [.down] && splitState.hiddenSplits.first?.focused == 1
+            && savedKeys(splitState.hiddenSplits.first) == [left.key, right.key],
+            "\(String(describing: splitState.split)) \(splitState.hiddenSplits) active=\(String(describing: splitState.active))")
 
         // Unsplitting keeps the focused pane's tab; the other one runs on.
         ws.unsplit()
-        check("unsplit keeps the focused tab", ws.panes == PaneLayout(keys: [left.key]))
-        check("it fills the pane again", leftView.frame == leftView.superview?.bounds, "\(leftView.frame)")
+        check("unsplit keeps the focused tab", ws.panes == PaneLayout(keys: [fourth.key]))
+        check("it fills the pane again", fourth.terminal.view.frame == fourth.terminal.view.superview?.bounds, "\(fourth.terminal.view.frame)")
         check("the other tab runs on, hidden", third.isRunning && thirdView.isHidden)
+        check("the hidden split stays", ws.hiddenSplits.map(\.keys) == [[left.key, right.key]])
+
+        // A shell a split opened, that nobody typed in, goes once it is in
+        // no split and the user moves on.
+        pick(left.key)
+        check("the untouched shell goes when the user moves on", !ws.tabs.contains { $0 === fourth })
+        ws.unsplit()
+        check("unsplitting drops the split's untouched shell", ws.panes == PaneLayout(keys: [left.key]) && !ws.tabs.contains { $0 === right })
 
         // Closing a pane's tab, or exiting its shell, ends the split.
         ws.split(.right)
-        guard let fourth = ws.currentTab, fourth !== left else { return finish("no shell in the second split") }
-        ws.close(fourth.key)
-        check("closing a pane's tab ends the split", ws.panes == PaneLayout(keys: [left.key]) && !ws.tabs.contains { $0 === fourth })
-        ws.split(.down)
         guard let fifth = ws.currentTab, fifth !== left else { return finish("no shell in the third split") }
-        _ = await wait(5) { fifth.terminal.pid != nil }
-        fifth.terminal.run("exit")
+        ws.close(fifth.key)
+        check("closing a pane's tab ends the split", ws.panes == PaneLayout(keys: [left.key]) && !ws.tabs.contains { $0 === fifth })
+        ws.split(.down)
+        guard let sixth = ws.currentTab, sixth !== left else { return finish("no shell in the fourth split") }
+        _ = await wait(5) { sixth.terminal.pid != nil }
+        sixth.terminal.run("exit")
         check("an exited shell ends the split", await wait(5) { ws.panes == PaneLayout(keys: [left.key]) }, "\(ws.panes.keys)")
+        // The same off screen.
+        ws.split(.right)
+        guard let seventh = ws.currentTab, seventh !== left else { return finish("no shell in the fifth split") }
+        pick(third.key)
+        ws.close(left.key)
+        check("closing a session of a hidden split ends it", ws.hiddenSplits.isEmpty && !ws.tabs.contains { $0 === seventh })
         for tab in ws.tabs {
             ws.close(tab.key)
         }
         check("split tabs close", ws.tabs.isEmpty, "\(ws.tabs.count) left")
 
-        // Restoring brings the split back, with each tab in its pane.
+        // Restoring brings both splits back, each tab in its pane.
         _ = ws.restore(splitState)
-        let restoredOK = ws.tabs.count == 2 && ws.panes.split == .down && ws.panes.focused == 1
-            && splitState.split?.panes.map { $0.flatMap { i in ws.tabs.indices.contains(Int(i)) ? ws.tabs[Int(i)].key : nil } } == ws.panes.keys
-        check("restore brings the split back", restoredOK, "\(ws.panes) of \(ws.tabs.map(\.key))")
-        if let top = ws.panes.keys[0].flatMap({ key in ws.tabs.first { $0.key == key } }),
-           let bottom = ws.panes.keys.last?.flatMap({ key in ws.tabs.first { $0.key == key } })
+        let restoredKeys = { (split: SavedSplit?) in
+            split?.panes.map { $0.flatMap { i in ws.tabs.indices.contains(Int(i)) ? ws.tabs[Int(i)].key : nil } }
+        }
+        let restoredOK = ws.tabs.count == 4 && ws.panes.split == .right && ws.panes.focused == 1
+            && restoredKeys(splitState.split) == ws.panes.keys
+            && ws.hiddenSplits.map(\.split) == [.down] && ws.hiddenSplits.first?.focused == 1
+            && restoredKeys(splitState.hiddenSplits.first) == ws.hiddenSplits.first?.keys
+        check("restore brings both splits back", restoredOK, "\(ws.panes) \(ws.hiddenSplits) of \(ws.tabs.map(\.key))")
+        if let first = ws.panes.keys[0].flatMap({ key in ws.tabs.first { $0.key == key } }),
+           let second = ws.panes.keys.last?.flatMap({ key in ws.tabs.first { $0.key == key } })
         {
-            check("restored panes are laid out", !top.terminal.view.isHidden && !bottom.terminal.view.isHidden
-                && top.terminal.view.frame.minY > bottom.terminal.view.frame.maxY,
-                "\(top.terminal.view.frame) \(bottom.terminal.view.frame)")
+            check("restored panes are laid out", !first.terminal.view.isHidden && !second.terminal.view.isHidden
+                && first.terminal.view.frame.maxX < second.terminal.view.frame.minX,
+                "\(first.terminal.view.frame) \(second.terminal.view.frame)")
         }
         for tab in ws.tabs {
             ws.close(tab.key)
@@ -299,6 +357,14 @@ final class SmokeTest {
             "\(ws.panes)")
         ws.toggleSplit(.down)
         check("the same split again unsplits", ws.panes == PaneLayout(keys: [onScreen.key]), "\(ws.panes)")
+        // Out of a hidden split, which ends.
+        ws.split(.right)
+        guard let untouched = ws.currentTab, untouched !== onScreen else { return finish("no shell in the split to hide") }
+        pick(offScreen.key)
+        ws.openInSplit(onScreen.key, .down)
+        check("a session moves out of a hidden split, which ends",
+            ws.panes == PaneLayout(keys: [offScreen.key, onScreen.key], split: .down, focused: 1) && ws.hiddenSplits.isEmpty
+                && !ws.tabs.contains { $0 === untouched }, "\(ws.panes) \(ws.hiddenSplits)")
         for tab in ws.tabs {
             ws.close(tab.key)
         }
@@ -374,7 +440,13 @@ final class SmokeTest {
         click(second.terminal.view, at: NSPoint(x: 40, y: firstView.bounds.height - 10))
         _ = await wait(0.5) { false }
         check("a click focuses the first pane again", ws.panes.focused == 1 && firstView.window?.firstResponder === second.terminal.view)
-        ws.unsplit()
+        // ⌘N starts an agent in place of the split's idle shell. ⌘T opens a
+        // shell on its own.
+        ws.newSession(.codex)
+        check("an agent takes the idle shell's pane", ws.panes.split == .right && ws.panes.keys[0] == first.key
+            && ws.currentTab?.key.agent == .codex && !ws.tabs.contains { $0 === second }, "\(ws.panes)")
+        ws.newSession(.shell)
+        check("a new shell leaves the split as it is", ws.panes.split == nil && ws.hiddenSplits.first?.keys.first == first.key)
         for tab in ws.tabs {
             ws.close(tab.key)
         }
@@ -392,6 +464,12 @@ final class SmokeTest {
         else { return }
         view.cacheDisplay(in: view.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+    }
+
+    /// What a click on the session's row does.
+    private func pick(_ key: SessionKey) {
+        workspace.selection = key
+        workspace.select(key)
     }
 
     private func check(_ name: String, _ ok: Bool, _ detail: String = "") {
