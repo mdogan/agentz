@@ -24,6 +24,15 @@ final class SmokeTest {
         self.logPath = logPath
     }
 
+    /// Stands in for Claude: writes its arguments to `claude-args` next to
+    /// its folder, one per line, and waits. Terminals keep the environment
+    /// the first one got, so a variable set later would not reach it.
+    private static let fakeClaude = #"""
+    #!/bin/sh
+    printf '%s\n' "$@" > "$(dirname "$0")/../claude-args"
+    read line
+    """#
+
     /// Stands in for Codex: a title spinner while "working", a notification
     /// after the next Enter, and an exit after the one after that.
     private static let fakeCodex = #"""
@@ -49,6 +58,7 @@ final class SmokeTest {
         try? FileManager.default.createDirectory(atPath: bin, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
         FileManager.default.createFile(atPath: bin + "/codex", contents: Data(Self.fakeCodex.utf8), attributes: [.posixPermissions: 0o755])
+        FileManager.default.createFile(atPath: bin + "/claude", contents: Data(Self.fakeClaude.utf8), attributes: [.posixPermissions: 0o755])
         setenv("PATH", bin + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? ""), 1)
         let envFile = tmp + "/env"
 
@@ -110,6 +120,9 @@ final class SmokeTest {
         codex.turns.userInput()
         codex.terminal.run("")
         check("agent's own notification text", await wait(5) { self.notices.contains { $0.key == codexKey && $0.message == "Done: OK" } })
+        check("the agent wants the user, with what it said", await wait(2) {
+            ws.attentionKeys == [codexKey] && ws.waitingMessages[codexKey] == "Done: OK"
+        }, "\(ws.attentionKeys) \(ws.waitingMessages)")
 
         snapshot()
 
@@ -117,9 +130,11 @@ final class SmokeTest {
         check("saved state has both tabs", state.tabs.count == 2, "\(state.tabs.count)")
         check("saved active tab", state.active == 1)
 
-        // The shown agent quits: a shell takes its place.
-        ws.open(codexKey)
+        // Going to the session that needs the user shows it, and then it
+        // no longer does. The shown agent quits: a shell takes its place.
+        ws.showNextAttention()
         check("switch to the agent", ws.current == codexKey)
+        check("looking at it ends the attention", await wait(2) { ws.attentionKeys.isEmpty && ws.waitingMessages.isEmpty })
         codex.terminal.run("")
         check("quit agent is replaced by a shell", await wait(5) {
             ws.currentTab?.key.agent == .shell && ws.currentTab?.placeholder == true && !ws.tabs.contains { $0.key == codexKey }
@@ -170,7 +185,8 @@ final class SmokeTest {
         check("notice when an agent quits while away", await wait(5) {
             self.notices.contains { $0.key == quitKey && $0.message?.hasPrefix("It quit") == true }
         })
-        check("quit agent's row stays, marked", ws.quitKeys.contains(quitKey) && ws.tabs.contains { $0 === quitter })
+        check("quit agent's row stays, marked", ws.quitKeys.contains(quitKey) && ws.attentionKeys == [quitKey]
+            && ws.tabs.contains { $0 === quitter })
         ws.cycle(1)
         check("moving around keeps the quit agent's row", ws.quitKeys.contains(quitKey))
         ws.close(quitKey)
@@ -496,7 +512,79 @@ final class SmokeTest {
             ws.close(tab.key)
         }
 
+        await runningElsewhere(tmp)
         finish(nil)
+    }
+
+    /// A Claude session open in another app is listed and marked. Opening it
+    /// here forks it, if the user agrees, and restoring leaves it alone.
+    private func runningElsewhere(_ tmp: String) async {
+        let ws = workspace
+        let id = UUID().uuidString.lowercased()
+        let key = SessionKey(.claude, id)
+        let config = tmp + "/claude-config"
+        let argsFile = tmp + "/claude-args"
+        let files = FileManager.default
+        try? files.createDirectory(atPath: config + "/projects/smoke", withIntermediateDirectories: true)
+        try? files.createDirectory(atPath: config + "/sessions", withIntermediateDirectories: true)
+        let transcript = #"{"type":"user","cwd":"\#(tmp)","gitBranch":"fix/smoke","message":{"content":"smoke elsewhere"}}"#
+            + "\n" + #"{"type":"pr-link","prNumber":7,"prUrl":"https://github.com/o/r/pull/7"}"# + "\n"
+        files.createFile(atPath: config + "/projects/smoke/\(id).jsonl", contents: Data(transcript.utf8))
+        // Its shell exits at once, so launchd adopts it: not under agentz.
+        let sh = Process()
+        sh.executableURL = URL(fileURLWithPath: "/bin/sh")
+        sh.arguments = ["-c", "sleep 60 >/dev/null 2>&1 & echo $!"]
+        let out = Pipe()
+        sh.standardOutput = out
+        guard (try? sh.run()) != nil else { return check("start a process outside agentz", false) }
+        sh.waitUntilExit()
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        guard let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return check("start a process outside agentz", false, text)
+        }
+        defer { kill(pid, SIGTERM) }
+        let startedAt = Int(Date().timeIntervalSince1970 * 1000)
+        files.createFile(
+            atPath: config + "/sessions/\(pid).json",
+            contents: Data(#"{"pid":\#(pid),"sessionId":"\#(id)","startedAt":\#(startedAt),"status":"busy"}"#.utf8)
+        )
+        let oldConfig = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
+        setenv("CLAUDE_CONFIG_DIR", config, 1)
+        defer {
+            if let oldConfig { setenv("CLAUDE_CONFIG_DIR", oldConfig, 1) } else { unsetenv("CLAUDE_CONFIG_DIR") }
+        }
+
+        ws.requestScan?()
+        check("a session running elsewhere is listed and marked", await wait(10) {
+            ws.elsewhere[key]?.busy == true && ws.rows.contains { $0.key == key }
+        }, "\(ws.elsewhere)")
+        let row = ws.rows.first { $0.key == key }
+        check("its row has the branch and the pull request", row?.branch == "fix/smoke" && row?.pr?.number == 7,
+            "\(String(describing: row?.branch)) \(String(describing: row?.pr))")
+
+        ws.confirmFork = { _, _ in false }
+        ws.open(key)
+        check("opening it asks first; no means nothing starts", ws.tabs.isEmpty, "\(ws.tabs.map(\.key))")
+        var asked: RunningElsewhere?
+        ws.confirmFork = { _, other in
+            asked = other
+            return true
+        }
+        ws.open(key)
+        let fork = ws.currentTab
+        check("yes forks it into a new session", asked?.id == id && fork.map { $0.key.agent == .claude && $0.key != key } == true,
+            "\(String(describing: fork?.key))")
+        if let fork {
+            let wanted = "--resume\n\(id)\n--fork-session\n--session-id\n\(fork.key.id)\n"
+            check("with Claude's fork flags", await wait(5) {
+                (try? String(contentsOfFile: argsFile, encoding: .utf8))?.contains(wanted) == true
+            }, (try? String(contentsOfFile: argsFile, encoding: .utf8)) ?? "no file")
+            ws.close(fork.key)
+        }
+
+        let left = ws.restore(SavedState(tabs: [SavedTab(agent: .claude, id: id, cwd: tmp, title: "elsewhere")]))
+        check("restore leaves a session running elsewhere alone", ws.tabs.isEmpty && left.tabs.map(\.id) == [id]
+            && ws.status?.contains("another app") == true, "\(String(describing: ws.status))")
     }
 
     /// `AGENTZ_SMOKE_SNAPSHOT=<file.png>` saves how the window looks. The

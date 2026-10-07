@@ -60,6 +60,27 @@ public extension Branch {
     }
 }
 
+public extension RunningElsewhere {
+    /// Where it runs, for "Running in …", e.g. `Ghostty`.
+    var appName: String {
+        switch app {
+        case nil: "another app"
+        case "Agentz": "another agentz window"
+        case let app?: app
+        }
+    }
+}
+
+/// The branch to show after `place`, `repo` or `repo/worktree`. Not when
+/// the worktree is named after it: `fix-x` as agentz names new worktrees,
+/// or `x`, for `fix/x`.
+public func shownBranch(_ branch: String?, place: String) -> String? {
+    guard let branch else { return nil }
+    guard let worktree = place.split(separator: "/", maxSplits: 1).dropFirst().first else { return branch }
+    let names = [branch.replacingOccurrences(of: "/", with: "-"), branch.split(separator: "/").last.map(String.init)]
+    return names.contains(String(worktree)) ? nil : branch
+}
+
 /// The deepest worktree that `dir` is in, comparing real paths too.
 public func worktree(containing dir: String, in worktrees: [Worktree]) -> Worktree? {
     let dirs = [dir, realPath(dir)].compactMap(\.self)

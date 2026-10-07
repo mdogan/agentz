@@ -83,6 +83,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         workspace.notify = { [weak self] heading, title, message, key in
             self?.notify(heading: heading, title: title, message: message, key: key)
         }
+        workspace.confirmFork = { [weak self] title, other in
+            self?.confirm(
+                "This session is running in \(other.appName).",
+                "\(short(title, 200))\n\nIf agentz resumes it too, two Claude processes write to the same conversation. "
+                    + "Fork it to start a new session here with a copy of the conversation. The one in \(other.appName) goes on as it is.\n\n"
+                    + "To continue the session itself here, quit it in \(other.appName) first.",
+                button: "Fork"
+            ) ?? false
+        }
         if SmokeTest.logPath == nil {
             workspace.savePins = { [weak workspace] pins in
                 do { try savePinnedTabs(pins) } catch { workspace?.setStatus("Could not save pinned tabs: \(error)") }
@@ -306,6 +315,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     @objc func focusTerminal(_: Any?) { windowController?.focusTerminal() }
     @objc func nextSession(_: Any?) { workspace?.cycle(1) }
     @objc func previousSession(_: Any?) { workspace?.cycle(-1) }
+    @objc func nextAttention(_: Any?) { workspace?.showNextAttention() }
     @objc func toggleSessionList(_ sender: Any?) { windowController?.toggleSidebar(sender) }
 
     @objc func toggleAutoHide(_: Any?) {
@@ -391,6 +401,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item.state = workspace.panes.split == .down ? .on : .off
         case #selector(unsplit(_:)), #selector(focusOtherPane(_:)):
             return workspace.panes.split != nil
+        case #selector(nextAttention(_:)):
+            return !workspace.attentionKeys.isEmpty
         case #selector(toggleAutoHide(_:)):
             item.state = windowController?.autoHide == true ? .on : .off
         default:
@@ -449,6 +461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         add(view, "Filter Sessions", #selector(focusFilter(_:)), "f")
         add(view, "Next Session", #selector(nextSession(_:)), "]")
         add(view, "Previous Session", #selector(previousSession(_:)), "[")
+        add(view, "Next Session That Needs You", #selector(nextAttention(_:)), "A")
         view.addItem(.separator())
         let sidebar = add(view, "Toggle Session List", #selector(toggleSessionList(_:)), "s")
         sidebar.keyEquivalentModifierMask = [.command, .control]

@@ -23,6 +23,7 @@ mod turns;
 mod usage;
 mod worktree;
 
+use procs::RunningElsewhere;
 use sessions::{Session, SessionKey};
 use state::{SavedState, SavedTab};
 use turns::{TerminalSignal, TurnUpdate};
@@ -175,6 +176,8 @@ pub struct Scan {
     /// The worktrees of the scanned folder's repo, main first. Empty
     /// outside a repo.
     pub worktrees: Vec<Worktree>,
+    /// Claude sessions running outside this app.
+    pub elsewhere: Vec<RunningElsewhere>,
 }
 
 /// Reads transcripts, processes and rate limits. It keeps caches between
@@ -245,6 +248,7 @@ impl SessionScanner {
         let procs = procs::Snapshot::default();
         let shells = procs::shell_processes(&pids(&shell_pids), &procs, &sessions, codex_links);
         let threads = procs::codex_threads(&pids(&new_codex_pids), &procs, &sessions, codex_links);
+        let elsewhere = procs::claude_elsewhere(&procs, std::process::id(), None);
         let limits = Limits {
             claude: usage::claude(),
             codex: codex_usage.read(scanner.codex_files()),
@@ -266,8 +270,19 @@ impl SessionScanner {
                 .collect(),
             limits,
             worktrees,
+            elsewhere,
         }
     }
+}
+
+/// Where the Claude session `id` runs, if a process outside this app has
+/// it open. Resuming it here too would make two processes write to it.
+#[uniffi::export]
+pub fn claude_running_elsewhere(id: String) -> Option<RunningElsewhere> {
+    let procs = procs::Snapshot::default();
+    procs::claude_elsewhere(&procs, std::process::id(), Some(&id))
+        .into_iter()
+        .max_by_key(|s| s.busy)
 }
 
 /// The process's current directory, even when its shell does not report

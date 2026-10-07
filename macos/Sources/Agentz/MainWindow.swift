@@ -14,6 +14,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let sidebarItem: NSSplitViewItem
     /// The list over the terminal, in auto-hide mode.
     let overlay = SidebarOverlay()
+    /// The buttons at the right end of the title bar. Their width changes
+    /// with the number of sessions that want the user, which they show.
+    private var titleButtons: NSView?
+    private var titleButtonsCount = 0
     /// The list is out of the split, and shows over the terminal when
     /// wanted.
     private(set) var autoHide = false
@@ -60,6 +64,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let buttons = NSHostingView(rootView: SplitButtons(workspace: workspace, look: look))
         let titlebarHeight = window.frame.height - window.contentLayoutRect.height
         buttons.frame.size = NSSize(width: buttons.fittingSize.width, height: titlebarHeight)
+        titleButtons = buttons
         let accessory = NSTitlebarAccessoryViewController()
         accessory.view = buttons
         accessory.layoutAttribute = .trailing
@@ -112,10 +117,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         if window.title != title { window.title = title }
         if window.subtitle != subtitle { window.subtitle = subtitle }
-        // Sessions that finished or quit while the user was away.
-        let waiting = workspace.waitingKeys.count + workspace.quitKeys.count
+        // Sessions that finished, ask something or quit while the user was
+        // away, also those the list's filters hide.
+        let waiting = workspace.attentionKeys.count
         let badge = waiting > 0 ? String(waiting) : nil
         if NSApp.dockTile.badgeLabel != badge { NSApp.dockTile.badgeLabel = badge }
+        if let buttons = titleButtons, waiting != titleButtonsCount {
+            titleButtonsCount = waiting
+            // SwiftUI redraws the buttons on the next pass; measure after it.
+            DispatchQueue.main.async { buttons.frame.size.width = buttons.fittingSize.width }
+        }
     }
 
     func focusTerminal() {
@@ -220,11 +231,46 @@ private struct SplitButtons: View {
 
     var body: some View {
         HStack(spacing: 2) {
+            if !workspace.attentionKeys.isEmpty {
+                AttentionButton(workspace: workspace, look: look)
+                    .padding(.trailing, 6)
+            }
             SplitButton(workspace: workspace, look: look, direction: .right)
             SplitButton(workspace: workspace, look: look, direction: .down)
         }
         .padding(.horizontal, 8)
         .frame(maxHeight: .infinity)
+    }
+}
+
+/// How many sessions want the user. A click goes to the next one. In the
+/// title bar, so it shows while the list is hidden too.
+private struct AttentionButton: View {
+    let workspace: Workspace
+    let look: Look
+    @State private var hovered = false
+
+    var body: some View {
+        let count = workspace.attentionKeys.count
+        let help = count == 1 ? "A session needs you. Go to it (⇧⌘A)" : "\(count) sessions need you. Go to the next one (⇧⌘A)"
+        Button { workspace.showNextAttention() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "bell.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(count == 1 ? "1 needs you" : "\(count) need you")
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+            }
+            .foregroundStyle(look.background)
+            .padding(.horizontal, 8)
+            .frame(height: 20)
+            .background(look.accent.opacity(hovered ? 0.85 : 1), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
+        .accessibilityLabel(help)
     }
 }
 

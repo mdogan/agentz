@@ -40,6 +40,17 @@ pub struct Session {
     pub updated: SystemTime,
     /// Whether `cwd` is in the project of the folder the scan was for.
     pub in_project: bool,
+    /// The git branch it last worked on: Claude's branch at its last
+    /// message, Codex's when it started.
+    pub branch: Option<String>,
+    /// The pull request Claude last opened or looked at.
+    pub pr: Option<PullRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PullRequest {
+    pub number: u64,
+    pub url: String,
 }
 
 /// What we learned from one transcript file. Claude files are parsed
@@ -54,6 +65,8 @@ struct Parsed {
     ai_title: Option<String>,
     custom_title: Option<String>,
     summary: Option<String>,
+    branch: Option<String>,
+    pr: Option<PullRequest>,
     skip: bool,
 }
 
@@ -198,6 +211,8 @@ impl Scanner {
             created: entry.created,
             updated: entry.mtime,
             in_project: false,
+            branch: p.branch.clone(),
+            pr: p.pr.clone(),
         })
     }
 }
@@ -246,9 +261,13 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
         }
         p.offset += n as u64;
 
+        if let Some(branch) = git_branch(&line) {
+            p.branch = branch;
+        }
         let wanted = line.contains("\"custom-title\"")
             || line.contains("\"ai-title\"")
             || line.contains("\"type\":\"summary\"")
+            || line.contains("\"pr-link\"")
             || (p.cwd.is_none() && line.contains("\"cwd\""))
             || (p.first_prompt.is_none() && line.contains("\"type\":\"user\""));
         if !wanted {
@@ -261,6 +280,12 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
             Some("custom-title") => p.custom_title = str_field(&v, "customTitle"),
             Some("ai-title") => p.ai_title = str_field(&v, "aiTitle"),
             Some("summary") => p.summary = str_field(&v, "summary"),
+            Some("pr-link") => {
+                if let (Some(number), Some(url)) = (v["prNumber"].as_u64(), str_field(&v, "prUrl"))
+                {
+                    p.pr = Some(PullRequest { number, url });
+                }
+            }
             Some("user")
                 if p.first_prompt.is_none()
                     && v["isMeta"].as_bool() != Some(true)
@@ -301,6 +326,7 @@ fn parse_codex(path: &Path) -> Parsed {
             p.id = str_field(payload, "id").unwrap_or_default();
             p.cwd = str_field(payload, "cwd");
             p.originator = str_field(payload, "originator");
+            p.branch = str_field(&payload["git"], "branch");
             // Sub-agent threads (e.g. reviews) have an object as `source`.
             if !payload["source"].is_string() || payload["thread_source"] == "subagent" {
                 p.skip = true;
@@ -318,6 +344,21 @@ fn parse_codex(path: &Path) -> Parsed {
         }
     }
     p
+}
+
+/// The `gitBranch` of a Claude transcript line: `Some(None)` outside a
+/// branch, `None` if the line has none. Claude puts it on almost every
+/// message, so it is found without parsing the line.
+fn git_branch(line: &str) -> Option<Option<String>> {
+    const KEY: &str = "\"gitBranch\":\"";
+    let rest = &line[line.find(KEY)? + KEY.len()..];
+    let mut value = rest[..rest.find('"')?].to_string();
+    if value.contains('\\') {
+        // Escaped, which a branch name almost never is.
+        value = str_field(&serde_json::from_str(line).ok()?, "gitBranch")?;
+    }
+    // A detached HEAD, or not a git repo.
+    Some((!value.is_empty() && value != "HEAD").then_some(value))
 }
 
 fn str_field(v: &Value, key: &str) -> Option<String> {
@@ -445,7 +486,7 @@ mod tests {
             std::env::temp_dir().join(format!("agentz-codex-scan-{}.jsonl", uuid::Uuid::new_v4()));
         fs::write(
             &path,
-            r#"{"type":"session_meta","payload":{"id":"test-id","cwd":"/tmp","source":"vscode","originator":"codex-tui"}}
+            r#"{"type":"session_meta","payload":{"id":"test-id","cwd":"/tmp","source":"vscode","originator":"codex-tui","git":{"branch":"feature/y","commit_hash":"ed57"}}}
 "#,
         )
         .unwrap();
@@ -466,6 +507,7 @@ mod tests {
         assert_eq!(session.title, "first prompt");
         assert_eq!(session.cwd, Path::new("/tmp"));
         assert_eq!(session.originator.as_deref(), Some("codex-tui"));
+        assert_eq!(session.branch.as_deref(), Some("feature/y"));
         fs::remove_file(path).unwrap();
     }
 
@@ -498,6 +540,54 @@ mod tests {
         let session = scanner.visit(&path, Agent::Claude).unwrap();
         assert_eq!(session.title, "Named");
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn claude_branch_and_pull_request_are_the_last_ones() {
+        let path =
+            std::env::temp_dir().join(format!("agentz-claude-{}.jsonl", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"{"type":"user","cwd":"/work","gitBranch":"main","message":{"content":"open a PR"}}
+{"type":"assistant","gitBranch":"fix/x","message":{"content":[{"type":"text","text":"\"gitBranch\":\"not-this\""}]}}
+{"type":"pr-link","sessionId":"s","prNumber":1555,"prUrl":"https://github.com/o/r/pull/1555","prRepository":"o/r"}
+{"type":"user","message":{"content":"no branch on this line"}}
+"#,
+        )
+        .unwrap();
+        let mut scanner = Scanner::default();
+        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        assert_eq!(session.branch.as_deref(), Some("fix/x"));
+        assert_eq!(
+            session.pr,
+            Some(PullRequest {
+                number: 1555,
+                url: "https://github.com/o/r/pull/1555".into()
+            })
+        );
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(
+            br#"{"type":"pr-link","prNumber":1600,"prUrl":"https://github.com/o/r/pull/1600"}
+{"type":"user","gitBranch":"HEAD","message":{"content":"detached"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        assert_eq!(session.branch, None);
+        assert_eq!(session.pr.map(|pr| pr.number), Some(1600));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reads_escaped_branch_names() {
+        assert_eq!(git_branch(r#"{"x":1}"#), None);
+        assert_eq!(git_branch(r#"{"gitBranch":""}"#), Some(None));
+        assert_eq!(
+            git_branch(r#"{"gitBranch":"a\"b","type":"user"}"#),
+            Some(Some("a\"b".into()))
+        );
     }
 
     #[test]

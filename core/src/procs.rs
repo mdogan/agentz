@@ -1,5 +1,5 @@
 //! Finds agents the user started by hand inside one of our shells, and the
-//! session each one is using.
+//! session each one is using, and Claude sessions that run outside agentz.
 //!
 //! Claude Code: writes `~/.claude/sessions/<pid>.json` with its `sessionId`.
 //! Codex:       older versions keep their `rollout-<ts>-<session-id>.jsonl`
@@ -463,6 +463,140 @@ fn claude_session(dir: &Path, pid: u32) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A Claude session whose process runs outside agentz: in another
+/// terminal, an editor, or another agentz.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RunningElsewhere {
+    pub id: String,
+    /// Claude says it is working on a turn.
+    pub busy: bool,
+    /// The app it runs in, e.g. `Ghostty` or `Visual Studio Code`, when
+    /// known.
+    pub app: Option<String>,
+}
+
+/// Claude writes `startedAt` once it is running, so its process started
+/// before that. A process that started later took the pid of one that
+/// ended without removing its file.
+const CLAUDE_START_SLACK: Duration = Duration::from_secs(1);
+
+/// The Claude sessions running in processes that are not under `us`, our
+/// own pid, from `~/.claude/sessions/<pid>.json`. With `only`, just that
+/// session.
+pub fn claude_elsewhere(procs: &Snapshot, us: u32, only: Option<&str>) -> Vec<RunningElsewhere> {
+    let Some(dir) = claude_dir().map(|d| d.join("sessions")) else {
+        return Vec::new();
+    };
+    let entries: Vec<_> = registry_entries(&dir)
+        .into_iter()
+        .filter(|e| only.is_none_or(|id| e.id == id))
+        .collect();
+    // Most of the time no session runs elsewhere, and the processes are
+    // not read at all.
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    claude_elsewhere_from(entries, procs.table(), us)
+}
+
+/// One `~/.claude/sessions/<pid>.json`.
+struct RegistryEntry {
+    pid: u32,
+    id: String,
+    busy: bool,
+    started: Option<SystemTime>,
+}
+
+fn registry_entries(dir: &Path) -> Vec<RegistryEntry> {
+    let Ok(files) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    files
+        .flatten()
+        .map(|f| f.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter_map(|p| parse_registry_entry(&fs::read_to_string(p).ok()?))
+        .collect()
+}
+
+fn parse_registry_entry(text: &str) -> Option<RegistryEntry> {
+    let v: Value = serde_json::from_str(text).ok()?;
+    Some(RegistryEntry {
+        pid: u32::try_from(v["pid"].as_u64()?).ok()?,
+        id: v["sessionId"]
+            .as_str()
+            .filter(|s| !s.is_empty())?
+            .to_string(),
+        busy: v["status"] == "busy",
+        started: v["startedAt"]
+            .as_u64()
+            .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
+    })
+}
+
+fn claude_elsewhere_from(
+    entries: Vec<RegistryEntry>,
+    procs: &HashMap<u32, Process>,
+    us: u32,
+) -> Vec<RunningElsewhere> {
+    let mut out: Vec<_> = entries
+        .into_iter()
+        .filter_map(|e| {
+            let proc = procs.get(&e.pid)?;
+            if let (Some(written), Some(started)) = (e.started, proc.started)
+                && started > written + CLAUDE_START_SLACK
+            {
+                return None;
+            }
+            let lineage = lineage(procs, e.pid);
+            if lineage.iter().any(|p| p.pid == us) {
+                return None;
+            }
+            // The process launchd started, unless that is Claude itself.
+            let app = lineage
+                .last()
+                .filter(|top| top.pid != e.pid && top.ppid == 1)
+                .map(|top| app_name(top.argv0()));
+            Some(RunningElsewhere {
+                id: e.id,
+                busy: e.busy,
+                app,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// The process, its parent, and so on up to the one launchd started.
+fn lineage(procs: &HashMap<u32, Process>, pid: u32) -> Vec<&Process> {
+    let mut out: Vec<&Process> = Vec::new();
+    let mut next = procs.get(&pid);
+    while let Some(p) = next {
+        // A cycle can't happen, but a pid can be reused between reads.
+        if out.iter().any(|seen| seen.pid == p.pid) {
+            break;
+        }
+        out.push(p);
+        if p.ppid <= 1 {
+            break;
+        }
+        next = procs.get(&p.ppid);
+    }
+    out
+}
+
+/// `Ghostty` for `/Applications/Ghostty.app/Contents/MacOS/ghostty`, and
+/// the program's name outside an app, e.g. `tmux`.
+fn app_name(argv0: &str) -> String {
+    argv0
+        .split('/')
+        .find_map(|part| part.strip_suffix(".app"))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| basename(argv0))
+        .to_string()
+}
+
 /// The session id from the rollout file the process has open. Codex only
 /// creates it once the session has its first message.
 fn codex_session(pid: u32) -> Option<String> {
@@ -813,6 +947,113 @@ mod tests {
         procs.get_mut(&10).unwrap().tpgid = Some(10);
         let found = shell_processes_from_table(&[10], &procs, None, &mut HashMap::new);
         assert_eq!(found[0].foreground, None);
+    }
+
+    #[test]
+    fn finds_claude_sessions_running_outside_us() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut procs = HashMap::new();
+        let mut add = |pid, ppid, argv0: &str, started| {
+            let mut p = process(pid, ppid, pid, None, &[argv0]);
+            p.started = Some(started);
+            procs.insert(pid, p);
+        };
+        add(
+            100,
+            1,
+            "/Applications/Ghostty.app/Contents/MacOS/ghostty",
+            t0,
+        );
+        add(101, 100, "/usr/bin/login", t0);
+        add(102, 101, "claude", t0);
+        // Us, and a Claude in one of our terminals.
+        add(200, 1, "/Applications/Agentz.app/Contents/MacOS/agentz", t0);
+        add(201, 200, "/usr/bin/login", t0);
+        add(202, 201, "claude", t0);
+        // Its parent is gone.
+        add(300, 1, "claude", t0);
+        // Took the pid of a Claude that ended without removing its file.
+        add(400, 1, "/bin/sleep", t0 + Duration::from_secs(60));
+        let entry = |pid, id: &str, busy| RegistryEntry {
+            pid,
+            id: id.into(),
+            busy,
+            started: Some(t0 + Duration::from_millis(500)),
+        };
+        let found = claude_elsewhere_from(
+            vec![
+                entry(300, "orphan", false),
+                entry(102, "ghostty", true),
+                entry(202, "ours", false),
+                entry(400, "stale", false),
+                entry(500, "gone", false),
+            ],
+            &procs,
+            200,
+        );
+        assert_eq!(
+            found,
+            vec![
+                RunningElsewhere {
+                    id: "ghostty".into(),
+                    busy: true,
+                    app: Some("Ghostty".into()),
+                },
+                RunningElsewhere {
+                    id: "orphan".into(),
+                    busy: false,
+                    app: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_claude_session_files() {
+        let dir = std::env::temp_dir().join(format!("agentz-registry-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        fs::write(
+            dir.join("33503.json"),
+            r#"{"pid":33503,"sessionId":"a21d","startedAt":1791355232094,"status":"busy","kind":"interactive"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("33503.71776e8b.key"),
+            r#"{"pid":1,"sessionId":"key"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("40.json"),
+            r#"{"pid":40,"sessionId":"","status":"idle"}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("41.json"), "{\"pid\":41,").unwrap();
+        let found = registry_entries(&dir);
+        assert_eq!(found.len(), 1);
+        let e = &found[0];
+        assert_eq!((e.pid, e.id.as_str(), e.busy), (33503, "a21d", true));
+        assert_eq!(
+            e.started,
+            Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_791_355_232_094))
+        );
+        let idle = parse_registry_entry(r#"{"pid":7,"sessionId":"x","status":"idle"}"#).unwrap();
+        assert!(!idle.busy);
+        assert_eq!(idle.started, None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn names_apps() {
+        assert_eq!(
+            app_name("/Applications/Ghostty.app/Contents/MacOS/ghostty"),
+            "Ghostty"
+        );
+        assert_eq!(
+            app_name("/Applications/Visual Studio Code.app/Contents/MacOS/Electron"),
+            "Visual Studio Code"
+        );
+        assert_eq!(app_name("/opt/homebrew/bin/tmux"), "tmux");
+        assert_eq!(app_name("tmux"), "tmux");
     }
 
     #[test]

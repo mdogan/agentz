@@ -59,6 +59,9 @@ struct Row: Identifiable, Equatable {
     var cwd: String
     /// `repo`, or `repo/worktree` outside the main checkout.
     var place: String
+    /// The branch it last worked on, unless `place` says it.
+    var branch: String?
+    var pr: PullRequest?
     var updated: Date
     /// What the list sorts by, newest first. For a session with a tab of
     /// ours, when the tab started: new and resumed sessions go to the top
@@ -120,6 +123,14 @@ enum SessionRange: CaseIterable {
         case .all: true
         }
     }
+}
+
+/// How to bring back a session no tab of ours runs.
+enum ResumeMode {
+    case resume
+    /// Start a new session with a copy of its conversation, because it
+    /// runs in another app.
+    case fork
 }
 
 /// What the pane area shows: one tab, or two after a split.
@@ -199,7 +210,7 @@ final class Workspace {
     private(set) var panes = PaneLayout() {
         didSet {
             for r in tabs where panes.keys.contains(r.key) {
-                waiting.remove(ObjectIdentifier(r))
+                waiting[ObjectIdentifier(r)] = nil
             }
             // The list marks the sessions of each split.
             if (panes.split != nil || oldValue.split != nil),
@@ -226,12 +237,17 @@ final class Workspace {
     /// The same for the shell in the other pane.
     private(set) var otherLinked: SessionKey?
     private(set) var runningKeys: Set<SessionKey> = []
+    /// Claude sessions running outside agentz, as of the last scan.
+    private(set) var elsewhere: [SessionKey: RunningElsewhere] = [:]
     private(set) var busyKeys: Set<SessionKey> = []
-    /// Rows whose agent finished while the user was not looking, until the
-    /// user looks.
-    private(set) var waitingKeys: Set<SessionKey> = []
+    /// Rows whose agent finished or asked something while the user was not
+    /// looking, until the user looks, with what it said.
+    private(set) var waitingMessages: [SessionKey: String] = [:]
     /// Rows whose agent quit while the user was not looking.
     private(set) var quitKeys: Set<SessionKey> = []
+    /// Every session that waits for the user or quit while the user was
+    /// away, in list order, then the ones the list's filters hide.
+    private(set) var attentionKeys: [SessionKey] = []
     /// macOS does not let agentz show notifications.
     var notificationsOff = false
     private(set) var runningCount = 0
@@ -246,7 +262,7 @@ final class Workspace {
             // hidden split it was in ends.
             for old in oldValue where !tabs.contains(where: { $0 === old }) {
                 old.terminal.close()
-                waiting.remove(ObjectIdentifier(old))
+                waiting[ObjectIdentifier(old)] = nil
                 quit.remove(ObjectIdentifier(old))
                 endHiddenSplit(with: old.key)
             }
@@ -257,8 +273,8 @@ final class Workspace {
     @ObservationIgnored private(set) var root: String
     @ObservationIgnored private var statusAt = Date.distantPast
     @ObservationIgnored private var nextNewId = 1
-    /// Tabs whose agent wants attention.
-    @ObservationIgnored private var waiting = Set<ObjectIdentifier>()
+    /// Tabs whose agent wants attention, with what to tell the user.
+    @ObservationIgnored private var waiting: [ObjectIdentifier: String] = [:]
     /// Tabs whose agent quit while the user was not looking. They stay,
     /// without a process, until the user resumes or closes the session.
     @ObservationIgnored private var quit = Set<ObjectIdentifier>()
@@ -275,6 +291,9 @@ final class Workspace {
     /// False while the window is in the background.
     @ObservationIgnored var isWindowFocused: () -> Bool = { true }
     @ObservationIgnored var requestScan: (() -> Void)?
+    /// Asks whether to fork the session `title`, which runs in another
+    /// app, instead of resuming it. True to fork.
+    @ObservationIgnored var confirmFork: ((_ title: String, _ elsewhere: RunningElsewhere) -> Bool)?
     /// The pinned tabs changed, and should be kept for the next launch.
     @ObservationIgnored var savePins: (([SavedTab]) -> Void)?
     /// What `savePins` got last.
@@ -403,8 +422,13 @@ final class Workspace {
         // The new tabs' keys, by their index in `saved.tabs`.
         var started: [Int: SessionKey] = [:]
         var failed = SavedState(project: saved.project)
+        var skipped = 0
         for (i, tab) in saved.tabs.enumerated() {
-            if start(tab.agent, resume: tab.id, cwd: tab.cwd, title: tab.title, focus: false) {
+            // Resuming it here too would make two processes write to it. The
+            // next launch tries again.
+            let elsewhere = tab.agent == .claude ? tab.id.flatMap(claudeRunningElsewhere) : nil
+            if elsewhere != nil { skipped += 1 }
+            if elsewhere == nil, start(tab.agent, resume: tab.id, cwd: tab.cwd, title: tab.title, focus: false) {
                 tabs.last?.pinned = tab.pinned
                 started[i] = current
             } else {
@@ -432,6 +456,11 @@ final class Workspace {
         }
         rebuildRows()
         keepPins()
+        if skipped > 0 {
+            setStatus(skipped == 1
+                ? "A saved session runs in another app, so agentz did not resume it."
+                : "\(skipped) saved sessions run in other apps, so agentz did not resume them.")
+        }
         return failed
     }
 
@@ -459,7 +488,7 @@ final class Workspace {
             // A plain shell only counts while an agent runs inside it.
             guard let key = r.key.agent == .shell ? r.linked : r.key else { continue }
             let title = sessions.first { $0.key == key }?.title ?? r.fallbackTitle
-            waiting.insert(ObjectIdentifier(r))
+            waiting[ObjectIdentifier(r)] = notice.message ?? "Finished"
             notify?("\(key.agent.displayName) is waiting", title, notice.message, key)
         }
         let titleChanged = tabs.contains { r in
@@ -489,6 +518,8 @@ final class Workspace {
                 repo = RepoFilter(name: r.name, root: r.root, worktrees: worktrees)
             }
         }
+        let elsewhere = Dictionary(scan.elsewhere.map { (SessionKey(.claude, $0.id), $0) }) { a, b in a.busy ? a : b }
+        if elsewhere != self.elsewhere { self.elsewhere = elsewhere }
         linkShells(scan.shells)
         bindNewCodexSessions(scan.codexThreads)
         rebuildRows()
@@ -539,14 +570,18 @@ final class Workspace {
 
     func rebuildRows() {
         // Rows with a process of ours stay visible whatever the range, so a
-        // running agent can't get lost.
+        // running agent can't get lost, and so do sessions running elsewhere.
         let now = Date()
         var rows: [Row] = sessions.compactMap { s in
             let key = s.key
             let tab = tabs.first { $0.shows(key) }
-            guard tab != nil || range.includes(s.updated, now: now) else { return nil }
+            guard tab != nil || elsewhere[key] != nil || range.includes(s.updated, now: now) else { return nil }
             let order = tab?.spawnedAt ?? s.updated
-            return Row(key: key, title: s.title, cwd: s.cwd, place: place(s.cwd), updated: s.updated, order: order, pinned: tab?.pinned ?? false, active: tab != nil)
+            let place = place(s.cwd)
+            return Row(
+                key: key, title: s.title, cwd: s.cwd, place: place, branch: shownBranch(s.branch, place: place), pr: s.pr,
+                updated: s.updated, order: order, pinned: tab?.pinned ?? false, active: tab != nil
+            )
         }
         // Sessions we started that have no transcript yet, and shells. A
         // shell running an agent is shown as that agent's session.
@@ -624,23 +659,34 @@ final class Workspace {
     private func refreshStates() {
         var running = Set<SessionKey>()
         var busy = Set<SessionKey>()
-        var waitingRows = Set<SessionKey>()
+        var waitingRows: [SessionKey: String] = [:]
         var quitRows = Set<SessionKey>()
+        var attention: [SessionKey] = []
         for row in rows {
             guard let r = tabs.first(where: { $0.shows(row.key) && $0.isRunning }) else {
                 if tabs.contains(where: { $0.shows(row.key) && quit.contains(ObjectIdentifier($0)) }) {
                     quitRows.insert(row.key)
+                    attention.append(row.key)
                 }
                 continue
             }
             running.insert(row.key)
             if r.isBusy { busy.insert(row.key) }
-            if waiting.contains(ObjectIdentifier(r)) { waitingRows.insert(row.key) }
+            if let message = waiting[ObjectIdentifier(r)] {
+                waitingRows[row.key] = message
+                attention.append(row.key)
+            }
+        }
+        // A session the filters hide still wants the user.
+        for r in tabs where r.isRunning ? waiting[ObjectIdentifier(r)] != nil : quit.contains(ObjectIdentifier(r)) {
+            let key = r.linked ?? r.key
+            if !attention.contains(where: r.shows) { attention.append(key) }
         }
         if running != runningKeys { runningKeys = running }
         if busy != busyKeys { busyKeys = busy }
-        if waitingRows != waitingKeys { waitingKeys = waitingRows }
+        if waitingRows != waitingMessages { waitingMessages = waitingRows }
         if quitRows != quitKeys { quitKeys = quitRows }
+        if attention != attentionKeys { attentionKeys = attention }
         let count = tabs.filter(\.isRunning).count
         if count != runningCount { runningCount = count }
         let linked = currentTab?.linked
@@ -670,17 +716,34 @@ final class Workspace {
             focusTerminal?()
             return
         }
+        guard let mode = resumeMode(key) else { return }
         makeRoom()
-        resume(key)
+        resume(key, mode)
     }
 
-    /// Resumes the session in the focused pane, in place of the idle shell
-    /// there if there is one.
-    private func resume(_ key: SessionKey) {
+    /// How to bring back the session `key`, which no tab of ours runs. A
+    /// Claude session that runs in another app is forked if the user agrees,
+    /// since resuming it too would make two processes write to it. Nil if
+    /// the user would rather not.
+    private func resumeMode(_ key: SessionKey) -> ResumeMode? {
+        guard key.agent == .claude, let other = claudeRunningElsewhere(key.id) else { return .resume }
+        let title = rows.first { $0.key == key }?.title ?? sessions.first { $0.key == key }?.title ?? key.id
+        return confirmFork?(title, other) == true ? .fork : nil
+    }
+
+    /// Resumes or forks the session in the focused pane, in place of the
+    /// idle shell there if there is one.
+    private func resume(_ key: SessionKey, _ mode: ResumeMode) {
         // From a notification, the session may not be listed any more.
         guard let (cwd, title) = rows.first(where: { $0.key == key }).map({ ($0.cwd, $0.title) })
             ?? sessions.first(where: { $0.key == key }).map({ ($0.cwd, $0.title) })
         else { return }
+        if mode == .fork {
+            // A new session. The original, and a tab of ours it had, stay as
+            // they are.
+            startFromActiveShell(.claude, resume: key.id, fork: true, cwd: cwd, shellCwd: false, title: title)
+            return
+        }
         // The tab of an agent that quit makes way for the resumed one, and
         // hands it its pin.
         let ended = tabs.filter { $0.shows(key) && !$0.isRunning }
@@ -762,6 +825,19 @@ final class Workspace {
         panes = PaneLayout()
     }
 
+    /// Goes to the next session that wants the user, in list order. One
+    /// that runs is shown; one whose agent quit is picked, so its pane
+    /// offers to resume it.
+    func showNextAttention() {
+        guard let key = attentionKeys.first(where: { !isCurrent($0) }) ?? attentionKeys.first else { return }
+        selection = key
+        if tabs.contains(where: { $0.shows(key) && $0.isRunning }) {
+            open(key)
+        } else {
+            select(key)
+        }
+    }
+
     /// Shows the next (or previous) running session in list order. A split
     /// comes back when one of its sessions is next.
     func cycle(_ delta: Int) {
@@ -820,12 +896,14 @@ final class Workspace {
     /// there is one. With `shellCwd` it starts in the shell's folder.
     /// Returns false if it could not start.
     @discardableResult
-    private func startFromActiveShell(_ agent: Agent, resume: String?, cwd: String, shellCwd: Bool, title: String) -> Bool {
+    private func startFromActiveShell(
+        _ agent: Agent, resume: String?, fork: Bool = false, cwd: String, shellCwd: Bool, title: String
+    ) -> Bool {
         let shell = agent != .shell ? activeIdleShell() : nil
         // A session opened from the list keeps its own folder: Claude finds
         // its transcript by folder, and Codex would carry on in another repo.
         let cwd = shellCwd ? shell?.cwd ?? cwd : cwd
-        guard start(agent, resume: resume, cwd: cwd, title: title) else { return false }
+        guard start(agent, resume: resume, fork: fork, cwd: cwd, title: title) else { return false }
         if let key = shell?.key {
             tabs.removeAll { $0.key == key }
             rebuildRows()
@@ -902,6 +980,11 @@ final class Workspace {
     func openInSplit(_ key: SessionKey, _ direction: SplitDirection, pane: Int = 1) {
         guard canOpenInSplit(key), pane == 0 || pane == 1 else { return }
         let running = tabs.first { $0.shows(key) && $0.isRunning }
+        var mode = ResumeMode.resume
+        if running == nil {
+            guard let chosen = resumeMode(key) else { return }
+            mode = chosen
+        }
         if let r = running { endHiddenSplit(with: r.key) }
         if panes.split == nil {
             let before = panes
@@ -911,7 +994,7 @@ final class Workspace {
             if let r = running {
                 current = r.key
             } else {
-                resume(key)
+                resume(key, mode)
                 // It could not be resumed, e.g. its folder is gone.
                 guard current != nil else {
                     panes = before
@@ -928,7 +1011,7 @@ final class Workspace {
             if let r = running {
                 current = r.key
             } else {
-                resume(key)
+                resume(key, mode)
             }
         }
         prune()
@@ -986,13 +1069,22 @@ final class Workspace {
 
     /// Spawns an agent or shell, in the focused pane unless `pane` says
     /// another. `resume` is the session id to resume, or nil for a new
-    /// session. Returns false if it could not start.
+    /// session. With `fork`, Claude starts a new session with a copy of
+    /// that one's conversation. Returns false if it could not start.
     @discardableResult
-    func start(_ agent: Agent, resume: String?, cwd: String, title: String, focus: Bool = true, pane: Int? = nil) -> Bool {
+    func start(
+        _ agent: Agent, resume: String?, fork: Bool = false, cwd: String, title: String, focus: Bool = true, pane: Int? = nil
+    ) -> Bool {
         guard checkFolder(cwd) else { return false }
         let key: SessionKey
         var args: [String] = []
         switch (agent, resume) {
+        case let (.claude, id?) where fork:
+            // Claude takes our id for the copy only together with
+            // --fork-session.
+            let copy = UUID().uuidString.lowercased()
+            key = SessionKey(.claude, copy)
+            args = ["--resume", id, "--fork-session", "--session-id", copy]
         case let (.claude, id?):
             key = SessionKey(.claude, id)
             args = ["--resume", id]
@@ -1012,7 +1104,8 @@ final class Workspace {
         }
         let launch = agent == .shell ? Launch.shell() : Launch.agent(agent, args: args, cwd: cwd)
         let terminal = Terminal(command: launch.command, cwd: cwd, env: launch.env)
-        let tab = Tab(key: key, terminal: terminal, cwd: cwd, title: title, resumed: resume != nil && agent != .shell)
+        // A fork's own id has no transcript to resume until Claude writes it.
+        let tab = Tab(key: key, terminal: terminal, cwd: cwd, title: title, resumed: resume != nil && agent != .shell && !fork)
         terminal.onSignal = { [weak tab] signal in tab?.turns.receive(signal) }
         terminal.onExit = { [weak self, weak tab] in
             guard let self, let tab else { return }
@@ -1095,20 +1188,20 @@ final class Workspace {
         let settings = GhosttyApp.commandFinish
         let looking = isWindowFocused() && panes.keys.contains(tab.key)
         guard settings.applies(seconds: seconds, looking: looking), settings.bell || settings.notify else { return }
-        if !looking {
-            waiting.insert(ObjectIdentifier(tab))
-            refreshStates()
-        }
-        // Ghostty's bell bounces the Dock icon; it does nothing while the
-        // app is in front.
-        if settings.bell { NSApp.requestUserAttention(.informationalRequest) }
-        guard settings.notify else { return }
         // The scan saw the command if it ran for a few seconds.
         let command = tab.foreground?.name
         let failed = exitCode.map { $0 != 0 } ?? false
         let heading = "\(command ?? "Command") \(failed ? "failed" : "finished")"
         var message = "Took \(elapsed(seconds))"
         if failed, let exitCode { message = "Exit code \(exitCode) after \(elapsed(seconds))" }
+        if !looking {
+            waiting[ObjectIdentifier(tab)] = "\(heading) · \(message)"
+            refreshStates()
+        }
+        // Ghostty's bell bounces the Dock icon; it does nothing while the
+        // app is in front.
+        if settings.bell { NSApp.requestUserAttention(.informationalRequest) }
+        guard settings.notify else { return }
         notify?(heading, tilde(tab.cwd), message, tab.linked ?? tab.key)
     }
 
@@ -1148,7 +1241,7 @@ final class Workspace {
         guard let r = tabs.first(where: { $0.terminal.view === view }) else { return }
         r.turns.userInput()
         r.placeholder = false
-        waiting.remove(ObjectIdentifier(r))
+        waiting[ObjectIdentifier(r)] = nil
     }
 
     /// What quitting would stop. Agents started by hand in a shell count as

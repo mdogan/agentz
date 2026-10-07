@@ -55,6 +55,23 @@ final class FormatTests: XCTestCase {
         XCTAssertEqual(age(now: now, now - 300), "5m ago")
         XCTAssertEqual(age(now: now, now - 3 * 86400), "3d ago")
     }
+
+    func testShownBranch() {
+        XCTAssertEqual(shownBranch("fix/x", place: "app"), "fix/x")
+        XCTAssertNil(shownBranch("fix/x", place: "app/fix-x"))
+        XCTAssertNil(shownBranch("fix/x", place: "app/x"))
+        XCTAssertEqual(shownBranch("fix/x", place: "app/y"), "fix/x")
+        XCTAssertEqual(shownBranch("main", place: "app/fix-x"), "main")
+        XCTAssertNil(shownBranch(nil, place: "app"))
+    }
+
+    func testWhereASessionRuns() {
+        XCTAssertEqual(RunningElsewhere(id: "x", busy: false, app: "Ghostty").appName, "Ghostty")
+        XCTAssertEqual(RunningElsewhere(id: "x", busy: false, app: "Agentz").appName, "another agentz window")
+        XCTAssertEqual(RunningElsewhere(id: "x", busy: false, app: nil).appName, "another app")
+        // No process outside this one has a made-up session open.
+        XCTAssertNil(claudeRunningElsewhere(UUID().uuidString.lowercased()))
+    }
 }
 
 final class PathTests: XCTestCase {

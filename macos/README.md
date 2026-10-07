@@ -27,7 +27,10 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 **Claude**, **Codex** and **Shell** at the top of the list start a new session. Each opens a menu of recent folders, the one you used last first, and **Open Folder…**. A git repo in it has a submenu of its worktrees: the session starts in the one you pick. **New Worktree…** checks out an existing branch, or makes a new branch from a worktree, in `<repo>.worktrees/<branch>` next to the repo. It copies git-ignored files like `.env` and `node_modules` into the new worktree as APFS clones (instant, no extra disk space until a file changes), and, if you ask, the uncommitted changes too, then starts the session in it.
 
 - **Click** a running session to show it. **Double-click** or press **Return** on any session to open it: it switches to it if it runs, otherwise it resumes it.
-- A spinner means the agent is working. A green dot means it waits for you. A bell means it finished while you were away. The Dock icon shows how many are waiting.
+- A spinner means the agent is working. A green dot means it waits for you.
+- A session that finished, asks for something or quit while you were away gets a colored row with a badge, and its second line says what the agent said, e.g. "Claude needs your permission to use Bash". The count at the top of the list and the pill in the title bar ("2 need you") say how many there are. Click either one, or press ⇧⌘A, to go to the next one. The Dock icon shows the same number. All of these count sessions the list's filters hide, too.
+- Each row shows the branch the session last worked on, unless its worktree is named after it. Once Claude opened or linked a pull request, the row shows its number: click it to open the pull request in your browser.
+- Claude sessions running outside agentz (in another terminal, your editor or another agentz window) show in the list whatever its filter, with a gray spinner while they work and a window icon otherwise. Opening one here offers to fork it: a new session starts with a copy of the conversation, and the one outside goes on as it is. Two Claude processes never write to the same conversation that way. To continue the session itself here, quit it there first. For the same reason, a saved tab whose session now runs elsewhere is not resumed at launch; the next launch tries again.
 - Right-click a session to open it in a split, close it, pin it, show its folder, or copy its id.
 - A pinned session stays at the top of the list and can't be closed until you unpin it (right-click, or **File › Unpin Session**). A line separates pinned and active sessions from other sessions when both are shown. If its agent or shell ends, its row stays; open it to start it again. Pinned sessions come back on every launch, even after a crash.
 
@@ -52,6 +55,7 @@ You can also drag a session from the list onto the terminal. With one pane, it g
 | ⌘T | new shell |
 | ⌘W | close the shown session (asks first if it is working) |
 | ⌘] / ⌘[ | next / previous running session |
+| ⇧⌘A | next session that needs you |
 | ⌘L / ⌘J | go to the session list / the terminal |
 | ⌘D / ⇧⌘D | split the pane right / down; again to unsplit |
 | ⌥⌘J | go to the other pane of a split |

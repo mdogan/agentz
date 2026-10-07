@@ -117,6 +117,17 @@ struct SidebarView: View {
                     Text("·")
                     Text("\(workspace.busyKeys.count) working").foregroundStyle(look.yellow)
                 }
+                let attention = workspace.attentionKeys.count
+                if attention > 0 {
+                    Text("·")
+                    Button { workspace.showNextAttention() } label: {
+                        Text(attention == 1 ? "1 needs you" : "\(attention) need you")
+                            .fontWeight(.semibold)
+                            .foregroundStyle(look.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Go to the next session that needs you (⇧⌘A)")
+                }
             }
             .font(.system(size: 11))
             .foregroundStyle(look.secondary)
@@ -306,8 +317,9 @@ struct SidebarView: View {
             isCurrent: workspace.isCurrent(row.key),
             inOtherPane: workspace.isInOtherPane(row.key),
             running: running,
+            elsewhere: running ? nil : workspace.elsewhere[row.key],
             busy: workspace.busyKeys.contains(row.key),
-            waiting: workspace.waitingKeys.contains(row.key),
+            waiting: workspace.waitingMessages[row.key],
             quit: quit,
             closable: closable,
             hovered: hovered == row.key,
@@ -358,7 +370,7 @@ struct SidebarView: View {
     private func rowMenu(_ key: SessionKey) -> some View {
         let running = workspace.runningKeys.contains(key)
         let pinned = workspace.isPinned(key)
-        Button(running ? "Show" : "Resume") { workspace.open(key) }
+        Button(running ? "Show" : workspace.elsewhere[key] != nil ? "Fork…" : "Resume") { workspace.open(key) }
         let splittable = workspace.canOpenInSplit(key)
         Button("Open in Split Right") { workspace.openInSplit(key, .right) }
             .disabled(!splittable)
@@ -378,6 +390,9 @@ struct SidebarView: View {
             Divider()
             ForEach(FolderApp.installed) { app in
                 Button(app.title) { app.open(row.cwd) }
+            }
+            if let pr = row.pr, let url = URL(string: pr.url) {
+                Button("Open Pull Request #" + String(pr.number)) { NSWorkspace.shared.open(url) }
             }
             Button("Copy Folder Path") { copy(row.cwd) }
         }
@@ -484,8 +499,12 @@ private struct RowView: View {
     /// Shown in the other pane of a split.
     let inOtherPane: Bool
     let running: Bool
+    /// It runs in another app, and not here.
+    let elsewhere: RunningElsewhere?
     let busy: Bool
-    let waiting: Bool
+    /// What the agent said when it finished or asked something while the
+    /// user was away.
+    let waiting: String?
     /// The agent quit while the user was away.
     let quit: Bool
     /// It has a close button when hovered.
@@ -503,8 +522,8 @@ private struct RowView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(row.title)
-                        .font(.system(size: 12.5, weight: isCurrent || inOtherPane ? .semibold : .regular))
-                        .foregroundStyle(running || selected ? look.text : look.text.opacity(0.75))
+                        .font(.system(size: 12.5, weight: isCurrent || inOtherPane || attention != nil ? .semibold : .regular))
+                        .foregroundStyle(running || selected || attention != nil ? look.text : look.text.opacity(0.75))
                         .lineLimit(1)
                     if let pane = row.pane {
                         Image(systemName: pane.symbol)
@@ -519,16 +538,26 @@ private struct RowView: View {
                             .help("Pinned. Unpin it to close it.")
                     }
                 }
-                Text("\(row.place) · \(age(now: now, row.updated))")
-                    .font(.system(size: 11))
-                    .foregroundStyle(look.secondary)
-                    .lineLimit(1)
+                if let attention {
+                    // What it wants, in place of where and when it ran.
+                    HStack(spacing: 0) {
+                        Text(attention.message)
+                            .foregroundStyle(attention.color)
+                            .lineLimit(1)
+                        Text(" · \(age(now: now, row.updated))")
+                            .foregroundStyle(look.secondary)
+                            .fixedSize()
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                } else {
+                    details
+                }
             }
             Spacer(minLength: 4)
             state
                 .opacity(hovered ? 0 : 1)
                 // Room for the buttons, so the text stops before them.
-                .frame(width: hovered ? RowButtons.width(closable: closable) - 2 : 14)
+                .frame(width: hovered ? RowButtons.width(closable: closable) - 2 : 16)
         }
         .padding(.leading, 8)
         .padding(.trailing, 6)
@@ -547,33 +576,106 @@ private struct RowView: View {
         .help("\(row.title)\n\(row.key.agent.name) · \(tilde(row.cwd))")
     }
 
+    /// Where and when it last ran, and its pull request. The place and
+    /// branch are cut short first.
+    private var details: some View {
+        HStack(spacing: 0) {
+            Group {
+                if let branch = row.branch {
+                    Text("\(row.place) · \(Image(systemName: "arrow.triangle.branch")) \(branch)")
+                } else {
+                    Text(row.place)
+                }
+            }
+            .lineLimit(1)
+            Text(" · \(age(now: now, row.updated))")
+                .fixedSize()
+            if let pr = row.pr {
+                Text(" · ").fixedSize()
+                PullRequestLink(pr: pr, look: look)
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(look.secondary)
+    }
+
+    /// Why the user should look at it, if they should.
+    private var attention: (message: String, color: Color)? {
+        if quit { return ("Quit while you were away", look.red) }
+        if let waiting { return (waiting, look.accent) }
+        return nil
+    }
+
     private var background: Color {
         if selected { return listFocused ? look.selection : look.hover.opacity(1.6) }
+        if let attention { return attention.color.opacity(hovered ? 0.2 : 0.14) }
         return hovered ? look.hover : .clear
     }
 
+    /// What wants the user comes first: an agent can ask for permission
+    /// while it still reports work.
     @ViewBuilder
     private var state: some View {
-        if busy {
+        if quit {
+            badge("exclamationmark", look.red)
+                .help("Quit while you were away. Open it to resume.")
+        } else if let waiting {
+            badge("bell.fill", look.accent)
+                .help(waiting)
+        } else if busy {
             ProgressView()
                 .controlSize(.mini)
                 .tint(look.yellow)
                 .help("Working")
-        } else if waiting {
-            Image(systemName: "bell.fill")
-                .font(.system(size: 10))
-                .foregroundStyle(look.accent)
-                .help("Done while you were away")
-        } else if quit {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 10))
-                .foregroundStyle(look.red)
-                .help("Quit while you were away. Open it to resume.")
         } else if running {
             Circle()
                 .fill(look.green)
                 .frame(width: 7, height: 7)
                 .help("Running, waiting for you")
+        } else if let elsewhere {
+            if elsewhere.busy {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(look.secondary)
+                    .help("Working in \(elsewhere.appName)")
+            } else {
+                Image(systemName: "macwindow")
+                    .font(.system(size: 10))
+                    .foregroundStyle(look.secondary)
+                    .help("Running in \(elsewhere.appName)")
+            }
+        }
+    }
+}
+
+extension RowView {
+    /// A symbol in a filled circle.
+    fileprivate func badge(_ symbol: String, _ color: Color) -> some View {
+        Image(systemName: symbol)
+            .font(.system(size: 8.5, weight: .bold))
+            .foregroundStyle(look.background)
+            .frame(width: 16, height: 16)
+            .background(color, in: Circle())
+    }
+}
+
+/// A session's pull request. A click opens it in the browser.
+private struct PullRequestLink: View {
+    let pr: PullRequest
+    let look: Look
+    @State private var hovered = false
+
+    var body: some View {
+        if let url = URL(string: pr.url) {
+            Button { NSWorkspace.shared.open(url) } label: {
+                Text(verbatim: "#\(pr.number)")
+                    .underline(hovered)
+                    .foregroundStyle(hovered ? look.accent : look.secondary)
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .onHover { hovered = $0 }
+            .help("Open pull request #\(String(pr.number))\n\(pr.url)")
         }
     }
 }
@@ -774,13 +876,24 @@ struct EmptyPaneView: View {
             if workspace.panes.focused == pane, let key = workspace.selection, !workspace.runningKeys.contains(key),
                let row = workspace.rows.first(where: { $0.key == key })
             {
+                let elsewhere = workspace.elsewhere[key]
                 HStack(spacing: 8) {
                     row.key.agent.icon.foregroundStyle(look.color(for: row.key.agent))
                     Text(row.title).font(.title3).lineLimit(2)
                 }
-                Text("\(row.key.agent.name) · \(tilde(row.cwd)) · \(age(now: workspace.now, row.updated))")
-                    .foregroundStyle(look.secondary)
-                Button("Resume") { workspace.open(key) }
+                HStack(spacing: 0) {
+                    Text("\(row.key.agent.name) · \(tilde(row.cwd))\(row.branch.map { " · \($0)" } ?? "") · \(age(now: workspace.now, row.updated))")
+                    if let pr = row.pr {
+                        Text(" · ")
+                        PullRequestLink(pr: pr, look: look)
+                    }
+                }
+                .foregroundStyle(look.secondary)
+                if let elsewhere {
+                    Label("Running in \(elsewhere.appName). Opening it here starts a fork.", systemImage: "macwindow")
+                        .foregroundStyle(look.secondary)
+                }
+                Button(elsewhere == nil ? "Resume" : "Fork…") { workspace.open(key) }
                     .keyboardShortcut(.defaultAction)
                     .padding(.top, 4)
                 Text("Tip: double-click a session in the list to resume it right away.")
