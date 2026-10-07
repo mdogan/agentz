@@ -125,6 +125,14 @@ enum SessionRange: CaseIterable {
     }
 }
 
+/// A session's stop at its plan's rate limit.
+struct LimitInfo: Equatable {
+    var stop: LimitStop
+    /// When the limit resets: what the agent said, or what the rate limits
+    /// show. Nil if neither tells.
+    var reset: Date?
+}
+
 /// How to bring back a session no tab of ours runs.
 enum ResumeMode {
     case resume
@@ -246,8 +254,19 @@ final class Workspace {
     /// Rows whose agent quit while the user was not looking.
     private(set) var quitKeys: Set<SessionKey> = []
     /// Every session that waits for the user or quit while the user was
-    /// away, in list order, then the ones the list's filters hide.
+    /// away, in list order, then the ones the list's filters hide. Not the
+    /// ones put off for later.
     private(set) var attentionKeys: [SessionKey] = []
+    /// Sessions that want the user, put off until a time the user picked.
+    /// Their row looks like any other until then.
+    private(set) var snoozed: [SessionKey: Date] = [:]
+    /// Sessions whose agent stopped at the rate limit.
+    private(set) var limitStops: [SessionKey: LimitInfo] = [:]
+    /// Sessions that get `continue` typed in once their rate limit resets.
+    private(set) var continueAtReset: Set<SessionKey> = []
+    /// Programs left running in the background, by the session that ran
+    /// in their folder when they started.
+    private(set) var leftovers: [SessionKey: [Leftover]] = [:]
     /// macOS does not let agentz show notifications.
     var notificationsOff = false
     private(set) var runningCount = 0
@@ -288,8 +307,23 @@ final class Workspace {
     /// Shows a notification: `heading`, then the session's `title` and
     /// `message`. Clicking it opens `key`.
     @ObservationIgnored var notify: ((_ heading: String, _ title: String, _ message: String?, _ key: SessionKey) -> Void)?
-    /// False while the window is in the background.
-    @ObservationIgnored var isWindowFocused: () -> Bool = { true }
+    /// The user looks at the session `key`: its notifications can go.
+    @ObservationIgnored var onSeen: ((SessionKey) -> Void)?
+    /// False while the window is in the background, or nobody used the
+    /// keyboard or mouse for `awayAfter`: then the user is away, though the
+    /// window may still be in front.
+    @ObservationIgnored var isUserPresent: () -> Bool = { true }
+    static let awayAfter: TimeInterval = 5 * 60
+    /// `continueAtReset` changed, and should be kept for the next launch.
+    @ObservationIgnored var saveContinues: (([SessionKey]) -> Void)?
+    /// The stop each session got `continue` for, so each stop gets it once.
+    @ObservationIgnored private var continuedFor: [SessionKey: Date] = [:]
+    /// How long after the reset time the agent named `continue` is typed:
+    /// it names the minute, not the second.
+    static let resetGrace: TimeInterval = 60
+    /// How long an agent runs before `continue` is typed into it. One that
+    /// was just resumed, e.g. at launch, may not read what is typed yet.
+    static let settleTime: TimeInterval = 8
     @ObservationIgnored var requestScan: (() -> Void)?
     /// Asks whether to fork the session `title`, which runs in another
     /// app, instead of resuming it. True to fork.
@@ -468,21 +502,26 @@ final class Workspace {
 
     /// Runs a few times a second. Reads what every program signaled, and
     /// tells the user about agents that want attention while the user is
-    /// not looking at them: the window is in the background, or the agent
-    /// is in no pane.
+    /// not looking at them: the user is away, or the agent is in no pane.
+    /// Once the user looks at one, it no longer wants attention.
     func tick() {
         var cwdChanged = false
-        let focused = isWindowFocused()
+        let present = isUserPresent()
         for r in tabs {
             r.terminal.poll()
         }
         for r in tabs {
-            let looking = focused && panes.keys.contains(r.key)
+            let looking = present && panes.keys.contains(r.key)
             let update = r.turns.update(r.isRunning)
             r.busy = update.busy
             if let cwd = update.cwd, r.key.agent == .shell, cwd != r.cwd {
                 r.cwd = cwd
                 cwdChanged = true
+            }
+            if looking {
+                waiting[ObjectIdentifier(r)] = nil
+                onSeen?(r.key)
+                if let linked = r.linked { onSeen?(linked) }
             }
             guard let notice = update.notice, !looking else { continue }
             // A plain shell only counts while an agent runs inside it.
@@ -499,6 +538,8 @@ final class Workspace {
         } else {
             refreshStates()
         }
+        endSnoozes()
+        continueAfterLimits()
         if status != nil, Date().timeIntervalSince(statusAt) > 6 { status = nil }
         if Date().timeIntervalSince(now) >= 10 { now = Date() }
         onTick?()
@@ -522,8 +563,54 @@ final class Workspace {
         if elsewhere != self.elsewhere { self.elsewhere = elsewhere }
         linkShells(scan.shells)
         bindNewCodexSessions(scan.codexThreads)
+        let stops = limitInfo()
+        if stops != limitStops { limitStops = stops }
+        let left = owners(of: scan.leftovers)
+        if left != leftovers { leftovers = left }
         rebuildRows()
         keepPins()
+    }
+
+    /// The sessions that stopped at the rate limit this week, and when
+    /// their limit resets.
+    private func limitInfo() -> [SessionKey: LimitInfo] {
+        let week = Date().addingTimeInterval(-7 * 86400)
+        var out: [SessionKey: LimitInfo] = [:]
+        for s in sessions {
+            guard let stop = s.limit, stop.at > week else { continue }
+            let usage = s.agent == .codex ? limits.codex : limits.claude
+            out[s.key] = LimitInfo(stop: stop, reset: limitReset(stop.message, at: stop.at) ?? limitReset(usage, after: stop.at))
+        }
+        return out
+    }
+
+    /// Which session each program left running came from: the one that
+    /// ran in its folder when it started, the deepest folder first, then
+    /// the latest. A program no session ran by is left out.
+    private func owners(of found: [Leftover]) -> [SessionKey: [Leftover]] {
+        guard !found.isEmpty else { return [:] }
+        let now = Date()
+        let home = Paths.home
+        var out: [SessionKey: [Leftover]] = [:]
+        for program in found {
+            var best: (key: SessionKey, depth: Int, until: Date)?
+            func consider(_ key: SessionKey, _ dir: String, from: Date, until: Date) {
+                guard program.started >= from.addingTimeInterval(-5), program.started <= until.addingTimeInterval(60),
+                      dir != "/", dir != home,
+                      pathStarts(program.cwd, with: dir) || realPath(dir).map({ pathStarts(program.cwd, with: $0) }) == true
+                else { return }
+                if let b = best, b.depth > dir.count || (b.depth == dir.count && b.until >= until) { return }
+                best = (key, dir.count, until)
+            }
+            for r in tabs {
+                consider(r.linked ?? r.key, r.cwd, from: r.spawnedAt, until: now)
+            }
+            for s in sessions {
+                consider(s.key, s.cwd, from: s.created, until: s.updated)
+            }
+            if let key = best?.key { out[key, default: []].append(program) }
+        }
+        return out
     }
 
     /// Attaches each shell to the session of the agent the user started in
@@ -682,6 +769,10 @@ final class Workspace {
             let key = r.linked ?? r.key
             if !attention.contains(where: r.shows) { attention.append(key) }
         }
+        // Put off for later, until the user looks at it or it ends.
+        let snoozes = snoozed.filter { attention.contains($0.key) }
+        if snoozes != snoozed { snoozed = snoozes }
+        attention.removeAll { snoozed[$0] != nil }
         if running != runningKeys { runningKeys = running }
         if busy != busyKeys { busyKeys = busy }
         if waitingRows != waitingMessages { waitingMessages = waitingRows }
@@ -824,6 +915,106 @@ final class Workspace {
         hiddenSplits.append(panes)
         panes = PaneLayout()
     }
+
+    // MARK: - Later
+
+    /// True if the session wants the user, now or once its snooze ends.
+    func wantsUser(_ key: SessionKey) -> Bool {
+        attentionKeys.contains(key) || snoozed[key] != nil
+    }
+
+    /// Puts off a session that wants the user until `date`: until then it
+    /// does not count as wanting the user, and then it does again, with a
+    /// notification. Looking at it ends that, as for any other.
+    func snooze(_ key: SessionKey, until date: Date) {
+        guard wantsUser(key) else { return }
+        snoozed[key] = date
+        refreshStates()
+    }
+
+    /// Ends the snooze now, without a notification.
+    func endSnooze(_ key: SessionKey) {
+        guard snoozed[key] != nil else { return }
+        snoozed[key] = nil
+        refreshStates()
+    }
+
+    /// Brings back the sessions whose snooze is over, and tells the user.
+    private func endSnoozes() {
+        let now = Date()
+        let due = snoozed.filter { $0.value <= now }.map(\.key)
+        guard !due.isEmpty else { return }
+        for key in due {
+            snoozed[key] = nil
+        }
+        refreshStates()
+        for key in due where attentionKeys.contains(key) {
+            let title = rows.first { $0.key == key }?.title ?? sessions.first { $0.key == key }?.title ?? key.agent.displayName
+            let message = quitKeys.contains(key) ? "It quit while you were away." : waitingMessages[key]
+            notify?("Reminder: \(key.agent.displayName) needs you", title, message, key)
+        }
+    }
+
+    // MARK: - Rate limits
+
+    /// Types `continue` into the session once its rate limit resets, or
+    /// stops doing so. A session that already goes on, or has no time it
+    /// resets, is left as it is. Asking for it deals with the session, so
+    /// it no longer wants the user.
+    func setContinueAtReset(_ key: SessionKey, _ on: Bool) {
+        var keys = continueAtReset
+        if on {
+            guard limitStops[key]?.reset != nil else { return }
+            keys.insert(key)
+            for r in tabs where r.shows(key) {
+                waiting[ObjectIdentifier(r)] = nil
+            }
+            snoozed[key] = nil
+        } else {
+            keys.remove(key)
+        }
+        guard keys != continueAtReset else { return }
+        continueAtReset = keys
+        saveContinues?(Array(keys))
+        refreshStates()
+    }
+
+    /// The sessions saved by `saveContinues` on an earlier launch.
+    func restoreContinues(_ keys: [SessionKey]) {
+        continueAtReset = Set(keys)
+    }
+
+    /// Types `continue` into each session that asked for it once its limit
+    /// resets, once per stop, when its agent runs here, has settled in and
+    /// is not working. One that went on is done with.
+    private func continueAfterLimits() {
+        guard loaded, !continueAtReset.isEmpty else { return }
+        let now = Date()
+        var keys = continueAtReset
+        for key in continueAtReset {
+            guard let info = limitStops[key] else {
+                keys.remove(key)
+                continuedFor[key] = nil
+                continue
+            }
+            guard let reset = info.reset, now >= reset.addingTimeInterval(Self.resetGrace), continuedFor[key] != info.stop.at,
+                  let r = tabs.first(where: { $0.shows(key) && $0.isRunning }), !r.isBusy,
+                  now.timeIntervalSince(r.spawnedAt) >= Self.settleTime
+            else { continue }
+            continuedFor[key] = info.stop.at
+            r.terminal.run("continue")
+            r.turns.userInput()
+            waiting[ObjectIdentifier(r)] = nil
+            let title = sessions.first { $0.key == key }?.title ?? r.fallbackTitle
+            setStatus("The rate limit reset. agentz told “\(short(title, 40))” to continue.")
+        }
+        if keys != continueAtReset {
+            continueAtReset = keys
+            saveContinues?(Array(keys))
+        }
+    }
+
+    // MARK: - Moving around
 
     /// Goes to the next session that wants the user, in list order. One
     /// that runs is shown; one whose agent quit is picked, so its pane
@@ -1142,7 +1333,7 @@ final class Workspace {
         }
         // An agent only quits when told to, in its own tab. Quitting while
         // nobody looks means it crashed or something killed it.
-        let unexpected = key.agent != .shell && !early && !(isWindowFocused() && pane != nil)
+        let unexpected = key.agent != .shell && !early && !(isUserPresent() && pane != nil)
         // A hidden split ends, as it would on screen. The other tab runs on.
         if pane == nil { endHiddenSplit(with: key) }
         if unexpected {
@@ -1186,7 +1377,7 @@ final class Workspace {
     /// Ghostty config's `notify-on-command-finish` settings say.
     private func commandFinished(_ tab: Tab, exitCode: Int?, seconds: TimeInterval) {
         let settings = GhosttyApp.commandFinish
-        let looking = isWindowFocused() && panes.keys.contains(tab.key)
+        let looking = isUserPresent() && panes.keys.contains(tab.key)
         guard settings.applies(seconds: seconds, looking: looking), settings.bell || settings.notify else { return }
         // The scan saw the command if it ran for a few seconds.
         let command = tab.foreground?.name
@@ -1213,6 +1404,10 @@ final class Workspace {
         guard let i = tabs.firstIndex(where: { $0.shows(key) }), !tabs[i].pinned else { return }
         let pane = panes.keys.firstIndex(of: tabs[i].key)
         let wasShown = pane == panes.focused
+        // Nothing types into it any more.
+        for shown in [tabs[i].key, tabs[i].linked].compactMap(\.self) {
+            setContinueAtReset(shown, false)
+        }
         // Dropping the terminal frees Ghostty's surface, which hangs up on
         // the program.
         tabs.remove(at: i)

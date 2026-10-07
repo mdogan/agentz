@@ -71,6 +71,30 @@ public extension RunningElsewhere {
     }
 }
 
+public extension WorktreeState {
+    /// Removing it loses nothing.
+    var removable: Bool {
+        switch self {
+        case .merged, .missing: true
+        default: false
+        }
+    }
+
+    /// What it is, e.g. `2 commits not in main`. `into` is the branch that
+    /// merged means merged into.
+    func text(into: String) -> String {
+        switch self {
+        case .merged: "Merged into \(into), nothing uncommitted"
+        case .missing: "Its folder is gone"
+        case let .changes(files): files == 1 ? "1 uncommitted change" : "\(files) uncommitted changes"
+        case let .notMerged(commits): commits == 1 ? "1 commit not in \(into)" : "\(commits) commits not in \(into)"
+        case .locked: "Locked"
+        case let .inUse(program): "\(program) runs in it"
+        case let .unknown(problem): problem
+        }
+    }
+}
+
 /// The branch to show after `place`, `repo` or `repo/worktree`. Not when
 /// the worktree is named after it: `fix-x` as agentz names new worktrees,
 /// or `x`, for `fix/x`.

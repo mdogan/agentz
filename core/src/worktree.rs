@@ -330,6 +330,230 @@ pub fn has_changes(dir: &Path) -> bool {
     git(dir, &["status", "--porcelain"]).is_ok_and(|s| !s.is_empty())
 }
 
+// ---------- cleaning up ----------
+
+/// Whether a linked worktree can be removed without losing anything, and
+/// if not, why.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum WorktreeState {
+    /// Nothing uncommitted, and its commits are in the main branch, also
+    /// when they were squashed into one there.
+    Merged,
+    /// Its folder is gone; git only has to forget it.
+    Missing,
+    /// It has uncommitted changes or untracked files.
+    Changes { files: u32 },
+    /// It has commits that are not in the main branch.
+    NotMerged { commits: u32 },
+    /// `git worktree lock` keeps it.
+    Locked,
+    /// A program works in it, e.g. `claude`, an editor or a dev server.
+    InUse { program: String },
+    /// Git could not tell.
+    Unknown { problem: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct WorktreeStatus {
+    pub worktree: Worktree,
+    pub state: WorktreeState,
+}
+
+/// The linked worktrees of a repo and whether each can go.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Cleanup {
+    /// The branch "merged" means merged into: the main checkout's, e.g.
+    /// `main`. Its upstream counts too.
+    pub into: String,
+    pub worktrees: Vec<WorktreeStatus>,
+}
+
+/// The linked worktrees of the repo `dir` is in, and whether each can be
+/// removed without losing anything.
+pub fn statuses(dir: &Path) -> Result<Cleanup> {
+    let wts = open(dir)?;
+    let main = &wts[0];
+    let targets = merge_targets(main);
+    let linked: Vec<&Worktree> = wts.iter().skip(1).filter(|w| !w.bare).collect();
+    let in_use =
+        crate::procs::programs_in(&linked.iter().map(|w| w.path.clone()).collect::<Vec<_>>());
+    // Each takes a few git commands; ask about all of them at once.
+    let states: Vec<WorktreeState> = std::thread::scope(|s| {
+        let jobs: Vec<_> = linked
+            .iter()
+            .zip(in_use)
+            .map(|(&wt, program)| s.spawn(|| state(&main.path, wt, program, &targets)))
+            .collect();
+        jobs.into_iter()
+            .map(|job| {
+                job.join().unwrap_or_else(|_| WorktreeState::Unknown {
+                    problem: "the check failed".into(),
+                })
+            })
+            .collect()
+    });
+    Ok(Cleanup {
+        into: main
+            .branch
+            .clone()
+            .unwrap_or_else(|| main.head.chars().take(7).collect()),
+        worktrees: linked
+            .into_iter()
+            .cloned()
+            .zip(states)
+            .map(|(worktree, state)| WorktreeStatus { worktree, state })
+            .collect(),
+    })
+}
+
+/// Removes the linked worktree at `path` of the repo `dir` is in, if that
+/// loses nothing: its folder, with ignored files like `node_modules`, goes.
+/// Its branch stays. A worktree whose folder is gone is only forgotten.
+pub fn remove(dir: &Path, path: &Path) -> Result<()> {
+    let wts = open(dir)?;
+    let main = &wts[0];
+    let wt = wts
+        .iter()
+        .skip(1)
+        .find(|w| w.path == path)
+        .with_context(|| format!("{} is not a linked worktree", path.display()))?;
+    let program = crate::procs::programs_in(std::slice::from_ref(&wt.path))
+        .pop()
+        .flatten();
+    // Asked again, since things may have changed since the user looked.
+    match state(&main.path, wt, program, &merge_targets(main)) {
+        WorktreeState::Missing => {
+            git(&main.path, &["worktree", "prune"])?;
+        }
+        WorktreeState::Merged => {
+            // Without --force, git refuses a worktree with changes, too.
+            git(&main.path, &["worktree", "remove", &path.to_string_lossy()])?;
+        }
+        other => bail!("{} was kept: {}", path.display(), reason(&other)),
+    }
+    // The `<repo>.worktrees` folder, once the last one in it is gone.
+    if let Some(parent) = path.parent()
+        && parent.extension().is_some_and(|e| e == "worktrees")
+    {
+        let _ = fs::remove_dir(parent);
+    }
+    Ok(())
+}
+
+fn reason(state: &WorktreeState) -> String {
+    match state {
+        WorktreeState::Merged | WorktreeState::Missing => "it can be removed".into(),
+        WorktreeState::Changes { files } => format!("{files} uncommitted changes"),
+        WorktreeState::NotMerged { commits } => format!("{commits} commits are not merged"),
+        WorktreeState::Locked => "it is locked".into(),
+        WorktreeState::InUse { program } => format!("{program} works in it"),
+        WorktreeState::Unknown { problem } => problem.clone(),
+    }
+}
+
+/// What "merged" means: the main checkout's branch and its upstream, or
+/// the commit a detached main checkout is on.
+fn merge_targets(main: &Worktree) -> Vec<String> {
+    let Some(branch) = &main.branch else {
+        return vec![main.head.clone()];
+    };
+    let mut targets = vec![branch.clone()];
+    if let Ok(upstream) = git(
+        &main.path,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ],
+    ) && !upstream.is_empty()
+    {
+        targets.push(upstream);
+    }
+    targets
+}
+
+fn state(repo: &Path, wt: &Worktree, program: Option<String>, targets: &[String]) -> WorktreeState {
+    if wt.missing {
+        return WorktreeState::Missing;
+    }
+    if wt.locked {
+        return WorktreeState::Locked;
+    }
+    if let Some(program) = program {
+        return WorktreeState::InUse { program };
+    }
+    match git(&wt.path, &["status", "--porcelain"]) {
+        Err(e) => {
+            return WorktreeState::Unknown {
+                problem: format!("{e:#}"),
+            };
+        }
+        Ok(s) if !s.is_empty() => {
+            return WorktreeState::Changes {
+                files: u32::try_from(s.lines().count()).unwrap_or(u32::MAX),
+            };
+        }
+        Ok(_) => {}
+    }
+    if targets.iter().any(|t| merged(repo, &wt.head, t)) {
+        return WorktreeState::Merged;
+    }
+    let commits = git(
+        repo,
+        &[
+            "rev-list",
+            "--count",
+            &format!("{}..{}", targets[0], wt.head),
+        ],
+    )
+    .ok()
+    .and_then(|n| n.parse().ok())
+    .unwrap_or(0);
+    WorktreeState::NotMerged { commits }
+}
+
+/// True if `target` has the work of `commit`: it is in its history, or its
+/// changes since they parted were squashed into one commit there. That is
+/// the trick of git-delete-squashed: a commit with `commit`'s files on top
+/// of where they parted, which `git cherry` finds in `target` if one there
+/// made the same change.
+fn merged(repo: &Path, commit: &str, target: &str) -> bool {
+    if git(repo, &["merge-base", "--is-ancestor", commit, target]).is_ok() {
+        return true;
+    }
+    let Ok(base) = git(repo, &["merge-base", target, commit]) else {
+        return false;
+    };
+    let tree = |c: &str| git(repo, &["rev-parse", &format!("{c}^{{tree}}")]).ok();
+    let Some(files) = tree(commit) else {
+        return false;
+    };
+    // Its commits change nothing in the end.
+    if tree(&base).as_deref() == Some(files.as_str()) {
+        return true;
+    }
+    // A commit no branch points at, which git cleans up in time. It needs a
+    // name and email even where none is set up.
+    let Ok(squashed) = git(
+        repo,
+        &[
+            "-c",
+            "user.name=agentz",
+            "-c",
+            "user.email=agentz@localhost",
+            "commit-tree",
+            &files,
+            "-p",
+            &base,
+            "-m",
+            "agentz: squash check",
+        ],
+    ) else {
+        return false;
+    };
+    git(repo, &["cherry", target, &squashed]).is_ok_and(|out| out.starts_with('-'))
+}
+
 /// Runs `git worktree add`, then copies ignored files from `src`.
 fn create(wts: &[Worktree], src: &Worktree, path: &Path, args: &[&str]) -> Result<NewWorktree> {
     git(&wts[0].path, args)?;
@@ -525,6 +749,109 @@ mod tests {
         let outside = dir.parent().unwrap().join("plain");
         fs::create_dir_all(&outside).unwrap();
         assert_eq!(place(&outside), "plain");
+        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn tells_which_worktrees_can_go() {
+        let dir = repo();
+        let commit = |wt: &Path, file: &str, text: &str| {
+            fs::write(wt.join(file), text).unwrap();
+            run(wt, &["add", file]);
+            run(wt, &["commit", "-q", "-m", file]);
+        };
+        // Nothing done in it.
+        let fresh = fork(&dir, "fresh", false).unwrap().path;
+        // Merged into main, as it was.
+        let merged = fork(&dir, "merged", false).unwrap().path;
+        commit(&merged, "m.txt", "m\n");
+        run(&dir, &["merge", "-q", "--ff-only", "merged"]);
+        // Two commits, squashed into one on main, which went on since.
+        let squashed = fork(&dir, "squashed", false).unwrap().path;
+        commit(&squashed, "s1.txt", "1\n");
+        commit(&squashed, "s2.txt", "2\n");
+        run(&dir, &["merge", "-q", "--squash", "squashed"]);
+        run(&dir, &["commit", "-q", "-m", "squashed"]);
+        commit(&dir, "later.txt", "later\n");
+        // Work that is not on main.
+        let open = fork(&dir, "open", false).unwrap().path;
+        commit(&open, "o1.txt", "1\n");
+        commit(&open, "o2.txt", "2\n");
+        // Clean and merged, but with uncommitted changes.
+        let dirty = fork(&dir, "dirty", false).unwrap().path;
+        fs::write(dirty.join("a.txt"), "changed\n").unwrap();
+        fs::write(dirty.join("new.txt"), "new\n").unwrap();
+        let locked = fork(&dir, "locked", false).unwrap().path;
+        run(&dir, &["worktree", "lock", &locked.to_string_lossy()]);
+        let gone = fork(&dir, "gone", false).unwrap().path;
+        fs::remove_dir_all(&gone).unwrap();
+
+        let cleanup = statuses(&dir).unwrap();
+        assert_eq!(cleanup.into, "main");
+        let state = |path: &Path| {
+            cleanup
+                .worktrees
+                .iter()
+                .find(|s| s.worktree.path == path)
+                .map(|s| s.state.clone())
+        };
+        assert_eq!(state(&fresh), Some(WorktreeState::Merged));
+        assert_eq!(state(&merged), Some(WorktreeState::Merged));
+        assert_eq!(state(&squashed), Some(WorktreeState::Merged));
+        assert_eq!(state(&open), Some(WorktreeState::NotMerged { commits: 2 }));
+        assert_eq!(state(&dirty), Some(WorktreeState::Changes { files: 2 }));
+        assert_eq!(state(&locked), Some(WorktreeState::Locked));
+        assert_eq!(state(&gone), Some(WorktreeState::Missing));
+        assert_eq!(state(&dir), None, "the main checkout is not listed");
+
+        // What can go, goes; its branch stays. The rest is kept.
+        remove(&dir, &merged).unwrap();
+        assert!(!merged.exists());
+        assert!(run(&dir, &["branch", "--list", "merged"]).contains("merged"));
+        remove(&dir, &gone).unwrap();
+        for kept in [&open, &dirty, &locked] {
+            assert!(remove(&dir, kept).is_err());
+            assert!(kept.exists());
+        }
+        let left: Vec<PathBuf> = list(&dir).unwrap().into_iter().map(|w| w.path).collect();
+        assert!(!left.contains(&merged) && !left.contains(&gone));
+        assert!(left.contains(&squashed) && left.contains(&fresh));
+        // The `.worktrees` folder goes with the last one in it.
+        let parent = fresh.parent().unwrap().to_path_buf();
+        run(&dir, &["worktree", "unlock", &locked.to_string_lossy()]);
+        fs::remove_dir_all(&open).unwrap();
+        fs::remove_dir_all(&dirty).unwrap();
+        fs::remove_dir_all(&locked).unwrap();
+        remove(&dir, &open).unwrap();
+        remove(&dir, &squashed).unwrap();
+        assert!(parent.exists());
+        remove(&dir, &fresh).unwrap();
+        assert!(!parent.exists());
+        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_worktree_in_use_is_kept() {
+        let dir = repo();
+        let wt = fork(&dir, "busy", false).unwrap().path;
+        let out = Command::new("/bin/sh")
+            .args(["-c", "(exec sleep 30) >/dev/null 2>&1 & echo $!"])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        let pid: libc::pid_t = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        let state = statuses(&dir).unwrap().worktrees[0].state.clone();
+        assert!(remove(&dir, &wt).is_err());
+        // SAFETY: kill only sends a signal.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert_eq!(
+            state,
+            WorktreeState::InUse {
+                program: "sleep".into()
+            }
+        );
+        assert!(wt.exists());
         fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 

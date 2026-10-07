@@ -73,7 +73,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         workspace.onLayout = { [weak self] in self?.layout() }
         workspace.onTick = { [weak self] in self?.updateTitle() }
         workspace.focusTerminal = { [weak self] in self?.focusTerminal() }
-        workspace.isWindowFocused = { [weak window] in NSApp.isActive && window?.isKeyWindow == true }
+        workspace.isUserPresent = { [weak window] in
+            NSApp.isActive && window?.isKeyWindow == true && userIdleTime() < Workspace.awayAfter
+        }
         overlay.onHide = { [weak self] hadFocus in
             if hadFocus { self?.leaveList() }
         }
@@ -220,6 +222,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             window?.makeFirstResponder(nil)
         }
     }
+}
+
+/// How long ago the keyboard, mouse or trackpad was last used, in any app.
+private func userIdleTime() -> TimeInterval {
+    // kCGAnyInputEventType.
+    guard let any = CGEventType(rawValue: ~0) else { return 0 }
+    return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: any)
 }
 
 /// The title bar's split buttons. Each does what its View menu item does:

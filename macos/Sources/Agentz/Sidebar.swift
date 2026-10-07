@@ -27,6 +27,8 @@ struct SidebarActions {
     var recentFolders: () -> [String]
     var clearRecentFolders: () -> Void
     var notificationSettings: () -> Void
+    /// Asks first, then stops these programs that were left running.
+    var stopLeftovers: ([Leftover]) -> Void
 }
 
 struct SidebarView: View {
@@ -38,6 +40,7 @@ struct SidebarView: View {
     @FocusState private var filterFocused: Bool
     @State private var hovered: SessionKey?
     @State private var newWorktree: WorktreeRequest?
+    @State private var cleanup: CleanupRequest?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -194,6 +197,9 @@ struct SidebarView: View {
         }
         menu.addItem(.separator())
         menu.addItem(MenuAction("New Worktree…") { newWorktree = WorktreeRequest(agent: agent, repo: repo) })
+        if repo.worktrees.count > 1 {
+            menu.addItem(MenuAction("Clean Up Worktrees…") { cleanup = CleanupRequest(repo: repo) })
+        }
         return menu
     }
 
@@ -303,6 +309,16 @@ struct SidebarView: View {
                 if let key { proxy.scrollTo(key) }
             }
         }
+        .sheet(item: $cleanup) { request in
+            CleanupWorktreesView(repo: request.repo) { removed, problems in
+                workspace.requestScan?()
+                if let problem = problems.first {
+                    workspace.setStatus(problems.count > 1 ? "\(problem) (and \(problems.count - 1) more)" : problem)
+                } else if removed > 0 {
+                    workspace.setStatus(removed == 1 ? "Removed 1 worktree." : "Removed \(removed) worktrees.")
+                }
+            }
+        }
     }
 
     private func item(_ row: Row) -> some View {
@@ -321,9 +337,14 @@ struct SidebarView: View {
             busy: workspace.busyKeys.contains(row.key),
             waiting: workspace.waitingMessages[row.key],
             quit: quit,
+            snoozed: workspace.snoozed[row.key],
+            limit: workspace.limitStops[row.key],
+            continues: workspace.continueAtReset.contains(row.key),
+            leftovers: workspace.leftovers[row.key] ?? [],
             closable: closable,
             hovered: hovered == row.key,
-            now: workspace.now
+            now: workspace.now,
+            toggleContinue: running ? { workspace.setContinueAtReset(row.key, !workspace.continueAtReset.contains(row.key)) } : nil
         )
         // Onto the terminal, to show it in a split.
         .onDrag { SessionDrag.provider(row.key) }
@@ -382,6 +403,25 @@ struct SidebarView: View {
         if (running || workspace.quitKeys.contains(key)) && !pinned {
             Button("Close") { actions.close(key) }
         }
+        if workspace.snoozed[key] != nil {
+            Button("Remind Me Now") { workspace.endSnooze(key) }
+        } else if workspace.wantsUser(key) {
+            Menu("Remind Me Later") {
+                ForEach(laterTimes(), id: \.0) { title, date in
+                    Button(title) { workspace.snooze(key, until: date) }
+                }
+            }
+        }
+        if running, let limit = workspace.limitStops[key], let reset = limit.reset {
+            if workspace.continueAtReset.contains(key) {
+                Button("Don't Continue When the Rate Limit Resets") { workspace.setContinueAtReset(key, false) }
+            } else {
+                Button("Continue When the Rate Limit Resets (\(clockTime(reset)))") { workspace.setContinueAtReset(key, true) }
+            }
+        }
+        if let left = workspace.leftovers[key], !left.isEmpty {
+            Button("Stop Leftover Processes") { actions.stopLeftovers(left) }
+        }
         Divider()
         if let row = workspace.rows.first(where: { $0.key == key }) {
             ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
@@ -399,6 +439,22 @@ struct SidebarView: View {
         if key.agent != .shell, !key.id.hasPrefix("new-") {
             Button("Copy Session ID") { copy(key.id) }
         }
+    }
+
+    /// When "Remind Me Later" can bring a session back, with their titles.
+    private func laterTimes() -> [(String, Date)] {
+        let now = Date()
+        var times: [(String, Date)] = [
+            ("In 15 Minutes", now.addingTimeInterval(15 * 60)),
+            ("In 1 Hour", now.addingTimeInterval(3600)),
+            ("In 3 Hours", now.addingTimeInterval(3 * 3600)),
+        ]
+        let calendar = Calendar.current
+        if let nine = calendar.nextDate(after: now, matching: DateComponents(hour: 9, minute: 0), matchingPolicy: .nextTime) {
+            let when = atTime(nine, now: now)
+            times.append((when.prefix(1).uppercased() + when.dropFirst(), nine))
+        }
+        return times
     }
 
     private var emptyMessage: String {
@@ -439,6 +495,9 @@ struct SidebarView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(look.secondary)
             }
+            if !workspace.leftovers.isEmpty {
+                leftoversLine
+            }
             if !usage.isEmpty {
                 UsageView(usage: usage, now: now, look: look)
             }
@@ -447,10 +506,49 @@ struct SidebarView: View {
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .overlay(alignment: .top) {
-            if !usage.isEmpty || workspace.status != nil || workspace.notificationsOff {
+            if !usage.isEmpty || workspace.status != nil || workspace.notificationsOff || !workspace.leftovers.isEmpty {
                 Rectangle().fill(look.divider).frame(height: 1)
             }
         }
+    }
+
+    /// How many programs were left running and how much memory they hold.
+    /// A click lists them, to stop one or all.
+    private var leftoversLine: some View {
+        let all = workspace.leftovers.values.flatMap(\.self)
+        let memory = all.reduce(0) { $0 + $1.memory }
+        return PopUpButton(
+            look: look,
+            help: "Programs started in the background in a session's folder, which still run. Click to stop them.",
+            menu: leftoversMenu
+        ) {
+            Image(systemName: "memorychip")
+            Text("\(all.count == 1 ? "1 program" : "\(all.count) programs") left running · \(memorySize(memory))")
+                .lineLimit(1)
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(look.secondary)
+        .padding(.leading, -5)
+    }
+
+    private func leftoversMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.addItem(.sectionHeader(title: "Left Running · Click One to Stop It"))
+        let all = workspace.leftovers.flatMap { key, programs in programs.map { (key, $0) } }
+            .sorted { $0.1.memory > $1.1.memory }
+        for (key, program) in all {
+            let title = workspace.rows.first { $0.key == key }?.title
+                ?? workspace.sessions.first { $0.key == key }?.title ?? key.agent.displayName
+            let item = MenuAction(program.command, detail: "\(memorySize(program.memory)) · \(short(title, 40))") {
+                actions.stopLeftovers([program])
+            }
+            item.toolTip = "In \(tilde(program.cwd)), for \(elapsed(Date().timeIntervalSince(program.started)))"
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        menu.addItem(MenuAction(all.count == 1 ? "Stop It…" : "Stop All…") { actions.stopLeftovers(all.map(\.1)) })
+        return menu
     }
 }
 
@@ -482,6 +580,12 @@ private struct WorktreeRequest: Identifiable {
     let repo: RecentRepo
 }
 
+/// A repo whose worktrees to clean up.
+private struct CleanupRequest: Identifiable {
+    let id = UUID()
+    let repo: RecentRepo
+}
+
 private func copy(_ text: String) {
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(text, forType: .string)
@@ -507,11 +611,21 @@ private struct RowView: View {
     let waiting: String?
     /// The agent quit while the user was away.
     let quit: Bool
+    /// It wants the user, put off until then.
+    let snoozed: Date?
+    /// The agent stopped at the rate limit.
+    let limit: LimitInfo?
+    /// It gets `continue` once the limit resets.
+    let continues: Bool
+    /// Programs left running in its folder.
+    let leftovers: [Leftover]
     /// It has a close button when hovered.
     let closable: Bool
     /// The list shows its buttons where the state would be.
     let hovered: Bool
     let now: Date
+    /// Turns `continues` on or off; nil when no agent of ours runs it.
+    let toggleContinue: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
@@ -544,11 +658,27 @@ private struct RowView: View {
                         Text(attention.message)
                             .foregroundStyle(attention.color)
                             .lineLimit(1)
-                        Text(" · \(age(now: now, row.updated))")
-                            .foregroundStyle(look.secondary)
-                            .fixedSize()
+                        if limitText == nil {
+                            Text(" · \(age(now: now, row.updated))")
+                                .foregroundStyle(look.secondary)
+                                .fixedSize()
+                        }
+                        continueLink
                     }
                     .font(.system(size: 11, weight: .medium))
+                } else if let snoozed {
+                    Text("Reminds you \(atTime(snoozed, now: now))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(look.secondary)
+                        .lineLimit(1)
+                } else if let limitText {
+                    HStack(spacing: 0) {
+                        Text(limitText)
+                            .foregroundStyle(look.yellow)
+                            .lineLimit(1)
+                        continueLink
+                    }
+                    .font(.system(size: 11))
                 } else {
                     details
                 }
@@ -594,16 +724,54 @@ private struct RowView: View {
                 Text(" · ").fixedSize()
                 PullRequestLink(pr: pr, look: look)
             }
+            if !leftovers.isEmpty {
+                Text(" · ").fixedSize()
+                Label(memorySize(leftovers.reduce(0) { $0 + $1.memory }), systemImage: "memorychip")
+                    .labelStyle(.titleAndIcon)
+                    .fixedSize()
+                    .help("Left running in its folder:\n" + leftovers.map {
+                        "\($0.command): \(memorySize($0.memory)), for \(elapsed(now.timeIntervalSince($0.started)))"
+                    }.joined(separator: "\n"))
+            }
         }
         .font(.system(size: 11))
         .foregroundStyle(look.secondary)
     }
 
-    /// Why the user should look at it, if they should.
+    /// Why the user should look at it, if they should. A stop at the rate
+    /// limit says so, and when the limit resets.
     private var attention: (message: String, color: Color)? {
+        if snoozed != nil { return nil }
         if quit { return ("Quit while you were away", look.red) }
-        if let waiting { return (waiting, look.accent) }
+        if let waiting { return (limitText ?? waiting, look.accent) }
         return nil
+    }
+
+    /// The rate limit it stopped at, while its agent runs.
+    private var limitText: String? {
+        guard let limit, running || elsewhere != nil else { return nil }
+        guard let reset = limit.reset else { return "Stopped at the rate limit" }
+        let future = reset > now
+        if continues {
+            return future ? "Rate limit · continues in \(until(UInt64(reset.timeIntervalSince(now))))"
+                : "Rate limit reset · continues soon"
+        }
+        return future ? "Rate limit · resets in \(until(UInt64(reset.timeIntervalSince(now))))" : "The rate limit reset \(age(now: now, reset))"
+    }
+
+    /// Turns `continue` at the reset on or off, after the limit line.
+    @ViewBuilder
+    private var continueLink: some View {
+        if limitText != nil, let reset = limit?.reset, let toggleContinue {
+            Text(" · ").foregroundStyle(look.secondary).fixedSize()
+            LinkButton(
+                title: continues ? "Cancel" : reset > now ? "Continue then" : "Continue now",
+                help: continues ? "Don't type “continue” when the rate limit resets"
+                    : "Type “continue” into it when the rate limit resets",
+                look: look,
+                action: toggleContinue
+            )
+        }
     }
 
     private var background: Color {
@@ -616,7 +784,12 @@ private struct RowView: View {
     /// while it still reports work.
     @ViewBuilder
     private var state: some View {
-        if quit {
+        if let snoozed {
+            Image(systemName: "moon.zzz")
+                .font(.system(size: 11))
+                .foregroundStyle(look.secondary)
+                .help("Put off until \(clockTime(snoozed, now: now))")
+        } else if quit {
             badge("exclamationmark", look.red)
                 .help("Quit while you were away. Open it to resume.")
         } else if let waiting {
@@ -656,6 +829,27 @@ extension RowView {
             .foregroundStyle(look.background)
             .frame(width: 16, height: 16)
             .background(color, in: Circle())
+    }
+}
+
+/// A small text button in a row, like a link.
+private struct LinkButton: View {
+    let title: String
+    let help: String
+    let look: Look
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .underline(hovered)
+                .foregroundStyle(hovered ? look.accent : look.secondary)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .onHover { hovered = $0 }
+        .help(help)
     }
 }
 

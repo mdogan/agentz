@@ -1,11 +1,17 @@
 //! Finds agents the user started by hand inside one of our shells, and the
-//! session each one is using, and Claude sessions that run outside agentz.
+//! session each one is using, Claude sessions that run outside agentz, and
+//! programs that our terminals left running.
 //!
 //! Claude Code: writes `~/.claude/sessions/<pid>.json` with its `sessionId`.
 //! Codex:       older versions keep their `rollout-<ts>-<session-id>.jsonl`
 //!              file open. Since 0.157 a shared `codex app-server` daemon
 //!              writes it instead, so we pair each `codex` process with a
 //!              thread that is open (has a lock file) in the same folder.
+//! Left running: a program started in the background, e.g. a dev server an
+//!              agent started with `nohup`, goes on when the shell that
+//!              started it ends, and launchd adopts it. Its folder and start
+//!              time tell which session it came from. (Its environment would
+//!              say more, but macOS shows that to no other process.)
 
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
@@ -77,10 +83,14 @@ struct Process {
     args: OnceCell<Args>,
 }
 
+#[derive(Clone)]
 struct Args {
     argv0: String,
     /// The first argument, e.g. `app-server` for Codex's daemon.
     arg1: Option<String>,
+    /// The command line to show, e.g. `node next dev`. Paths are cut to
+    /// their last part.
+    command: String,
 }
 
 impl Process {
@@ -89,6 +99,7 @@ impl Process {
             read_args(self.pid).unwrap_or_else(|| Args {
                 argv0: self.comm.clone(),
                 arg1: None,
+                command: self.comm.clone(),
             })
         })
     }
@@ -320,20 +331,37 @@ fn read_args(pid: u32) -> Option<Args> {
 }
 
 /// `KERN_PROCARGS2` gives argc, the program's path, NULs up to a word
-/// boundary, then the arguments, each ending in a NUL.
+/// boundary, then the arguments, each ending in a NUL. The environment
+/// may follow; macOS 27 leaves it out.
 fn parse_procargs(buf: &[u8]) -> Option<Args> {
-    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?);
+    let argc = usize::try_from(i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?)).ok()?;
     let rest = &buf[4..];
     let rest = &rest[rest.iter().position(|&b| b == 0)?..];
     let rest = &rest[rest.iter().position(|&b| b != 0)?..];
-    let mut args = rest
+    let args: Vec<String> = rest
         .split(|&b| b == 0)
-        .take(usize::try_from(argc).ok()?)
-        .map(|a| String::from_utf8_lossy(a).into_owned());
+        .take(argc)
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect();
     Some(Args {
-        argv0: args.next()?,
-        arg1: args.next(),
+        argv0: args.first()?.clone(),
+        arg1: args.get(1).cloned(),
+        command: command_line(&args),
     })
+}
+
+/// `node next dev` for `/usr/bin/node /x/node_modules/.bin/next dev`: the
+/// program and its arguments, with paths cut to their last part.
+fn command_line(args: &[String]) -> String {
+    let words: Vec<&str> = args
+        .iter()
+        .map(|a| if a.starts_with('/') { basename(a) } else { a })
+        .collect();
+    let line = words.join(" ");
+    match line.char_indices().nth(80) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -368,9 +396,15 @@ fn process_table() -> HashMap<u32, Process> {
             continue;
         };
         if let (Ok(pid), Ok(ppid), Ok(pgid)) = (pid.parse(), ppid.parse(), pgid.parse()) {
+            let arg1 = parts.next().map(str::to_string);
             let args = Args {
                 argv0: argv0.to_string(),
-                arg1: parts.next().map(str::to_string),
+                command: command_line(
+                    &std::iter::once(argv0.to_string())
+                        .chain(arg1.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                arg1,
             };
             out.insert(
                 pid,
@@ -595,6 +629,265 @@ fn app_name(argv0: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| basename(argv0))
         .to_string()
+}
+
+// ---------- left running ----------
+
+/// A program of the user's that was started in the background and went on
+/// when what started it ended, so launchd adopted it, e.g. `nohup npm run
+/// dev &` or a test server an agent did not stop. Apps, and programs in the
+/// root or home folder, are not counted: those are most of what launchd
+/// runs. Neither is Codex's background server, which Codex runs on purpose.
+/// What it started counts as part of it.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct Leftover {
+    pub pid: u32,
+    /// When it started, so that a later process with the same pid is not
+    /// taken for it.
+    pub started: SystemTime,
+    /// E.g. `node next dev`.
+    pub command: String,
+    /// Its working directory.
+    pub cwd: PathBuf,
+    /// Its memory and that of what it started, in bytes, as Activity
+    /// Monitor's Memory column counts it.
+    pub memory: u64,
+    /// It and the processes it started.
+    pub processes: u32,
+}
+
+/// What was read about each of the user's processes adopted by launchd:
+/// their arguments do not change, so each process is read once.
+#[derive(Default)]
+pub struct ArgsCache {
+    by_pid: HashMap<u32, (SystemTime, Option<Args>)>,
+}
+
+/// The programs left running, biggest first.
+pub fn leftovers(procs: &Snapshot, cache: &mut ArgsCache) -> Vec<Leftover> {
+    let table = procs.table();
+    cache
+        .by_pid
+        .retain(|pid, (started, _)| table.get(pid).and_then(|p| p.started) == Some(*started));
+    for (&pid, p) in table {
+        // Only the user's own processes can be read.
+        if let (1, Some(started)) = (p.ppid, p.started) {
+            cache
+                .by_pid
+                .entry(pid)
+                .or_insert_with(|| (started, read_args(pid)));
+        }
+    }
+    let args = |pid: u32| cache.by_pid.get(&pid).and_then(|(_, a)| a.clone());
+    let home = dirs::home_dir().unwrap_or_default();
+    leftovers_from(table, &args, &working_dir, &memory, &home)
+}
+
+fn leftovers_from(
+    table: &HashMap<u32, Process>,
+    args: &dyn Fn(u32) -> Option<Args>,
+    cwd: &dyn Fn(u32) -> Option<PathBuf>,
+    memory: &dyn Fn(u32) -> u64,
+    home: &Path,
+) -> Vec<Leftover> {
+    let children = children(table);
+    let mut out: Vec<Leftover> = table
+        .iter()
+        .filter(|(_, p)| p.ppid == 1)
+        .filter_map(|(&pid, p)| {
+            let started = p.started?;
+            let args = args(pid)?;
+            if args.argv0.contains(".app/") || is_codex_daemon(&args) {
+                return None;
+            }
+            let cwd = cwd(pid).filter(|d| d.parent().is_some() && d != home)?;
+            let group = descendants(&children, pid);
+            Some(Leftover {
+                pid,
+                started,
+                command: args.command,
+                cwd,
+                memory: group.iter().map(|&pid| memory(pid)).sum(),
+                processes: u32::try_from(group.len()).unwrap_or(u32::MAX),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| b.memory.cmp(&a.memory).then(a.pid.cmp(&b.pid)));
+    out
+}
+
+/// `codex app-server …`: the shared server every `codex` connects to, and
+/// `codex app-server daemon pid-update-loop`, which keeps it up to date.
+/// The first `codex` starts both in its own folder and leaves them running.
+fn is_codex_daemon(args: &Args) -> bool {
+    basename(&args.argv0) == "codex" && args.arg1.as_deref() == Some("app-server")
+}
+
+fn children(table: &HashMap<u32, Process>) -> HashMap<u32, Vec<u32>> {
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (&pid, p) in table {
+        if p.ppid != pid {
+            children.entry(p.ppid).or_default().push(pid);
+        }
+    }
+    children
+}
+
+/// `pid` and everything under it.
+fn descendants(children: &HashMap<u32, Vec<u32>>, pid: u32) -> Vec<u32> {
+    let mut out = vec![pid];
+    let mut i = 0;
+    while i < out.len() {
+        for &child in children.get(&out[i]).into_iter().flatten() {
+            if !out.contains(&child) {
+                out.push(child);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// A process's memory, as Activity Monitor counts it.
+#[cfg(target_os = "macos")]
+fn memory(pid: u32) -> u64 {
+    let Ok(pid) = libc::c_int::try_from(pid) else {
+        return 0;
+    };
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+    // SAFETY: RUSAGE_INFO_V2 fills a rusage_info_v2.
+    let ok =
+        unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, info.as_mut_ptr().cast()) } == 0;
+    // SAFETY: plain data, zeroed and then filled by the kernel.
+    if ok {
+        unsafe { info.assume_init() }.ri_phys_footprint
+    } else {
+        0
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn memory(_pid: u32) -> u64 {
+    0
+}
+
+/// Stops each of `leftovers` and what it started: SIGTERM, then SIGKILL
+/// for what still runs 3 seconds later. A process that is not the one that
+/// was found, because it ended and its pid was taken again, is left alone.
+/// Returns how many processes still run.
+pub fn stop(leftovers: &[Leftover]) -> usize {
+    let table = process_table();
+    let children = children(&table);
+    let mut group: Vec<(u32, SystemTime)> = Vec::new();
+    for l in leftovers {
+        if !table
+            .get(&l.pid)
+            .is_some_and(|p| same_start(p.started, l.started))
+        {
+            continue;
+        }
+        for pid in descendants(&children, l.pid) {
+            if let Some(started) = table.get(&pid).and_then(|p| p.started)
+                && !group.iter().any(|(p, _)| *p == pid)
+            {
+                group.push((pid, started));
+            }
+        }
+    }
+    let running = |group: &[(u32, SystemTime)]| -> Vec<(u32, SystemTime)> {
+        group
+            .iter()
+            .copied()
+            .filter(|&(pid, started)| is_running(pid, started))
+            .collect()
+    };
+    let signal = |group: &[(u32, SystemTime)], sig| {
+        for &(pid, _) in group {
+            if let Ok(pid) = libc::pid_t::try_from(pid) {
+                // SAFETY: kill only sends a signal.
+                unsafe { libc::kill(pid, sig) };
+            }
+        }
+    };
+    signal(&group, libc::SIGTERM);
+    for (signal_next, wait) in [(Some(libc::SIGKILL), 30), (None, 10)] {
+        for _ in 0..wait {
+            group = running(&group);
+            if group.is_empty() {
+                return 0;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if let Some(sig) = signal_next {
+            signal(&group, sig);
+        }
+    }
+    running(&group).len()
+}
+
+/// Two reads of a start time can differ by rounding once it went through
+/// Swift's `Date`.
+fn same_start(a: Option<SystemTime>, b: SystemTime) -> bool {
+    a.is_some_and(|a| {
+        a.duration_since(b)
+            .or_else(|_| b.duration_since(a))
+            .is_ok_and(|d| d < Duration::from_millis(1))
+    })
+}
+
+/// True while the process `pid` that started at `started` runs, and is not
+/// a zombie waiting for its parent.
+#[cfg(target_os = "macos")]
+fn is_running(pid: u32, started: SystemTime) -> bool {
+    let Ok(c_pid) = libc::c_int::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: PROC_PIDTBSDINFO fills a proc_bsdinfo.
+    let Some(info) = (unsafe { pid_info::<libc::proc_bsdinfo>(c_pid, libc::PROC_PIDTBSDINFO) })
+    else {
+        return false;
+    };
+    let start = SystemTime::UNIX_EPOCH
+        + Duration::from_secs(info.pbi_start_tvsec)
+        + Duration::from_micros(info.pbi_start_tvusec);
+    info.pbi_status != libc::SZOMB && same_start(Some(start), started)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_running(pid: u32, _started: SystemTime) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// For each of `dirs`, a program whose working directory is in it, if
+/// any: `claude`, an editor, a dev server. This process is left out.
+pub fn programs_in(dirs: &[PathBuf]) -> Vec<Option<String>> {
+    let dirs: Vec<Vec<PathBuf>> = dirs
+        .iter()
+        .map(|d| {
+            let mut both = vec![d.clone()];
+            // Process folders come back with symlinks resolved.
+            both.extend(d.canonicalize().ok().filter(|r| r != d));
+            both
+        })
+        .collect();
+    let mut found = vec![None; dirs.len()];
+    let us = std::process::id();
+    for (&pid, p) in &process_table() {
+        // Our own children are git, run for the check itself, and the
+        // `login` of each terminal, whose program is checked anyway.
+        if pid == us || p.ppid == us || p.started.is_none() {
+            continue;
+        }
+        let Some(cwd) = working_dir(pid) else {
+            continue;
+        };
+        for (i, ds) in dirs.iter().enumerate() {
+            if found[i].is_none() && ds.iter().any(|d| cwd.starts_with(d)) {
+                found[i] = Some(basename(p.args().argv0.as_str()).to_string());
+            }
+        }
+    }
+    found
 }
 
 /// The session id from the rollout file the process has open. Codex only
@@ -925,8 +1218,150 @@ mod tests {
             args: OnceCell::from(Args {
                 argv0: args[0].into(),
                 arg1: args.get(1).map(|a| a.to_string()),
+                command: args.join(" "),
             }),
         }
+    }
+
+    #[test]
+    fn finds_what_was_left_running() {
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut table = HashMap::new();
+        let mut add = |pid, ppid, argv0: &str, own: bool| {
+            let mut p = process(pid, ppid, pid, None, &[argv0]);
+            p.started = own.then_some(t0);
+            table.insert(pid, p);
+        };
+        // An app, and a terminal in it with an agent and its MCP server.
+        add(
+            100,
+            1,
+            "/Applications/Agentz.app/Contents/MacOS/agentz",
+            true,
+        );
+        add(101, 100, "/usr/bin/login", true);
+        add(102, 101, "claude", true);
+        add(103, 102, "node", true);
+        // What the agent started with nohup, and its worker.
+        add(200, 1, "npm", true);
+        add(201, 200, "node", true);
+        add(202, 201, "node", true);
+        // launchd's own, another user's, and one in the home folder.
+        add(300, 1, "/usr/libexec/trustd", true);
+        add(301, 1, "/usr/sbin/cfprefsd", false);
+        add(302, 1, "/opt/homebrew/bin/gpg-agent", true);
+        // Codex's background server and its updater, in the agent's folder.
+        let codex = "/Users/me/.codex/packages/app-server-daemon/current/bin/codex";
+        for (pid, arg) in [(400, "--listen"), (401, "daemon")] {
+            let mut p = process(pid, 1, pid, None, &[codex, "app-server", arg]);
+            p.started = Some(t0);
+            table.insert(pid, p);
+        }
+        let found = leftovers_from(
+            &table,
+            &|pid| {
+                let p = table.get(&pid)?;
+                Some(Args {
+                    command: if pid == 200 {
+                        "npm run dev".into()
+                    } else {
+                        p.argv0().into()
+                    },
+                    ..p.args().clone()
+                })
+            },
+            &|pid| match pid {
+                100 | 300 | 301 => Some("/".into()),
+                302 => Some("/Users/me".into()),
+                _ => Some("/Users/me/app".into()),
+            },
+            &|pid| u64::from(pid),
+            Path::new("/Users/me"),
+        );
+        assert_eq!(
+            found,
+            vec![Leftover {
+                pid: 200,
+                started: t0,
+                command: "npm run dev".into(),
+                cwd: "/Users/me/app".into(),
+                // Also what it started.
+                memory: 200 + 201 + 202,
+                processes: 3,
+            }]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stops_a_leftover_and_what_it_started() {
+        // `; true` so the shell waits instead of becoming the last sleep.
+        let mut sh = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & sleep 30; true"])
+            .spawn()
+            .unwrap();
+        // Until the background sleep has started.
+        let mut table = process_table();
+        for _ in 0..50 {
+            if descendants(&children(&table), sh.id()).len() == 3 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            table = process_table();
+        }
+        let p = &table[&sh.id()];
+        let leftover = Leftover {
+            pid: sh.id(),
+            started: p.started.unwrap(),
+            command: "sh".into(),
+            cwd: "/".into(),
+            memory: 0,
+            processes: 3,
+        };
+        let group = descendants(&children(&table), sh.id());
+        assert_eq!(group.len(), 3);
+        // A pid that was taken again is left alone.
+        let other = Leftover {
+            started: leftover.started - Duration::from_secs(5),
+            ..leftover.clone()
+        };
+        assert_eq!(stop(&[other]), 0);
+        assert!(is_running(sh.id(), leftover.started));
+        assert_eq!(stop(std::slice::from_ref(&leftover)), 0);
+        sh.wait().unwrap();
+        for pid in group {
+            assert!(!is_running(pid, table[&pid].started.unwrap()));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finds_programs_in_a_folder() {
+        let dir = std::env::temp_dir().join(format!("agentz-in-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        // Not our child, like a program in one of our terminals: its shell
+        // exits, and launchd adopts it.
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", "(cd sub && exec sleep 30) >/dev/null 2>&1 & echo $!"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let pid: libc::pid_t = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+        let other = std::env::temp_dir().join(format!("agentz-out-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&other).unwrap();
+        let mut found = vec![None, None];
+        for _ in 0..50 {
+            found = programs_in(&[dir.clone(), other.clone()]);
+            if found[0].is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: kill only sends a signal.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert_eq!(found, vec![Some("sleep".to_string()), None]);
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(other).unwrap();
     }
 
     #[test]
@@ -1075,6 +1510,25 @@ mod tests {
         let mut buf = 1i32.to_ne_bytes().to_vec();
         buf.extend(b"/bin/sleep\0sleep\0HOME=/x\0");
         assert_eq!(parse_procargs(&buf).unwrap().arg1, None);
+        let mut buf = 3i32.to_ne_bytes().to_vec();
+        buf.extend(
+            b"/usr/bin/node\0\0\0\0/usr/bin/node\0/x/node_modules/.bin/next\0dev\0HOME=/x\0",
+        );
+        assert_eq!(parse_procargs(&buf).unwrap().command, "node next dev");
+        assert_eq!(command_line(&["x".repeat(100)]).chars().count(), 81);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_command_lines_and_memory() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert_eq!(read_args(child.id()).unwrap().command, "sleep 30");
+        assert!(memory(child.id()) > 0);
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
 
     #[cfg(target_os = "macos")]

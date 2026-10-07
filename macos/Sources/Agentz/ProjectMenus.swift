@@ -371,3 +371,139 @@ struct NewWorktreeView: View {
         }
     }
 }
+
+// MARK: - Clean up worktrees
+
+/// Lists the linked worktrees of a repo, with whether each can be removed
+/// without losing anything, and removes the ones picked. Only those can be
+/// picked: nothing uncommitted, commits in the main branch, nothing running
+/// in it. Their folders go, with ignored files like `node_modules`; their
+/// branches stay.
+struct CleanupWorktreesView: View {
+    let repo: RecentRepo
+    /// After removing: how many went, and what went wrong.
+    let done: (_ removed: Int, _ problems: [String]) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var cleanup: Cleanup?
+    @State private var error: String?
+    /// The worktrees to remove, by path.
+    @State private var picked: Set<String> = []
+    @State private var working = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Clean Up Worktrees of \(repo.name)").font(.headline)
+            Text("""
+            A worktree can go when nothing in it is uncommitted, its commits are in \(cleanup?.into ?? "the main branch"), \
+            and nothing runs in it. Removing it deletes its folder, also ignored files like node_modules. Its branch stays.
+            """)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            list
+            if let error {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            HStack {
+                if working || cleanup == nil {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(picked.count > 1 ? "Remove \(picked.count) Worktrees" : "Remove Worktree", action: remove)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(picked.isEmpty || working)
+            }
+        }
+        .padding(20)
+        .frame(width: 520)
+        .task { await load() }
+    }
+
+    private var list: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 6) {
+                ForEach(cleanup?.worktrees ?? [], id: \.worktree.path) { status in
+                    row(status, into: cleanup?.into ?? "")
+                }
+            }
+            .padding(6)
+        }
+        .frame(height: 260)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+        .overlay {
+            if let cleanup, cleanup.worktrees.isEmpty {
+                Text("\(repo.name) has no other worktrees.").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func row(_ status: WorktreeStatus, into: String) -> some View {
+        let path = status.worktree.path
+        let removable = status.state.removable
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { picked.contains(path) },
+                set: { on in
+                    if on { picked.insert(path) } else { picked.remove(path) }
+                }
+            ))
+            .labelsHidden()
+            .disabled(!removable || working)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status.worktree.label).lineLimit(1).truncationMode(.middle)
+                Text(tilde(path)).font(.callout).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                Label(status.state.text(into: into), systemImage: removable ? "checkmark.circle" : "lock")
+                    .font(.callout)
+                    .foregroundStyle(removable ? Color.green : Color.secondary)
+            }
+        }
+        .opacity(removable ? 1 : 0.8)
+    }
+
+    private func load() async {
+        let dir = repo.root
+        let result = await Task.detached { Result { try worktreeCleanup(dir) } }.value
+        switch result {
+        case let .success(found):
+            cleanup = found
+            picked = Set(found.worktrees.filter(\.state.removable).map(\.worktree.path))
+        case let .failure(e):
+            error = errorMessage(e)
+            cleanup = Cleanup(into: "", worktrees: [])
+        }
+    }
+
+    private func remove() {
+        guard !picked.isEmpty, !working else { return }
+        let dir = repo.root
+        let paths = Array(picked).sorted()
+        working = true
+        error = nil
+        Task {
+            let problems = await Task.detached {
+                paths.compactMap { path -> String? in
+                    do {
+                        try removeWorktree(dir, path)
+                        return nil
+                    } catch {
+                        return errorMessage(error)
+                    }
+                }
+            }.value
+            working = false
+            done(paths.count - problems.count, problems)
+            if problems.isEmpty {
+                dismiss()
+            } else {
+                error = problems.joined(separator: "\n")
+                picked = []
+                await load()
+            }
+        }
+    }
+}

@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private var tickTimer: Timer?
     private var keyMonitor: Any?
     private var shortcutsWindow: ShortcutsWindowController?
+    /// Notices that come at the same moment become one notification.
+    private var notices = NoticeBatcher()
 
     // MARK: - Launch
 
@@ -73,7 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 },
                 recentFolders: { UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? [] },
                 clearRecentFolders: { UserDefaults.standard.removeObject(forKey: Self.recentsKey) },
-                notificationSettings: { [weak self] in self?.notificationSettings(nil) }
+                notificationSettings: { [weak self] in self?.notificationSettings(nil) },
+                stopLeftovers: { [weak self] leftovers in self?.stopLeftovers(leftovers) }
             ),
             autoHide: SmokeTest.logPath == nil && UserDefaults.standard.bool(forKey: Self.autoHideKey)
         )
@@ -83,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         workspace.notify = { [weak self] heading, title, message, key in
             self?.notify(heading: heading, title: title, message: message, key: key)
         }
+        workspace.onSeen = { [weak self] key in self?.seen(key) }
         workspace.confirmFork = { [weak self] title, other in
             self?.confirm(
                 "This session is running in \(other.appName).",
@@ -95,6 +99,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if SmokeTest.logPath == nil {
             workspace.savePins = { [weak workspace] pins in
                 do { try savePinnedTabs(pins) } catch { workspace?.setStatus("Could not save pinned tabs: \(error)") }
+            }
+            let continues = UserDefaults.standard.stringArray(forKey: Self.continuesKey) ?? []
+            workspace.restoreContinues(continues.compactMap { SessionKey(parsing: $0) })
+            workspace.saveContinues = { keys in
+                UserDefaults.standard.set(keys.map(\.description).sorted(), forKey: Self.continuesKey)
             }
         }
         let scanner = Scanner(workspace)
@@ -149,6 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     private static let recentsKey = "recentFolders"
     private static let autoHideKey = "autoHideSessionList"
+    private static let continuesKey = "continueAtReset"
 
     /// Shows the project of `dir`, and opens it there on the next launch.
     /// With `recent`, it goes to the top of the recent folders.
@@ -291,6 +301,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             guard confirm("The shell is running a command.", "Closing stops it.", button: "Close") else { return }
         }
         workspace.close(key)
+    }
+
+    /// Asks first, then stops the programs and what they started, off the
+    /// main thread: that can take a few seconds.
+    private func stopLeftovers(_ leftovers: [Leftover]) {
+        guard let workspace, !leftovers.isEmpty else { return }
+        let lines = leftovers.map { l in
+            "\(l.command): \(memorySize(l.memory)), running for \(elapsed(Date().timeIntervalSince(l.started))) in \(tilde(l.cwd))"
+        }
+        let what = leftovers.count == 1 ? leftovers[0].command : "\(leftovers.count) programs that were left running"
+        guard confirm(
+            "Stop \(what)?",
+            lines.joined(separator: "\n") + "\n\nThey are asked to quit, and stopped if they still run 3 seconds later. What they started stops too.",
+            button: "Stop"
+        ) else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak workspace] in
+            let left = AgentzCore.stopLeftovers(leftovers)
+            DispatchQueue.main.async {
+                guard let workspace else { return }
+                workspace.setStatus(left == 0
+                    ? (leftovers.count == 1 ? "Stopped \(leftovers[0].command)." : "Stopped \(leftovers.count) programs.")
+                    : "\(left) \(left == 1 ? "process" : "processes") did not stop.")
+                workspace.requestScan?()
+            }
+        }
     }
 
     @objc func togglePin(_: Any?) {
@@ -503,18 +538,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 // MARK: - Notifications
 
 extension AppDelegate: UNUserNotificationCenterDelegate {
+    /// How long a notice waits for others that come at the same moment.
+    private static let noticeDelay: TimeInterval = 1.5
+
     /// Tells the user about a session, e.g. that its agent is waiting.
     /// `message` is what the agent itself said, e.g. Codex's last reply.
+    /// Notices that come at the same moment, like several agents finishing
+    /// in the same second, become one notification.
     private func notify(heading: String, title: String, message: String?, key: SessionKey) {
         guard Bundle.main.bundleIdentifier != nil else { return }
+        if notices.add(SessionNotice(key: key, heading: heading, title: title, message: message)) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.noticeDelay) { [weak self] in
+                MainActor.assumeIsolated { self?.postNotices() }
+            }
+        }
+    }
+
+    private func postNotices() {
+        let (post, replaced) = notices.flush()
+        let center = UNUserNotificationCenter.current()
+        if !replaced.isEmpty { center.removeDeliveredNotifications(withIdentifiers: replaced) }
+        guard let post else { return }
         let content = UNMutableNotificationContent()
-        content.title = heading
-        content.body = message.map { "\(title): \(short($0, 200))" } ?? title
+        content.title = post.title
+        content.body = post.body
         content.sound = .default
-        content.userInfo = ["agent": key.agent.name, "id": key.id]
+        if post.keys.count == 1, let key = post.keys.first {
+            content.userInfo = ["agent": key.agent.name, "id": key.id]
+        }
         // A newer notice about the same session replaces the older one.
-        let request = UNNotificationRequest(identifier: key.description, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        center.add(UNNotificationRequest(identifier: post.id, content: content, trigger: nil))
+    }
+
+    /// The user looks at the session: what was said about it goes away,
+    /// once nothing else it says is unseen.
+    private func seen(_ key: SessionKey) {
+        let done = notices.seen(key)
+        if !done.isEmpty { UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: done) }
     }
 
     nonisolated func userNotificationCenter(
@@ -527,22 +587,21 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
 
     nonisolated func userNotificationCenter(_: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
         let info = response.notification.request.content.userInfo
-        guard let raw = info["agent"] as? String, let agent = Agent(name: raw), let id = info["id"] as? String else {
-            return
+        let key = (info["agent"] as? String).flatMap(Agent.init(name:)).flatMap { agent in
+            (info["id"] as? String).map { SessionKey(agent, $0) }
         }
         await MainActor.run {
             NSApp.activate()
             self.windowController?.showWindow(nil)
-            self.workspace?.selection = SessionKey(agent, id)
-            self.workspace?.open(SessionKey(agent, id))
+            if let key {
+                self.workspace?.selection = key
+                self.workspace?.open(key)
+            } else {
+                // About several sessions.
+                self.workspace?.showNextAttention()
+            }
         }
     }
-}
-
-/// `s` on one line, cut to at most `max` characters with `…`.
-private func short(_ s: String, _ max: Int) -> String {
-    let s = s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-    return s.count > max ? s.prefix(max) + "…" : s
 }
 
 private func plural(_ n: Int, _ one: String, _ many: String) -> String {

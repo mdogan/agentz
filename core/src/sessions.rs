@@ -45,12 +45,24 @@ pub struct Session {
     pub branch: Option<String>,
     /// The pull request Claude last opened or looked at.
     pub pr: Option<PullRequest>,
+    /// The agent stopped at its plan's rate limit, and the session did not
+    /// go on since.
+    pub limit: Option<LimitStop>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct PullRequest {
     pub number: u64,
     pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LimitStop {
+    /// What the agent said, with when the limit resets, e.g. `You've hit
+    /// your session limit · resets 6:50pm (Europe/Istanbul)`.
+    pub message: String,
+    /// When it stopped.
+    pub at: SystemTime,
 }
 
 /// What we learned from one transcript file. Claude files are parsed
@@ -67,6 +79,8 @@ struct Parsed {
     summary: Option<String>,
     branch: Option<String>,
     pr: Option<PullRequest>,
+    /// The last rate limit stop, and when it was, if the transcript says.
+    limit: Option<(String, Option<SystemTime>)>,
     skip: bool,
 }
 
@@ -172,13 +186,16 @@ impl Scanner {
                 } else {
                     Parsed::default()
                 };
-                e.parsed = parse(path, agent, prev);
+                e.parsed = parse(path, agent, prev, true);
                 e.len = len;
                 e.mtime = mtime;
                 e
             }
             None => {
-                let parsed = parse(path, agent, Parsed::default());
+                let recent = SystemTime::now()
+                    .duration_since(mtime)
+                    .is_ok_and(|age| age < RECENT);
+                let parsed = parse(path, agent, Parsed::default(), recent);
                 self.cache.insert(
                     path.to_path_buf(),
                     CacheEntry {
@@ -213,20 +230,39 @@ impl Scanner {
             in_project: false,
             branch: p.branch.clone(),
             pr: p.pr.clone(),
+            limit: p.limit.clone().map(|(message, at)| LimitStop {
+                message,
+                at: at.unwrap_or(entry.mtime),
+            }),
         })
     }
 }
 
-fn parse(path: &Path, agent: Agent, prev: Parsed) -> Parsed {
+/// Codex rollouts can be long, and only the end of one tells whether it
+/// stopped at the rate limit. At the first scan only the files changed this
+/// recently are read to the end; the others are read on from where the
+/// first prompt was when they change.
+const RECENT: std::time::Duration = std::time::Duration::from_secs(2 * 86_400);
+
+/// `whole`: read a Codex rollout to its end, not only to its first prompt.
+fn parse(path: &Path, agent: Agent, prev: Parsed, whole: bool) -> Parsed {
     match agent {
         Agent::Claude => parse_claude(path, prev),
         Agent::Codex => {
+            if prev.skip {
+                return prev;
+            }
             // A scan can see the metadata before Codex writes the first
             // prompt. Re-read the file until we have a title.
-            if prev.skip || prev.first_prompt.is_some() {
+            let p = if prev.first_prompt.is_some() {
                 prev
             } else {
                 parse_codex(path)
+            };
+            if whole && !p.skip && p.first_prompt.is_some() {
+                parse_codex_tail(path, p)
+            } else {
+                p
             }
         }
         Agent::Shell => prev,
@@ -263,6 +299,25 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
 
         if let Some(branch) = git_branch(&line) {
             p.branch = branch;
+        }
+        // Claude writes a stop at the limit as an error message of its own.
+        // Anything the user or Claude says after it means it went on.
+        let limit = line.contains("\"rate_limit\"") && line.contains("\"isApiErrorMessage\":true");
+        let after_limit = p.limit.is_some()
+            && (line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\""));
+        if (limit || after_limit)
+            && let Ok(v) = serde_json::from_str::<Value>(&line)
+        {
+            if v["type"] == "assistant"
+                && v["isApiErrorMessage"] == true
+                && v["error"] == "rate_limit"
+            {
+                if let Some(text) = message_text(&v["message"]["content"]) {
+                    p.limit = Some((text, v["timestamp"].as_str().and_then(parse_time)));
+                }
+            } else if goes_on(&v) {
+                p.limit = None;
+            }
         }
         let wanted = line.contains("\"custom-title\"")
             || line.contains("\"ai-title\"")
@@ -344,6 +399,100 @@ fn parse_codex(path: &Path) -> Parsed {
         }
     }
     p
+}
+
+/// True for a Claude transcript line that says the session went on: an
+/// answer from the model, or a prompt the user typed. Not for what Claude
+/// adds by itself, like the output of a `/usage` the user ran.
+fn goes_on(v: &Value) -> bool {
+    match v["type"].as_str() {
+        Some("assistant") => v["isApiErrorMessage"] != true,
+        Some("user") => {
+            v["isMeta"] != true
+                && message_text(&v["message"]["content"])
+                    .and_then(clean_prompt)
+                    .is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Reads the rest of a Codex rollout, from where `p` stopped, for a stop
+/// at the rate limit: a turn that ended with `usage_limit_exceeded`. A new
+/// turn means it went on.
+fn parse_codex_tail(path: &Path, mut p: Parsed) -> Parsed {
+    let Ok(mut file) = File::open(path) else {
+        return p;
+    };
+    if file.seek(SeekFrom::Start(p.offset)).is_err() {
+        return p;
+    }
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        // A line without a newline is still being written; read it next time.
+        if !line.ends_with('\n') {
+            break;
+        }
+        p.offset += n as u64;
+        let limit = line.contains("\"usage_limit_exceeded\"");
+        if !limit && !(p.limit.is_some() && line.contains("\"task_started\"")) {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let payload = &v["payload"];
+        if v["type"] != "event_msg" {
+            continue;
+        }
+        if payload["type"] == "task_started" {
+            p.limit = None;
+        } else if payload["error"]["codex_error_info"] == "usage_limit_exceeded"
+            && let Some(message) = str_field(&payload["error"], "message")
+        {
+            p.limit = Some((message, v["timestamp"].as_str().and_then(parse_time)));
+        }
+    }
+    p
+}
+
+/// A transcript's timestamp, like `2026-09-03T09:32:07.350Z`. Only UTC
+/// times, which is what Claude and Codex write.
+fn parse_time(s: &str) -> Option<SystemTime> {
+    let s = s.strip_suffix('Z')?;
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.splitn(3, '-').map(|x| x.parse::<i64>().ok());
+    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
+    let (hms, frac) = time.split_once('.').unwrap_or((time, ""));
+    let mut t = hms.splitn(3, ':').map(|x| x.parse::<u64>().ok());
+    let (h, min, sec) = (t.next()??, t.next()??, t.next()??);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || h > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+    // Days since 1970-01-01, from Howard Hinnant's days_from_civil.
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = u64::try_from(era * 146_097 + doe - 719_468).ok()?;
+    let nanos = if frac.is_empty() {
+        0
+    } else {
+        let digits: String = frac.chars().take(9).collect();
+        digits.parse::<u64>().ok()? * 10u64.pow(9 - digits.len() as u32)
+    };
+    Some(
+        SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(days * 86_400 + h * 3600 + min * 60 + sec)
+            + std::time::Duration::from_nanos(nanos),
+    )
 }
 
 /// The `gitBranch` of a Claude transcript line: `Some(None)` outside a
@@ -578,6 +727,115 @@ mod tests {
         assert_eq!(session.branch, None);
         assert_eq!(session.pr.map(|pr| pr.number), Some(1600));
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn claude_stop_at_the_rate_limit_lasts_until_it_goes_on() {
+        let path =
+            std::env::temp_dir().join(format!("agentz-claude-{}.jsonl", uuid::Uuid::new_v4()));
+        let append = |text: &str| {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(text.as_bytes()).unwrap();
+        };
+        append(
+            r#"{"type":"user","cwd":"/work","message":{"content":"fix the bug"}}
+{"type":"assistant","timestamp":"2026-09-03T09:32:07.350Z","isApiErrorMessage":true,"error":"rate_limit","apiErrorStatus":429,"message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your session limit · resets 2:10pm (Europe/Istanbul)"}]}}
+"#,
+        );
+        let mut scanner = Scanner::default();
+        let limit = scanner.visit(&path, Agent::Claude).unwrap().limit;
+        assert_eq!(
+            limit,
+            Some(LimitStop {
+                message: "You've hit your session limit · resets 2:10pm (Europe/Istanbul)".into(),
+                at: SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_788_427_927_350),
+            })
+        );
+        // Other errors, what Claude adds by itself and commands do not end it.
+        append(
+            r#"{"type":"assistant","isApiErrorMessage":true,"error":"server_error","message":{"content":[{"type":"text","text":"API Error: 500"}]}}
+{"type":"user","isMeta":true,"message":{"content":"Caveat: local commands"}}
+{"type":"user","message":{"content":"<command-name>/usage</command-name>"}}
+{"type":"system","subtype":"info","content":"\"type\":\"user\""}
+"#,
+        );
+        assert!(scanner.visit(&path, Agent::Claude).unwrap().limit.is_some());
+        append(
+            r#"{"type":"user","message":{"content":"continue"}}
+"#,
+        );
+        assert_eq!(scanner.visit(&path, Agent::Claude).unwrap().limit, None);
+        // An answer ends it too.
+        append(
+            r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[{"type":"text","text":"limit"}]}}
+"#,
+        );
+        let limit = scanner.visit(&path, Agent::Claude).unwrap().limit.unwrap();
+        // Without a timestamp, the file's time.
+        assert!(limit.at > SystemTime::now() - std::time::Duration::from_secs(60));
+        append(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Going on."}]}}
+"#,
+        );
+        assert_eq!(scanner.visit(&path, Agent::Claude).unwrap().limit, None);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn codex_stop_at_the_rate_limit_lasts_until_the_next_turn() {
+        let path =
+            std::env::temp_dir().join(format!("agentz-codex-limit-{}.jsonl", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"{"type":"session_meta","payload":{"id":"c1","cwd":"/tmp","source":"cli","originator":"codex-tui"}}
+{"type":"event_msg","payload":{"type":"task_started"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}}
+{"timestamp":"2026-07-31T07:19:09.611Z","type":"event_msg","payload":{"type":"task_complete","last_agent_message":null,"error":{"message":"You've hit your usage limit. Try again at Aug 5th, 2026 9:34 AM.","codex_error_info":"usage_limit_exceeded"}}}
+"#,
+        )
+        .unwrap();
+        let mut scanner = Scanner::default();
+        let limit = scanner.visit(&path, Agent::Codex).unwrap().limit.unwrap();
+        assert_eq!(
+            limit.message,
+            "You've hit your usage limit. Try again at Aug 5th, 2026 9:34 AM."
+        );
+        assert_eq!(
+            limit.at,
+            SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_785_482_349_611)
+        );
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(
+            br#"{"type":"event_msg","payload":{"type":"task_started"}}
+"#,
+        )
+        .unwrap();
+        drop(file);
+        let session = scanner.visit(&path, Agent::Codex).unwrap();
+        assert_eq!(session.limit, None);
+        assert_eq!(session.title, "go");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn parses_transcript_times() {
+        let at = |s| {
+            parse_time(s).map(|t| {
+                t.duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis()
+            })
+        };
+        assert_eq!(at("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(at("2026-09-03T09:32:07.350Z"), Some(1_788_427_927_350));
+        assert_eq!(at("2024-02-29T23:59:59.5Z"), Some(1_709_251_199_500));
+        assert_eq!(at("2026-09-03T09:32:07+03:00"), None);
+        assert_eq!(at("2026-13-03T09:32:07Z"), None);
+        assert_eq!(at("soon"), None);
     }
 
     #[test]

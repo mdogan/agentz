@@ -12,7 +12,7 @@ final class SmokeTest {
     private let logPath: String
     private var lines: [String] = []
     private var failed = false
-    private var notices: [(key: SessionKey, message: String?)] = []
+    private var notices: [(key: SessionKey, heading: String, message: String?)] = []
 
     static var logPath: String? {
         ProcessInfo.processInfo.environment["AGENTZ_SMOKE_LOG"]
@@ -25,12 +25,14 @@ final class SmokeTest {
     }
 
     /// Stands in for Claude: writes its arguments to `claude-args` next to
-    /// its folder, one per line, and waits. Terminals keep the environment
-    /// the first one got, so a variable set later would not reach it.
+    /// its folder, one per line, waits for a line and writes it to
+    /// `claude-input`. Terminals keep the environment the first one got, so
+    /// a variable set later would not reach it.
     private static let fakeClaude = #"""
     #!/bin/sh
     printf '%s\n' "$@" > "$(dirname "$0")/../claude-args"
     read line
+    printf '%s\n' "$line" > "$(dirname "$0")/../claude-input"
     """#
 
     /// Stands in for Codex: a title spinner while "working", a notification
@@ -50,7 +52,7 @@ final class SmokeTest {
         let ws = workspace
         let notify = ws.notify
         ws.notify = { [weak self] heading, title, message, key in
-            self?.notices.append((key, message))
+            self?.notices.append((key, heading, message))
             notify?(heading, title, message, key)
         }
         let tmp = (realPath(NSTemporaryDirectory()) ?? NSTemporaryDirectory()) + "/agentz-smoke-\(getpid())"
@@ -512,8 +514,132 @@ final class SmokeTest {
             ws.close(tab.key)
         }
 
+        await awayAndLater(tmp)
+        await leftRunning(tmp)
+        await continueAtReset(tmp)
         await runningElsewhere(tmp)
         finish(nil)
+    }
+
+    /// Away from the Mac, an agent in front of the user still tells them
+    /// it is done; looking at it ends that. A session put off for later
+    /// does not count until then, and then comes back with a reminder.
+    private func awayAndLater(_ tmp: String) async {
+        let ws = workspace
+        var seen: [SessionKey] = []
+        let onSeen = ws.onSeen
+        ws.onSeen = { key in
+            seen.append(key)
+            onSeen?(key)
+        }
+        // Not the window's real state: the user may use another app while
+        // this runs.
+        let present = ws.isUserPresent
+        var away = true
+        ws.isUserPresent = { !away }
+        defer {
+            ws.isUserPresent = present
+            ws.onSeen = onSeen
+        }
+
+        ws.newSession(.codex, cwd: tmp)
+        guard let codex = ws.currentTab, codex.key.agent == .codex else { return check("start an agent to be away from", false) }
+        let key = codex.key
+        codex.turns.userInput()
+        check("away, the agent in front still says it is done", await wait(8) {
+            self.notices.contains { $0.key == key } && ws.attentionKeys == [key]
+        }, "\(ws.attentionKeys)")
+        check("away, it is not seen", !seen.contains(key))
+        away = false
+        check("back, looking at it ends that", await wait(2) { ws.attentionKeys.isEmpty && seen.contains(key) })
+
+        away = true
+        codex.turns.userInput()
+        codex.terminal.run("")
+        check("it wants the user again", await wait(5) { ws.attentionKeys == [key] && ws.waitingMessages[key] == "Done: OK" })
+        let before = notices.count
+        ws.snooze(key, until: Date().addingTimeInterval(1.5))
+        check("put off, it does not count", ws.attentionKeys.isEmpty && ws.snoozed[key] != nil && ws.wantsUser(key))
+        check("then it is back, with a reminder", await wait(4) {
+            ws.attentionKeys == [key] && ws.snoozed.isEmpty
+                && self.notices.dropFirst(before).contains { $0.key == key && $0.heading.hasPrefix("Reminder") && $0.message == "Done: OK" }
+        }, "\(ws.attentionKeys) \(notices.dropFirst(before).map(\.heading))")
+        ws.snooze(key, until: Date().addingTimeInterval(60))
+        away = false
+        check("looking at it ends the snooze too", await wait(2) { ws.snoozed.isEmpty && ws.attentionKeys.isEmpty })
+        // Not in its first seconds, where quitting means it failed to start.
+        _ = await wait(max(3.5 - Date().timeIntervalSince(codex.spawnedAt), 0)) { false }
+        codex.terminal.run("")
+        _ = await wait(5) { !codex.isRunning }
+        for tab in ws.tabs {
+            ws.close(tab.key)
+        }
+    }
+
+    /// A program started in the background in a session's folder, that
+    /// runs on after the shell that started it ended, is found and can be
+    /// stopped.
+    private func leftRunning(_ tmp: String) async {
+        let ws = workspace
+        let dir = tmp + "/left"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        ws.newSession(.shell, cwd: dir)
+        guard let shell = ws.currentTab else { return check("start a shell to leave something running", false) }
+        _ = await wait(5) { shell.terminal.pid != nil }
+        shell.terminal.run("sh -c 'sleep 301 >/dev/null 2>&1 &'")
+        check("what was left running is found, for the session in its folder", await wait(12) {
+            ws.leftovers[shell.key]?.contains { $0.command == "sleep 301" && $0.processes == 1 } == true
+        }, "\(ws.leftovers)")
+        let found = ws.leftovers[shell.key] ?? []
+        check("stopping it stops it", !found.isEmpty && stopLeftovers(found) == 0)
+        ws.requestScan?()
+        check("then it is gone", await wait(8) { ws.leftovers[shell.key] == nil }, "\(ws.leftovers)")
+        ws.close(shell.key)
+    }
+
+    /// A Claude session that stopped at the rate limit gets `continue`
+    /// typed in once the limit resets, if the user asked for it.
+    private func continueAtReset(_ tmp: String) async {
+        let ws = workspace
+        let id = UUID().uuidString.lowercased()
+        let key = SessionKey(.claude, id)
+        let config = tmp + "/claude-limit"
+        let input = tmp + "/claude-input"
+        let files = FileManager.default
+        try? files.createDirectory(atPath: config + "/projects/smoke", withIntermediateDirectories: true)
+        // It stopped ten minutes ago, and the limit reset three minutes ago.
+        let clock = DateFormatter()
+        clock.locale = Locale(identifier: "en_US_POSIX")
+        clock.dateFormat = "h:mma"
+        let reset = clock.string(from: Date().addingTimeInterval(-180)).lowercased()
+        let at = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-600))
+        let transcript = #"{"type":"user","cwd":"\#(tmp)","message":{"content":"smoke limit"}}"# + "\n"
+            + #"{"type":"assistant","timestamp":"\#(at)","isApiErrorMessage":true,"error":"rate_limit","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your session limit · resets \#(reset)"}]}}"#
+            + "\n"
+        files.createFile(atPath: config + "/projects/smoke/\(id).jsonl", contents: Data(transcript.utf8))
+        let oldConfig = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"]
+        setenv("CLAUDE_CONFIG_DIR", config, 1)
+        defer {
+            if let oldConfig { setenv("CLAUDE_CONFIG_DIR", oldConfig, 1) } else { unsetenv("CLAUDE_CONFIG_DIR") }
+        }
+
+        ws.requestScan?()
+        check("a stop at the rate limit is found, with when it resets", await wait(10) {
+            ws.limitStops[key].map { $0.reset != nil && $0.reset! < Date() } == true
+        }, "\(String(describing: ws.limitStops[key]))")
+        ws.open(key)
+        guard let tab = ws.currentTab, tab.key == key else { return check("resume the session that stopped", false) }
+        ws.setContinueAtReset(key, true)
+        _ = await wait(Workspace.settleTime - 1) { false }
+        check("not before it settled in", (try? String(contentsOfFile: input, encoding: .utf8)) == nil)
+        check("it is told to continue", await wait(8) {
+            (try? String(contentsOfFile: input, encoding: .utf8)) == "continue\n"
+        }, (try? String(contentsOfFile: input, encoding: .utf8)) ?? "no input")
+        check("once", ws.continueAtReset.contains(key) && ws.status?.contains("continue") == true)
+        ws.setContinueAtReset(key, false)
+        for tab in ws.tabs {
+            ws.close(tab.key)
+        }
     }
 
     /// A Claude session open in another app is listed and marked. Opening it

@@ -32,6 +32,45 @@ public func age(now: Date, _ t: Date) -> String {
     }
 }
 
+/// `s` on one line, cut to at most `max` characters with `…`.
+public func short(_ s: String, _ max: Int) -> String {
+    let s = s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    return s.count > max ? s.prefix(max) + "…" : s
+}
+
+/// An amount of memory, e.g. `840 MB` or `1.2 GB`.
+public func memorySize(_ bytes: UInt64) -> String {
+    ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .memory)
+}
+
+/// A time of day, e.g. `2:10 PM`, with `tomorrow` or the weekday when it
+/// is not today.
+public func clockTime(_ date: Date, now: Date = Date()) -> String {
+    let time = date.formatted(date: .omitted, time: .shortened)
+    return dayName(date, now: now).map { "\($0) \(time)" } ?? time
+}
+
+/// When something happens, to go after a verb: `at 2:10 PM`, `tomorrow at
+/// 9:00 AM` or `on Friday at 9:00 AM`.
+public func atTime(_ date: Date, now: Date = Date()) -> String {
+    let time = "at " + date.formatted(date: .omitted, time: .shortened)
+    switch dayName(date, now: now) {
+    case nil: return time
+    case "tomorrow": return "tomorrow \(time)"
+    case let day?: return "on \(day) \(time)"
+    }
+}
+
+/// Nil for today, else `tomorrow` or the weekday.
+private func dayName(_ date: Date, now: Date) -> String? {
+    let calendar = Calendar.current
+    if calendar.isDate(date, inSameDayAs: now) { return nil }
+    if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now), calendar.isDate(date, inSameDayAs: tomorrow) {
+        return "tomorrow"
+    }
+    return date.formatted(.dateTime.weekday(.wide))
+}
+
 /// The path with the home folder as `~`.
 public func tilde(_ path: String) -> String {
     let home = Paths.home

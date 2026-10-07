@@ -1,6 +1,6 @@
 //! Everything agentz knows about Claude Code and Codex, without any UI:
 //! session transcripts, projects, saved tabs, rate limits and the status
-//! line, and the processes running inside our shells.
+//! line, the processes running inside our shells, and what was left running.
 //!
 //! The app reaches it through UniFFI. `make` in `macos/` builds this as a
 //! static library and generates its Swift side, which becomes the app's
@@ -23,12 +23,12 @@ mod turns;
 mod usage;
 mod worktree;
 
-use procs::RunningElsewhere;
+use procs::{Leftover, RunningElsewhere};
 use sessions::{Session, SessionKey};
 use state::{SavedState, SavedTab};
 use turns::{TerminalSignal, TurnUpdate};
 use usage::Limits;
-use worktree::{Branch, NewWorktree, Worktree};
+use worktree::{Branch, Cleanup, NewWorktree, Worktree};
 
 uniffi::setup_scaffolding!();
 
@@ -132,6 +132,20 @@ pub fn worktree_has_changes(dir: PathBuf) -> bool {
     worktree::has_changes(&dir)
 }
 
+/// The linked worktrees of the repo `dir` is in, and whether each can be
+/// removed without losing anything. Takes a few git commands per worktree.
+#[uniffi::export]
+pub fn worktree_cleanup(dir: PathBuf) -> Result<Cleanup, CoreError> {
+    Ok(worktree::statuses(&dir)?)
+}
+
+/// Removes the linked worktree at `path`, with its ignored files, if that
+/// loses nothing; its branch stays. Fails, and keeps it, otherwise.
+#[uniffi::export]
+pub fn remove_worktree(dir: PathBuf, path: PathBuf) -> Result<(), CoreError> {
+    Ok(worktree::remove(&dir, &path)?)
+}
+
 // ---------- scanning ----------
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -178,6 +192,8 @@ pub struct Scan {
     pub worktrees: Vec<Worktree>,
     /// Claude sessions running outside this app.
     pub elsewhere: Vec<RunningElsewhere>,
+    /// Programs left running in the background, biggest first.
+    pub leftovers: Vec<Leftover>,
 }
 
 /// Reads transcripts, processes and rate limits. It keeps caches between
@@ -190,6 +206,7 @@ struct ScanState {
     sessions: sessions::Scanner,
     codex_usage: usage::CodexReader,
     codex_links: procs::CodexLinks,
+    leftover_args: procs::ArgsCache,
     /// The project of the folder the last scan was for. Asking git takes
     /// a process, so it is detected again only when it changed.
     project: Option<(PathBuf, project::Project)>,
@@ -242,6 +259,7 @@ impl SessionScanner {
             sessions: scanner,
             codex_usage,
             codex_links,
+            leftover_args,
             returned,
             ..
         } = &mut *s;
@@ -249,6 +267,7 @@ impl SessionScanner {
         let shells = procs::shell_processes(&pids(&shell_pids), &procs, &sessions, codex_links);
         let threads = procs::codex_threads(&pids(&new_codex_pids), &procs, &sessions, codex_links);
         let elsewhere = procs::claude_elsewhere(&procs, std::process::id(), None);
+        let leftovers = procs::leftovers(&procs, leftover_args);
         let limits = Limits {
             claude: usage::claude(),
             codex: codex_usage.read(scanner.codex_files()),
@@ -271,6 +290,7 @@ impl SessionScanner {
             limits,
             worktrees,
             elsewhere,
+            leftovers,
         }
     }
 }
@@ -283,6 +303,14 @@ pub fn claude_running_elsewhere(id: String) -> Option<RunningElsewhere> {
     procs::claude_elsewhere(&procs, std::process::id(), Some(&id))
         .into_iter()
         .max_by_key(|s| s.busy)
+}
+
+/// Stops these programs that were left running, and what they started:
+/// SIGTERM, then SIGKILL for what still runs 3 seconds later. Takes up to 4
+/// seconds. Returns how many processes still run.
+#[uniffi::export]
+pub fn stop_leftovers(leftovers: Vec<Leftover>) -> u32 {
+    u32::try_from(procs::stop(&leftovers)).unwrap_or(u32::MAX)
 }
 
 /// The process's current directory, even when its shell does not report

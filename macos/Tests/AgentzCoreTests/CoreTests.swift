@@ -305,3 +305,160 @@ final class WorktreeTests: XCTestCase {
         }
     }
 }
+
+final class CleanupTests: XCTestCase {
+    func testWhatCanGo() {
+        XCTAssertTrue(WorktreeState.merged.removable)
+        XCTAssertTrue(WorktreeState.missing.removable)
+        for kept in [WorktreeState.changes(files: 1), .notMerged(commits: 2), .locked, .inUse(program: "claude"), .unknown(problem: "x")] {
+            XCTAssertFalse(kept.removable, "\(kept)")
+        }
+        XCTAssertEqual(WorktreeState.merged.text(into: "main"), "Merged into main, nothing uncommitted")
+        XCTAssertEqual(WorktreeState.changes(files: 1).text(into: "main"), "1 uncommitted change")
+        XCTAssertEqual(WorktreeState.notMerged(commits: 3).text(into: "main"), "3 commits not in main")
+        XCTAssertEqual(WorktreeState.inUse(program: "claude").text(into: "main"), "claude runs in it")
+    }
+
+    func testRemovingOutsideARepoSaysWhy() {
+        XCTAssertThrowsError(try removeWorktree("/nonexistent-\(UUID().uuidString)", "/x")) { error in
+            XCTAssertTrue(errorMessage(error).contains("not in a git repo"), errorMessage(error))
+        }
+    }
+}
+
+final class LimitResetTests: XCTestCase {
+    private func utc(_ text: String) -> Date {
+        ISO8601DateFormatter().date(from: text)!
+    }
+
+    func testClaudeSaysWhenItResets() {
+        // 12:32 in Istanbul (UTC+3).
+        let at = utc("2026-09-03T09:32:07Z")
+        XCTAssertEqual(limitReset("You've hit your session limit · resets 2:10pm (Europe/Istanbul)", at: at), utc("2026-09-03T11:10:00Z"))
+        // Earlier in the day than the stop: tomorrow.
+        XCTAssertEqual(limitReset("resets 9am (Europe/Istanbul)", at: at), utc("2026-09-04T06:00:00Z"))
+        XCTAssertEqual(limitReset("resets at 4pm (UTC)", at: at), utc("2026-09-03T16:00:00Z"))
+        XCTAssertEqual(limitReset("resets 12am (UTC)", at: at), utc("2026-09-04T00:00:00Z"))
+        XCTAssertEqual(limitReset("resets 12pm (UTC)", at: at), utc("2026-09-03T12:00:00Z"))
+        // A weekly limit names the day; a day before the stop is next year.
+        XCTAssertEqual(limitReset("You've hit your weekly limit · resets Sep 5 at 6:19pm (Europe/London)", at: at), utc("2026-09-05T17:19:00Z"))
+        XCTAssertEqual(limitReset("resets Aug 31 at 6pm (UTC)", at: at), utc("2027-08-31T18:00:00Z"))
+        // The spend limit message names the session limit's reset.
+        XCTAssertEqual(
+            limitReset("You've hit your monthly spend limit · raise it at claude.ai · your session limit resets 2:10pm (Europe/Istanbul)", at: at),
+            utc("2026-09-03T11:10:00Z")
+        )
+        // Without a zone, this Mac's.
+        let local = limitReset("resets 11:30pm", at: at)!
+        let c = Calendar.current.dateComponents([.hour, .minute], from: local)
+        XCTAssertEqual([c.hour, c.minute], [23, 30])
+        XCTAssertGreaterThan(local, at)
+        XCTAssertNil(limitReset("API Error: 500 Internal server error.", at: at))
+        XCTAssertNil(limitReset("resets 13pm (UTC)", at: at))
+    }
+
+    func testCodexSaysWhenToTryAgain() {
+        let at = utc("2026-07-31T07:19:09Z")
+        let reset = limitReset("You've hit your usage limit. Upgrade to Pro, or try again at Aug 5th, 2026 9:34 AM.", at: at)!
+        let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: reset)
+        XCTAssertEqual([c.year, c.month, c.day, c.hour, c.minute], [2026, 8, 5, 9, 34])
+        let pm = limitReset("try again at Sep 28th, 2026 1:05 PM", at: at)!
+        XCTAssertEqual(Calendar.current.component(.hour, from: pm), 13)
+    }
+
+    func testTheUsedUpWindowWhenTheAgentSaysNoTime() {
+        let at = Date(timeIntervalSince1970: 1000)
+        let usage = Usage(session: Window(used: 100, resetsAt: 5000), week: Window(used: 40, resetsAt: 90000))
+        XCTAssertEqual(limitReset(usage, after: at), Date(timeIntervalSince1970: 5000))
+        let both = Usage(session: Window(used: 100, resetsAt: 5000), week: Window(used: 100, resetsAt: 90000))
+        XCTAssertEqual(limitReset(both, after: at), Date(timeIntervalSince1970: 90000))
+        XCTAssertNil(limitReset(Usage(session: Window(used: 100, resetsAt: 500), week: nil), after: at))
+        XCTAssertNil(limitReset(nil, after: at))
+    }
+}
+
+final class NoticeTests: XCTestCase {
+    private let a = SessionKey(.claude, "a"), b = SessionKey(.codex, "b"), c = SessionKey(.claude, "c")
+
+    private func notice(_ key: SessionKey, _ message: String? = nil) -> SessionNotice {
+        SessionNotice(key: key, heading: "\(key.agent == .claude ? "Claude" : "Codex") is waiting", title: "Task \(key.id)", message: message)
+    }
+
+    func testOneNoticeIsAboutItsSession() {
+        var batcher = NoticeBatcher()
+        XCTAssertTrue(batcher.add(notice(a, "Done:   OK")))
+        let (post, replaced) = batcher.flush()
+        XCTAssertEqual(post, NoticePost(id: "claude:a", title: "Claude is waiting", body: "Task a: Done: OK", keys: [a]))
+        XCTAssertEqual(replaced, [])
+        XCTAssertNil(batcher.flush().post)
+    }
+
+    func testNoticesAtTheSameMomentAreOne() {
+        var batcher = NoticeBatcher()
+        XCTAssertTrue(batcher.add(notice(a)))
+        XCTAssertFalse(batcher.add(notice(b, "Needs your permission")))
+        // A newer one about the same session takes the older one's place.
+        XCTAssertFalse(batcher.add(notice(a, "Done")))
+        let post = batcher.flush().post!
+        XCTAssertEqual(post.title, "2 sessions need you")
+        XCTAssertEqual(post.body, "Task b: Needs your permission\nTask a: Done")
+        XCTAssertEqual(Set(post.keys), [a, b])
+    }
+
+    func testANotificationGoesOnceItsSessionsWereSeen() {
+        var batcher = NoticeBatcher()
+        _ = batcher.add(notice(a))
+        _ = batcher.add(notice(b))
+        let both = batcher.flush().post!.id
+        _ = batcher.add(notice(c))
+        let single = batcher.flush().post!.id
+        XCTAssertEqual(batcher.seen(a), [])
+        XCTAssertEqual(batcher.seen(c), [single])
+        XCTAssertEqual(batcher.seen(b), [both])
+        XCTAssertEqual(batcher.shown, [:])
+        // Seeing it before it is shown drops it.
+        _ = batcher.add(notice(a))
+        XCTAssertEqual(batcher.seen(a), [])
+        XCTAssertNil(batcher.flush().post)
+    }
+
+    func testANewerNotificationTakesTheOlderOnesPlace() {
+        var batcher = NoticeBatcher()
+        _ = batcher.add(notice(a))
+        let first = batcher.flush().post!.id
+        _ = batcher.add(notice(a))
+        _ = batcher.add(notice(b))
+        let (post, replaced) = batcher.flush()
+        XCTAssertEqual(replaced, [first])
+        // One about the same single session has the same id, so macOS
+        // replaces it by itself.
+        _ = batcher.add(notice(c))
+        let one = batcher.flush().post!.id
+        _ = batcher.add(notice(c))
+        let again = batcher.flush()
+        XCTAssertEqual(again.post?.id, one)
+        XCTAssertEqual(again.replaced, [])
+        XCTAssertEqual(Set(batcher.shown.keys), [post!.id, one])
+    }
+}
+
+final class TextTests: XCTestCase {
+    func testShortAndSizes() {
+        XCTAssertEqual(short("a\n  b", 10), "a b")
+        XCTAssertEqual(short("abcdef", 3), "abc…")
+        // In this Mac's language: 1.2 GB, or 1,2 GB.
+        let size = memorySize(1_288_490_189)
+        XCTAssertTrue(size.hasPrefix("1") && size.contains("2") && size.hasSuffix("GB"), size)
+    }
+
+    func testTimesOfDay() {
+        let now = Calendar.current.date(bySettingHour: 10, minute: 0, second: 0, of: Date())!
+        let later = now.addingTimeInterval(3600)
+        let time = later.formatted(date: .omitted, time: .shortened)
+        XCTAssertEqual(clockTime(later, now: now), time)
+        XCTAssertEqual(atTime(later, now: now), "at \(time)")
+        let tomorrow = now.addingTimeInterval(86400)
+        XCTAssertEqual(atTime(tomorrow, now: now), "tomorrow at \(tomorrow.formatted(date: .omitted, time: .shortened))")
+        XCTAssertTrue(atTime(now.addingTimeInterval(3 * 86400), now: now).hasPrefix("on "))
+    }
+}
