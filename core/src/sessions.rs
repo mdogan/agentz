@@ -13,6 +13,8 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::action::{self, Action};
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
@@ -48,6 +50,11 @@ pub struct Session {
     /// The agent stopped at its plan's rate limit, and the session did not
     /// go on since.
     pub limit: Option<LimitStop>,
+    /// When the last turn started: the user's last prompt to Claude, the
+    /// start of Codex's last task.
+    pub turn_started: Option<SystemTime>,
+    /// The last tool the agent called in that turn.
+    pub action: Option<Action>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -81,6 +88,8 @@ struct Parsed {
     pr: Option<PullRequest>,
     /// The last rate limit stop, and when it was, if the transcript says.
     limit: Option<(String, Option<SystemTime>)>,
+    turn_started: Option<SystemTime>,
+    action: Option<Action>,
     skip: bool,
 }
 
@@ -234,6 +243,8 @@ impl Scanner {
                 message,
                 at: at.unwrap_or(entry.mtime),
             }),
+            turn_started: p.turn_started,
+            action: p.action.clone(),
         })
     }
 }
@@ -285,6 +296,9 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
     }
     let mut reader = BufReader::new(file);
     let mut line = String::new();
+    // Claude calls tools often, and only the last call matters, so only
+    // that one is parsed, after the loop.
+    let mut last_call = String::new();
     loop {
         line.clear();
         let n = match reader.read_line(&mut line) {
@@ -297,6 +311,18 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
         }
         p.offset += n as u64;
 
+        if line.contains("\"type\":\"tool_use\"") && line.contains("\"type\":\"assistant\"") {
+            last_call.clone_from(&line);
+        } else if line.contains("\"type\":\"user\"")
+            // Not a tool's result, which most of them are.
+            && !line.contains("\"tool_use_id\"")
+            && let Ok(v) = serde_json::from_str::<Value>(&line)
+            && is_prompt(&v)
+        {
+            p.turn_started = v["timestamp"].as_str().and_then(parse_time);
+            p.action = None;
+            last_call.clear();
+        }
         if let Some(branch) = git_branch(&line) {
             p.branch = branch;
         }
@@ -354,6 +380,12 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
             p.cwd = str_field(&v, "cwd");
         }
     }
+    if let Ok(v) = serde_json::from_str::<Value>(&last_call)
+        && v["isSidechain"] != true
+        && let Some(action) = action::claude(&v)
+    {
+        p.action = Some(action);
+    }
     p
 }
 
@@ -389,6 +421,10 @@ fn parse_codex(path: &Path) -> Parsed {
             }
             continue;
         }
+        if v["type"] == "event_msg" && payload["type"] == "task_started" {
+            p.turn_started = v["timestamp"].as_str().and_then(parse_time);
+            continue;
+        }
         let is_user_msg = v["type"] == "response_item"
             && payload["type"] == "message"
             && payload["role"] == "user";
@@ -402,24 +438,35 @@ fn parse_codex(path: &Path) -> Parsed {
 }
 
 /// True for a Claude transcript line that says the session went on: an
-/// answer from the model, or a prompt the user typed. Not for what Claude
-/// adds by itself, like the output of a `/usage` the user ran.
+/// answer from the model, or a prompt the user typed.
 fn goes_on(v: &Value) -> bool {
     match v["type"].as_str() {
         Some("assistant") => v["isApiErrorMessage"] != true,
-        Some("user") => {
-            v["isMeta"] != true
-                && message_text(&v["message"]["content"])
-                    .and_then(clean_prompt)
-                    .is_some()
-        }
-        _ => false,
+        _ => is_prompt(v),
     }
 }
 
-/// Reads the rest of a Codex rollout, from where `p` stopped, for a stop
-/// at the rate limit: a turn that ended with `usage_limit_exceeded`. A new
-/// turn means it went on.
+/// True for a Claude transcript line with a prompt the user typed. Not for
+/// what Claude adds by itself, like the output of a `/usage` the user ran.
+fn is_prompt(v: &Value) -> bool {
+    v["type"] == "user"
+        && v["isMeta"] != true
+        && message_text(&v["message"]["content"])
+            .and_then(clean_prompt)
+            .is_some()
+}
+
+/// Codex's tool calls, as `response_item` payload types.
+const CODEX_CALLS: [&str; 4] = [
+    "\"function_call\"",
+    "\"custom_tool_call\"",
+    "\"local_shell_call\"",
+    "\"web_search_call\"",
+];
+
+/// Reads the rest of a Codex rollout, from where `p` stopped, for when its
+/// last turn started, its last tool call, and a stop at the rate limit: a
+/// turn that ended with `usage_limit_exceeded`. A new turn means it went on.
 fn parse_codex_tail(path: &Path, mut p: Parsed) -> Parsed {
     let Ok(mut file) = File::open(path) else {
         return p;
@@ -440,19 +487,29 @@ fn parse_codex_tail(path: &Path, mut p: Parsed) -> Parsed {
             break;
         }
         p.offset += n as u64;
-        let limit = line.contains("\"usage_limit_exceeded\"");
-        if !limit && !(p.limit.is_some() && line.contains("\"task_started\"")) {
+        if !line.contains("\"usage_limit_exceeded\"")
+            && !line.contains("\"task_started\"")
+            && !CODEX_CALLS.iter().any(|c| line.contains(c))
+        {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         let payload = &v["payload"];
+        if v["type"] == "response_item" {
+            if let Some(action) = action::codex(payload) {
+                p.action = Some(action);
+            }
+            continue;
+        }
         if v["type"] != "event_msg" {
             continue;
         }
         if payload["type"] == "task_started" {
             p.limit = None;
+            p.turn_started = v["timestamp"].as_str().and_then(parse_time);
+            p.action = None;
         } else if payload["error"]["codex_error_info"] == "usage_limit_exceeded"
             && let Some(message) = str_field(&payload["error"], "message")
         {
@@ -818,6 +875,106 @@ mod tests {
         let session = scanner.visit(&path, Agent::Codex).unwrap();
         assert_eq!(session.limit, None);
         assert_eq!(session.title, "go");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn claude_last_action_is_from_the_last_turn() {
+        let path =
+            std::env::temp_dir().join(format!("agentz-claude-{}.jsonl", uuid::Uuid::new_v4()));
+        let append = |text: &str| {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(text.as_bytes()).unwrap();
+        };
+        append(
+            r#"{"type":"user","cwd":"/work","timestamp":"2026-09-03T09:32:07.350Z","message":{"content":"run the tests"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/work/Makefile"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"t1","type":"tool_result","content":"test:"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"make test","description":"Run the tests"}}]}}
+"#,
+        );
+        let mut scanner = Scanner::default();
+        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        assert_eq!(
+            session.turn_started,
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_788_427_927_350))
+        );
+        assert_eq!(
+            session.action.map(|a| (a.kind, a.detail)),
+            Some((action::ActionKind::Command, "Run the tests".into()))
+        );
+        // A tool's result and what Claude adds by itself start no turn.
+        append(
+            r#"{"type":"user","message":{"content":[{"tool_use_id":"t2","type":"tool_result","content":"ok"}]}}
+{"type":"user","isMeta":true,"message":{"content":"Caveat: local commands"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"All pass."}]}}
+"#,
+        );
+        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        assert!(session.turn_started.is_some());
+        assert!(session.action.is_some());
+        // A new prompt starts a turn without an action.
+        append(
+            r#"{"type":"user","timestamp":"2026-09-03T10:00:00Z","message":{"content":"thanks"}}
+"#,
+        );
+        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        assert_eq!(
+            session.turn_started,
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_788_429_600))
+        );
+        assert_eq!(session.action, None);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn codex_last_action_is_from_the_last_task() {
+        let path = std::env::temp_dir().join(format!(
+            "agentz-codex-action-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        let append = |text: &str| {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(text.as_bytes()).unwrap();
+        };
+        // The first task starts before the first prompt.
+        append(
+            r#"{"type":"session_meta","payload":{"id":"c2","cwd":"/tmp","source":"cli","originator":"codex-tui"}}
+{"timestamp":"2026-09-03T09:32:07.350Z","type":"event_msg","payload":{"type":"task_started"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"build it"}]}}
+{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo build\"}"}}
+{"type":"response_item","payload":{"type":"function_call_output","output":"\"function_call\""}}
+{"type":"response_item","payload":{"type":"function_call","name":"write_stdin","arguments":"{\"session_id\":1}"}}
+"#,
+        );
+        let mut scanner = Scanner::default();
+        let session = scanner.visit(&path, Agent::Codex).unwrap();
+        assert_eq!(
+            session.turn_started,
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_788_427_927_350))
+        );
+        assert_eq!(
+            session.action.map(|a| (a.kind, a.detail)),
+            Some((action::ActionKind::Command, "cargo build".into()))
+        );
+        append(
+            r#"{"timestamp":"2026-09-03T10:00:00Z","type":"event_msg","payload":{"type":"task_started"}}
+"#,
+        );
+        let session = scanner.visit(&path, Agent::Codex).unwrap();
+        assert_eq!(
+            session.turn_started,
+            Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_788_429_600))
+        );
+        assert_eq!(session.action, None);
         fs::remove_file(path).unwrap();
     }
 

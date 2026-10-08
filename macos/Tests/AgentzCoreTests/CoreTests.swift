@@ -54,6 +54,10 @@ final class FormatTests: XCTestCase {
         XCTAssertEqual(age(now: now, now), "now")
         XCTAssertEqual(age(now: now, now - 300), "5m ago")
         XCTAssertEqual(age(now: now, now - 3 * 86400), "3d ago")
+        XCTAssertEqual(goingOn(-5), "0s")
+        XCTAssertEqual(goingOn(40), "40s")
+        XCTAssertEqual(goingOn(185), "3m")
+        XCTAssertEqual(goingOn(3600 + 5 * 60 + 59), "1h 5m")
     }
 
     func testShownBranch() {

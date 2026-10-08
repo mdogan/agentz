@@ -63,6 +63,10 @@ struct Row: Identifiable, Equatable {
     var branch: String?
     var pr: PullRequest?
     var updated: Date
+    /// When its agent's last turn started, and the last tool it called
+    /// since then.
+    var turnStarted: Date?
+    var action: Action?
     /// What the list sorts by, newest first. For a session with a tab of
     /// ours, when the tab started: new and resumed sessions go to the top
     /// and stay there, instead of moving up each time the agent writes.
@@ -667,7 +671,8 @@ final class Workspace {
             let place = place(s.cwd)
             return Row(
                 key: key, title: s.title, cwd: s.cwd, place: place, branch: shownBranch(s.branch, place: place), pr: s.pr,
-                updated: s.updated, order: order, pinned: tab?.pinned ?? false, active: tab != nil
+                updated: s.updated, turnStarted: s.turnStarted, action: s.action, order: order,
+                pinned: tab?.pinned ?? false, active: tab != nil
             )
         }
         // Sessions we started that have no transcript yet, and shells. A

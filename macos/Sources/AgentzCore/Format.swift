@@ -20,6 +20,12 @@ public func elapsed(_ seconds: TimeInterval) -> String {
     }
 }
 
+/// How long something has gone on, in whole minutes after the first one,
+/// e.g. `40s`, `3m` or `1h 5m`.
+public func goingOn(_ seconds: TimeInterval) -> String {
+    seconds < 60 ? elapsed(seconds) : elapsed((seconds / 60).rounded(.down) * 60)
+}
+
 /// How long ago `t` was, e.g. `now`, `5m ago`, `3d ago`.
 public func age(now: Date, _ t: Date) -> String {
     let s = UInt64(max(now.timeIntervalSince(t), 0))

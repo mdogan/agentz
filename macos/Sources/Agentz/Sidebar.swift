@@ -679,6 +679,8 @@ private struct RowView: View {
                         continueLink
                     }
                     .font(.system(size: 11))
+                } else if working {
+                    activity
                 } else {
                     details
                 }
@@ -732,6 +734,34 @@ private struct RowView: View {
                     .help("Left running in its folder:\n" + leftovers.map {
                         "\($0.command): \(memorySize($0.memory)), for \(elapsed(now.timeIntervalSince($0.started)))"
                     }.joined(separator: "\n"))
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(look.secondary)
+    }
+
+    /// Its agent works, here or in another app.
+    private var working: Bool {
+        row.key.agent != .shell && (busy || elsewhere?.busy == true)
+    }
+
+    /// What the agent does, in place of where and when it ran: the last
+    /// tool it called, and how long the turn has gone on.
+    private var activity: some View {
+        HStack(spacing: 0) {
+            Group {
+                if let action = row.action {
+                    Text("\(Image(systemName: action.kind.symbol)) \(action.detail)")
+                        .help("\(action.kind.title): \(action.detail)")
+                } else {
+                    Text("Working")
+                }
+            }
+            .lineLimit(1)
+            if let started = row.turnStarted {
+                Text(" · \(goingOn(now.timeIntervalSince(started)))")
+                    .fixedSize()
+                    .help("Working since \(clockTime(started, now: now))")
             }
         }
         .font(.system(size: 11))
@@ -817,6 +847,32 @@ private struct RowView: View {
                     .foregroundStyle(look.secondary)
                     .help("Running in \(elsewhere.appName)")
             }
+        }
+    }
+}
+
+extension ActionKind {
+    var symbol: String {
+        switch self {
+        case .command: "terminal"
+        case .read: "doc.text"
+        case .edit: "pencil"
+        case .search: "magnifyingglass"
+        case .web: "globe"
+        case .agent: "person.2"
+        case .tool: "wrench.and.screwdriver"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .command: "Command"
+        case .read: "Read"
+        case .edit: "Edit"
+        case .search: "Search"
+        case .web: "Web"
+        case .agent: "Sub-agent"
+        case .tool: "Tool"
         }
     }
 }
