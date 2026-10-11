@@ -4,7 +4,7 @@ A native macOS app that holds your Claude Code and Codex sessions in one place: 
 
 ## Build and install
 
-Needs Xcode (Swift 6), Rust and macOS 14 or later. The first build downloads a prebuilt Ghostty library.
+Needs Xcode (Swift 6.2 or later), Rust and macOS 14 or later. The first build downloads a prebuilt Ghostty library.
 
 ```sh
 cd macos

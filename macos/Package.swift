@@ -10,7 +10,7 @@ let package = Package(
         // Ghostty's full embedding API (renderer, input, PTY) as a prebuilt
         // XCFramework, and Ghostty's themes for when Ghostty.app is not
         // installed. Only Sources/Agentz/Terminal.swift imports them.
-        .package(url: "https://github.com/Lakr233/libghostty-spm.git", exact: "1.6.20260922"),
+        .package(url: "https://github.com/Lakr233/libghostty-spm.git", exact: "2.2.2026101003"),
     ],
     targets: [
         // The Rust core (../core). Built by build-core.sh.
