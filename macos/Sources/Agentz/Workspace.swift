@@ -292,6 +292,7 @@ final class Workspace {
             onLayout?()
         }
     }
+    @ObservationIgnored let sleepBlocker = SleepBlocker()
     /// Where new sessions start: the top of the project's git worktree.
     @ObservationIgnored private(set) var root: String
     @ObservationIgnored private var statusAt = Date.distantPast
@@ -789,6 +790,11 @@ final class Workspace {
         if linked != currentLinked { currentLinked = linked }
         let other = otherTab?.linked
         if other != otherLinked { otherLinked = other }
+        // All agents count, even outside the shown panes or list filters.
+        // Shell commands and programs left running do not count as agents.
+        sleepBlocker.setWorking(tabs.contains {
+            $0.isBusy && ($0.key.agent != .shell || $0.linked != nil)
+        } || elsewhere.values.contains { $0.busy })
     }
 
     func isCurrent(_ key: SessionKey) -> Bool {

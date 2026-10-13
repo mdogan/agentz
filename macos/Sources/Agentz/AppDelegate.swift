@@ -251,6 +251,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         return .terminateNow
     }
 
+    func applicationWillTerminate(_: Notification) {
+        tickTimer?.invalidate()
+        workspace?.sleepBlocker.setWorking(false)
+    }
+
     private func confirm(_ message: String, _ info: String, button: String) -> Bool {
         let alert = NSAlert()
         alert.messageText = message

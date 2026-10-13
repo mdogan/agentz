@@ -517,8 +517,77 @@ final class SmokeTest {
         await awayAndLater(tmp)
         await leftRunning(tmp)
         await continueAtReset(tmp)
+        await sleepWhileWorking(tmp)
         await runningElsewhere(tmp)
         finish(nil)
+    }
+
+    /// Drives busy/idle signals through real terminals and the workspace:
+    /// hidden and filtered agents still count, ordinary shells do not.
+    private func sleepWhileWorking(_ tmp: String) async {
+        let ws = workspace
+        let oldElsewhere = ws.elsewhere
+        // Ignore real agents outside this smoke run for these checks.
+        func applyElsewhere(_ elsewhere: [RunningElsewhere]) {
+            ws.apply(Scan(sessions: nil, shells: [], codexThreads: [:], limits: ws.limits,
+                          worktrees: ws.worktrees, elsewhere: elsewhere, leftovers: []), dir: tmp)
+        }
+        applyElsewhere([])
+        defer {
+            applyElsewhere(Array(oldElsewhere.values))
+            ws.filter = ""
+            for tab in ws.tabs { ws.close(tab.key) }
+        }
+        ws.newSession(.shell, cwd: tmp)
+        guard let shell = ws.currentTab else { return check("shell for sleep checks", false) }
+        shell.turns.receive(.progress(true))
+        ws.tick()
+        check("shell progress does not block sleep", !ws.sleepBlocker.isBlocking)
+        shell.linked = SessionKey(.claude, "sleep-linked")
+        ws.tick()
+        check("an agent linked to a shell blocks sleep", ws.sleepBlocker.isBlocking)
+        shell.linked = nil
+        ws.tick()
+
+        ws.start(.claude, resume: nil, cwd: tmp, title: "Sleep check 1")
+        guard let first = ws.currentTab else { return check("first agent for sleep checks", false) }
+        first.turns.receive(.progress(true))
+        ws.tick()
+        check("a working agent blocks sleep", ws.sleepBlocker.isBlocking)
+        ws.start(.claude, resume: nil, cwd: tmp, title: "Sleep check 2")
+        guard let second = ws.currentTab else { return check("second agent for sleep checks", false) }
+        second.turns.receive(.progress(true))
+        ws.tick()
+        first.turns.receive(.progress(false))
+        ws.tick()
+        check("one idle agent does not release another's sleep blocker", ws.sleepBlocker.isBlocking)
+        ws.open(shell.key)
+        ws.filter = "no session matches this sleep check"
+        ws.tick()
+        check("an agent off screen and filtered out still blocks sleep", ws.rows.isEmpty && ws.sleepBlocker.isBlocking)
+        second.turns.receive(.progress(false))
+        ws.tick()
+        check("all agents idle releases the sleep blocker", !ws.sleepBlocker.isBlocking)
+        second.turns.receive(.progress(true))
+        ws.tick()
+        ws.close(second.key)
+        check("closing the last working agent releases the sleep blocker", !ws.sleepBlocker.isBlocking)
+
+        first.turns.receive(.progress(true))
+        ws.tick()
+        check("another turn blocks sleep again", ws.sleepBlocker.isBlocking)
+        first.terminal.run("")
+        check("an agent exiting releases the sleep blocker", await wait(5) {
+            applyElsewhere([])
+            return !first.isRunning && !ws.sleepBlocker.isBlocking
+        })
+        applyElsewhere([RunningElsewhere(id: "sleep-elsewhere", busy: true, app: nil)])
+        check("a working agent in another app blocks sleep", ws.sleepBlocker.isBlocking)
+        applyElsewhere([RunningElsewhere(id: "sleep-elsewhere", busy: false, app: nil)])
+        check("an idle agent in another app releases the sleep blocker", !ws.sleepBlocker.isBlocking)
+        applyElsewhere([RunningElsewhere(id: "sleep-elsewhere", busy: true, app: nil)])
+        applyElsewhere([])
+        check("an outside agent exiting releases the sleep blocker", !ws.sleepBlocker.isBlocking)
     }
 
     /// Away from the Mac, an agent in front of the user still tells them
