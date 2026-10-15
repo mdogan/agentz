@@ -24,6 +24,9 @@ struct SidebarActions {
     var start: (_ agent: Agent, _ dir: String, _ repo: String) -> Void
     /// Asks for a folder to start the agent in.
     var chooseFolder: (Agent) -> String?
+    /// Asks for a name and a place, and makes a new folder to start the
+    /// agent in.
+    var createFolder: (Agent) -> String?
     var recentFolders: () -> [String]
     var clearRecentFolders: () -> Void
     var notificationSettings: () -> Void
@@ -177,6 +180,9 @@ struct SidebarView: View {
         }
         menu.addItem(MenuAction("Open Folder…") {
             if let dir = actions.chooseFolder(agent) { actions.start(agent, dir, dir) }
+        })
+        menu.addItem(MenuAction("Create Folder…") {
+            if let dir = actions.createFolder(agent) { actions.start(agent, dir, dir) }
         })
         if !repos.isEmpty {
             menu.addItem(MenuAction("Clear Recent Folders", actions.clearRecentFolders))

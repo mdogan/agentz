@@ -73,6 +73,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 chooseFolder: { [weak self] agent in
                     self?.chooseFolder("Start a new \(agent.displayName) session in this folder.", prompt: "Start")
                 },
+                createFolder: { [weak self] agent in
+                    self?.createFolder("Start a new \(agent.displayName) session in a new folder.")
+                },
                 recentFolders: { UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? [] },
                 clearRecentFolders: { UserDefaults.standard.removeObject(forKey: Self.recentsKey) },
                 notificationSettings: { [weak self] in self?.notificationSettings(nil) },
@@ -284,6 +287,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         panel.message = message
         if let dir = workspace?.projectDir { panel.directoryURL = URL(fileURLWithPath: dir) }
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return url.path
+    }
+
+    /// Asks for a folder name and where to put it, by default next to the
+    /// current project, and makes the folder. A folder that is already
+    /// there is used as it is: nothing in it is replaced.
+    private func createFolder(_ message: String) -> String? {
+        let panel = NSSavePanel()
+        panel.title = "Create Folder"
+        panel.prompt = "Create"
+        panel.message = message
+        panel.nameFieldLabel = "Folder Name:"
+        panel.canCreateDirectories = true
+        if let dir = workspace?.projectDir {
+            let parent = dir == NSHomeDirectory() ? dir : URL(fileURLWithPath: dir).deletingLastPathComponent().path
+            panel.directoryURL = URL(fileURLWithPath: parent)
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        } catch {
+            workspace?.setStatus("Could not create \(tilde(url.path)): \(error.localizedDescription)")
+            return nil
+        }
         return url.path
     }
 
