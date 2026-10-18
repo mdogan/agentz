@@ -407,6 +407,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if SmokeTest.logPath == nil { UserDefaults.standard.set(controller.autoHide, forKey: Self.autoHideKey) }
     }
 
+    /// The terminal the user works in: the quick terminal's while it has
+    /// the keyboard, or else the shown session's.
+    private var activeTerminal: Terminal? {
+        if let quick = quickTerminal, quick.isKey { return quick.terminal }
+        return workspace?.currentTab?.terminal
+    }
+
+    @objc func find(_: Any?) {
+        if let quick = quickTerminal, quick.isKey {
+            quick.terminal?.showFind()
+        } else {
+            windowController?.showFind()
+        }
+    }
+
+    @objc func findNext(_: Any?) { activeTerminal?.findNext() }
+    @objc func findPrevious(_: Any?) { activeTerminal?.findPrevious() }
+
     @objc func splitRight(_: Any?) { workspace?.toggleSplit(.right) }
     @objc func splitDown(_: Any?) { workspace?.toggleSplit(.down) }
     @objc func unsplit(_: Any?) { workspace?.unsplit() }
@@ -495,6 +513,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return inQuickTerminal || workspace.currentTab != nil
         case #selector(focusTerminal(_:)):
             return workspace.currentTab != nil
+        case #selector(find(_:)):
+            return activeTerminal != nil
+        case #selector(findNext(_:)), #selector(findPrevious(_:)):
+            return activeTerminal?.isFinding == true
         case #selector(splitRight(_:)):
             item.state = workspace.panes.split == .right ? .on : .off
         case #selector(splitDown(_:)):
@@ -547,6 +569,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        add(edit, "Find…", #selector(find(_:)), "f")
+        add(edit, "Find Next", #selector(findNext(_:)), "g")
+        add(edit, "Find Previous", #selector(findPrevious(_:)), "G")
 
         let view = submenu(main, "View")
         for (i, range) in SessionRange.allCases.enumerated() {
@@ -560,7 +586,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         add(view, "Go to Session List", #selector(focusList(_:)), "l")
         add(view, "Go to Terminal", #selector(focusTerminal(_:)), "j")
         add(view, "Go to Other Pane", #selector(focusOtherPane(_:)), "j").keyEquivalentModifierMask = [.command, .option]
-        add(view, "Filter Sessions", #selector(focusFilter(_:)), "f")
+        add(view, "Filter Sessions", #selector(focusFilter(_:)), "F")
         add(view, "Next Session", #selector(nextSession(_:)), "]")
         add(view, "Previous Session", #selector(previousSession(_:)), "[")
         add(view, "Next Session That Needs You", #selector(nextAttention(_:)), "A")

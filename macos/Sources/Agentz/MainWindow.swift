@@ -143,6 +143,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    /// The shown session's find bar, with the keyboard.
+    func showFind() {
+        guard let tab = workspace.currentTab else { return }
+        // A list shown from the keyboard is done with.
+        if overlay.held { overlay.hide() }
+        tab.terminal.showFind()
+    }
+
     func focusSidebar(_ target: SidebarFocus.Target) {
         if autoHide {
             overlay.show(held: true)
@@ -426,7 +434,7 @@ final class PaneViewController: NSViewController {
         let layout = workspace.panes
         let live = Set(tabs.map { ObjectIdentifier($0.terminal.view) })
         for sub in terminals.subviews where !live.contains(ObjectIdentifier(sub)) {
-            if view.window?.firstResponder === sub { view.window?.makeFirstResponder(nil) }
+            if (view.window?.firstResponder as? NSView)?.isDescendant(of: sub) == true { view.window?.makeFirstResponder(nil) }
             sub.removeFromSuperview()
         }
         let rects = paneRects(layout.split, ratio: layout.ratio)
@@ -440,8 +448,9 @@ final class PaneViewController: NSViewController {
                 terminals.addSubview(v)
             }
             // A hidden first responder hands the keyboard to the next view
-            // on screen, which may be the other pane's terminal.
-            if pane == nil, view.window?.firstResponder === v { view.window?.makeFirstResponder(nil) }
+            // on screen, which may be the other pane's terminal. Its find
+            // bar's field too.
+            if pane == nil, tab.terminal.isFocused { view.window?.makeFirstResponder(nil) }
             tab.terminal.setVisible(pane != nil)
         }
         layoutPanes()

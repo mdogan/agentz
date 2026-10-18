@@ -55,7 +55,7 @@ You can also drag a session from the list onto the terminal. With one pane, it g
 - Closing the session in a pane (⌘W), or exiting its shell, also ends the split, and the other pane takes the space. A hidden split ends the same way, and also when one of its agents quits.
 - The splits come back on the next launch with the open tabs, hidden ones too.
 
-**View › Auto-Hide Session List** gives the terminal the whole window. Rest the mouse at the window's left edge and the list slides in over the terminal; it slides away once the mouse leaves it. While you type in its filter, it stays. ⌘L, ⌘F and ⌃⌘S show it too, and then it stays until you go back to the terminal (⎋, ⌘J, or opening a session). A click outside it always hides it. The terminal keeps its size while the list comes and goes. Turn the setting off to put the list back next to the terminal.
+**View › Auto-Hide Session List** gives the terminal the whole window. Rest the mouse at the window's left edge and the list slides in over the terminal; it slides away once the mouse leaves it. While you type in its filter, it stays. ⌘L, ⇧⌘F and ⌃⌘S show it too, and then it stays until you go back to the terminal (⎋, ⌘J, or opening a session). A click outside it always hides it. The terminal keeps its size while the list comes and goes. Turn the setting off to put the list back next to the terminal.
 
 **View › Quick Terminal**, or its global key (see below), slides a shell of its own in from the edge of the screen (the top, unless set otherwise), over any app, like Ghostty's quick terminal. Do it again and it slides away, and the app you were in gets the keyboard back. Its shell keeps running while it is hidden. It also slides away when you click another window. When its shell exits, or you press ⌘W in it, it closes; the next one starts a new shell in your home folder.
 
@@ -74,12 +74,16 @@ You can also drag a session from the list onto the terminal. With one pane, it g
 | ⌘L / ⌘J | go to the session list / the terminal |
 | ⌘D / ⇧⌘D | split the pane right / down; again to unsplit |
 | ⌥⌘J | go to the other pane of a split |
-| ⌘F | filter sessions |
+| ⌘F | find in the terminal |
+| ⌘G / ⇧⌘G | next / previous match |
+| ⇧⌘F | filter sessions |
 | ⇧⌘I | show all sessions, or only today's again |
 | ⌃⌘S | hide or show the session list |
 | ⌘+ / ⌘- / ⌘0 | font size |
 | ⌘K | clear the screen |
 | ⌘/ | list all shortcuts (**Help › Keyboard Shortcuts**) |
+
+**Edit › Find…** (⌘F) finds text in the terminal you work in, as in Ghostty: a bar at its top right takes the text, and Ghostty highlights every match on the screen and in the scrollback. ↩ or ⌘G goes up to the next match, starting at the newest, and scrolls there; ⇧↩ or ⇧⌘G goes back down. Short text waits a moment before it is searched for. ⎋ closes the bar and ends the search; ⌘F brings it back with the same text. Each terminal has its own bar, the quick terminal too. Only what is in the terminal's buffer can be found: a program that draws a screen of its own, like an editor, keeps the rest of its text to itself.
 
 When an agent finishes or waits for your permission while you are not looking at it, you get a notification. Click it to go to that session. Several at the same moment become one notification ("3 sessions need you"), and a click on it goes to the next one. A notification goes away once you looked at its sessions. If notifications are off, the session list shows a button to turn them on.
 
@@ -95,5 +99,5 @@ Rate limits for Claude and Codex show at the bottom of the list. To also get Cla
 
 - The app uses your login shell's environment, so `PATH` and variables from your shell config work. `AGENTZ_CLAUDE_ARGS` and `AGENTZ_CODEX_ARGS` add flags to the agents, e.g. `AGENTZ_CLAUDE_ARGS="--model opus"`.
 - Terminals use your Ghostty config (`~/.config/ghostty/config`), including themes from Ghostty.app or `~/.config/ghostty/themes`. The session list takes its colors from the same theme. View > Theme picks any other Ghostty theme instead, and keeps it until you pick Follow Ghostty. Without Ghostty.app, the themes that come with the Ghostty library are used instead. `AGENTZ_GHOSTTY_CONFIG` points to another file (empty for none). Split panes follow Ghostty's `unfocused-split-opacity`, `unfocused-split-fill` and `split-divider-color`.
-- Terminals have Ghostty's macOS keybindings for editing, selecting and scrolling (⌘←, ⌥←, ⌘⌫, ⌘↑, ⇧→, …). Those for windows, tabs, splits and search are off, so ⌘N, ⌘T and ⌘W reach the menu. Your own keybinds still work.
+- Terminals have Ghostty's macOS keybindings for editing, selecting and scrolling (⌘←, ⌥←, ⌘⌫, ⌘↑, ⇧→, …). Those for windows, tabs, splits and search are off, so ⌘N, ⌘T, ⌘W and ⌘F reach the menu. Your own keybinds still work.
 - Dropping files on a terminal types their paths, as in Ghostty.

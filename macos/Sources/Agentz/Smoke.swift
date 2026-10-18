@@ -522,6 +522,7 @@ final class SmokeTest {
         await sleepWhileWorking(tmp)
         await runningElsewhere(tmp)
         await wheelWithoutClick(tmp)
+        await find(tmp)
         await quickTerminal(tmp)
         finish(nil)
     }
@@ -811,6 +812,42 @@ final class SmokeTest {
         check("the wheel reaches it without a click", await wait(3) { got().contains("\u{1B}[<64;") }, got().debugDescription)
         ws.close(shell.key)
         ws.close(other.key)
+    }
+
+    /// ⌘F: the find bar takes the keyboard, ↩ scrolls up to a match in the
+    /// scrollback, clicks go to the terminal or the bar, and ⎋ closes it.
+    private func find(_ tmp: String) async {
+        let ws = workspace
+        ws.newSession(.shell, cwd: tmp)
+        guard let shell = ws.currentTab else { return check("start a shell to find in", false) }
+        let t = shell.terminal
+        _ = await wait(5) { t.pid != nil }
+        // A line to find, with more than a screen of lines under it.
+        t.run("echo find-me; seq 300")
+        check("the output scrolls", await wait(5) { (t.scrollbar?.total ?? 0) > 300 }, "\(String(describing: t.scrollbar))")
+        let app = NSApp.delegate as! AppDelegate
+        let findNext = NSMenuItem(title: "", action: #selector(AppDelegate.findNext(_:)), keyEquivalent: "")
+        check("Find Next waits for the find bar", !app.validateMenuItem(findNext))
+        app.find(nil)
+        let editor = t.view.window?.firstResponder as? NSTextView
+        check("⌘F shows the find bar, with the keyboard", t.isFinding && t.isFocused && editor != nil)
+        check("Find Next works while it shows", app.validateMenuItem(findNext))
+        editor?.insertText("find-me", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let atBottom = { t.scrollbar.map { $0.offset + $0.len >= $0.total } ?? true }
+        editor?.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        check("↩ scrolls up to the match", await wait(3) { !atBottom() }, "\(String(describing: t.scrollbar))")
+        // Clicks reach the terminal under the bar, and the bar's field.
+        click(t.view, at: NSPoint(x: 40, y: 40))
+        check("a click in the terminal takes the keyboard, and the bar stays", t.view.window?.firstResponder === t.view && t.isFinding)
+        let bar = t.view.subviews.first { $0 is FindBar }
+        click(t.view, at: NSPoint(x: (bar?.frame.minX ?? 0) + 40, y: bar?.frame.midY ?? 0))
+        check("a click in the bar's field takes the keyboard back",
+              bar.map { (t.view.window?.firstResponder as? NSView)?.isDescendant(of: $0) == true } ?? false,
+              String(describing: t.view.window?.firstResponder))
+        (t.view.window?.firstResponder as? NSTextView)?.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        check("⎋ closes it, and the terminal has the keyboard again",
+              !t.isFinding && t.view.window?.firstResponder === t.view && !app.validateMenuItem(findNext))
+        ws.close(shell.key)
     }
 
     /// The quick terminal: a shell of its own, in no tab, that slides in

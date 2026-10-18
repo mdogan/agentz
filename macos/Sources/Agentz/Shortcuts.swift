@@ -28,8 +28,9 @@ func shortcutGroups(_ menu: NSMenu) -> [ShortcutGroup] {
             .map { (shortcut($0), $0.title) }
         return rows.isEmpty ? nil : ShortcutGroup(item.title, rows)
     }
-    // Keep in sync with the list's onKeyPress handlers in Sidebar.swift and
-    // the Ghostty keybinds in Terminal.swift.
+    // Keep in sync with the list's onKeyPress handlers in Sidebar.swift, the
+    // find bar's keys in FindBar.swift and the Ghostty keybinds in
+    // Terminal.swift.
     return fromMenus + [
         ShortcutGroup("Session List", [
             ("↑ / ↓", "Select the previous / next session"),
@@ -41,6 +42,11 @@ func shortcutGroups(_ menu: NSMenu) -> [ShortcutGroup] {
         ShortcutGroup("Filter", [
             ("↩", "Go to the session list"),
             ("⎋", "Clear the filter"),
+        ]),
+        ShortcutGroup("Find Bar", [
+            ("↩ / ↑", "Next match, up"),
+            ("⇧↩ / ↓", "Previous match, down"),
+            ("⎋", "Close the find bar"),
         ]),
         ShortcutGroup("Terminal", [
             ("⌘+ / ⌘- / ⌘0", "Bigger / smaller / default font"),

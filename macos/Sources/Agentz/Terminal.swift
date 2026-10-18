@@ -28,8 +28,13 @@ final class Terminal: NSObject {
     /// if not reported) and how long it ran. Needs the shell to mark its
     /// commands (OSC 133): Ghostty's shell integration or fish 4 does.
     var onCommandFinished: ((_ exitCode: Int?, _ seconds: TimeInterval) -> Void)?
-    /// Called when the terminal gets the keyboard, e.g. from a click.
+    /// Called when the terminal or its find bar gets the keyboard, e.g.
+    /// from a click.
     var onFocus: (() -> Void)?
+    /// Where the viewport is in the scrollback, as Ghostty last said.
+    private(set) var scrollbar: TerminalScrollbar?
+    /// Made when first shown.
+    private var findBar: FindBar?
     private var knownPid: Int32?
     private var exitWatch: DispatchSourceProcess?
     private let startedAt = Date()
@@ -101,8 +106,77 @@ final class Terminal: NSObject {
         view.acquireProgrammaticFocus()
     }
 
+    /// The terminal or its find bar has the keyboard.
     var isFocused: Bool {
-        view.window?.firstResponder === view
+        (view.window?.firstResponder as? NSView)?.isDescendant(of: view) == true
+    }
+
+    // MARK: - Find
+
+    /// The find bar shows.
+    var isFinding: Bool {
+        findBar.map { !$0.isHidden } ?? false
+    }
+
+    /// Shows the find bar at the top right and gives it the keyboard. The
+    /// text from last time is still there, selected, and searched for
+    /// again.
+    func showFind() {
+        let bar = findBar ?? makeFindBar()
+        if bar.isHidden {
+            let size = bar.fittingSize
+            bar.frame = NSRect(
+                x: view.bounds.maxX - size.width - 8, y: view.bounds.maxY - size.height - 8,
+                width: size.width, height: size.height
+            )
+            bar.isHidden = false
+            // Closing the bar ended the search.
+            if !bar.text.isEmpty { search(bar.text) }
+        }
+        bar.focus()
+    }
+
+    /// Hides the find bar and ends the search. The terminal gets the
+    /// keyboard if the bar had it.
+    func hideFind() {
+        guard let findBar, !findBar.isHidden else { return }
+        let hadKeyboard = findBar.hasKeyboard
+        findBar.isHidden = true
+        view.performBindingAction("end_search")
+        if hadKeyboard { focus() }
+    }
+
+    /// Up to the next match: the newest first, then older ones. Ghostty
+    /// scrolls to it.
+    func findNext() {
+        findBar?.searchNow()
+        view.performBindingAction("navigate_search:next")
+    }
+
+    /// Down to the previous match.
+    func findPrevious() {
+        findBar?.searchNow()
+        view.performBindingAction("navigate_search:previous")
+    }
+
+    /// Ghostty takes the text as it is, without escapes. Empty stops the
+    /// search.
+    private func search(_ text: String) {
+        view.performBindingAction("search:" + text)
+    }
+
+    private func makeFindBar() -> FindBar {
+        let bar = FindBar()
+        // Stays at the top right while the terminal changes size.
+        bar.autoresizingMask = [.minXMargin, .minYMargin]
+        bar.onSearch = { [weak self] text in self?.search(text) }
+        bar.onNext = { [weak self] in self?.findNext() }
+        bar.onPrevious = { [weak self] in self?.findPrevious() }
+        bar.onClose = { [weak self] in self?.hideFind() }
+        bar.onFocus = { [weak self] in self?.onFocus?() }
+        view.addSubview(bar)
+        findBar = bar
+        return bar
     }
 
     /// Types a command line and presses Enter.
@@ -144,6 +218,7 @@ extension Terminal:
     TerminalSurfaceDesktopNotificationDelegate,
     TerminalSurfacePwdDelegate,
     TerminalSurfaceMouseShapeDelegate,
+    TerminalSurfaceScrollbarDelegate,
     TerminalSurfaceClipboardConfirmationDelegate
 {
     func terminalDidChangeTitle(_ title: String) {
@@ -177,6 +252,10 @@ extension Terminal:
         case .notAllowed: .operationNotAllowed
         case .default, .other: .arrow
         }
+    }
+
+    func terminalDidUpdateScrollbar(_ scrollbar: TerminalScrollbar) {
+        self.scrollbar = scrollbar
     }
 
     /// Ghostty asks before a paste that could run commands, and before a
@@ -241,8 +320,11 @@ final class SurfaceView: TerminalView {
         didSet {
             guard cursor != oldValue else { return }
             window?.invalidateCursorRects(for: self)
-            // Cursor rects only apply on the next mouse move.
-            if let window, bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)) {
+            // Cursor rects only apply on the next mouse move. The find bar
+            // has its own.
+            if let window, let superview,
+               hitTest(superview.convert(window.mouseLocationOutsideOfEventStream, from: nil)) === self
+            {
                 cursor.set()
             }
         }

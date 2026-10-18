@@ -8,7 +8,7 @@ import AppKit
 /// - Resting the mouse at the window's left edge shows it. It hides again
 ///   once the mouse has been off it for a moment, unless its filter is
 ///   being typed in.
-/// - Shown from the keyboard (⌘L, ⌘F, ⌃⌘S), it is held: it stays until the
+/// - Shown from the keyboard (⌘L, ⇧⌘F, ⌃⌘S), it is held: it stays until the
 ///   terminal gets the focus.
 /// - A click outside it hides it.
 @MainActor
