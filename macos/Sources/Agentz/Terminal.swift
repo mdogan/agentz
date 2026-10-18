@@ -257,6 +257,17 @@ final class SurfaceView: TerminalView {
         addCursorRect(bounds, cursor: cursor)
     }
 
+    /// A program that took the mouse, like Claude Code, gets the wheel at
+    /// the last place Ghostty heard the mouse was, and nothing while that
+    /// is off the terminal. Ghostty hears it from moves and clicks only: a
+    /// new terminal starts off it, at (-1, -1), and one the mouse left
+    /// stays there. So a terminal shown under a still mouse, e.g. picked
+    /// in the list with the arrow keys, got no wheel until a click.
+    override func scrollWheel(with event: NSEvent) {
+        mouseMoved(with: event)
+        super.scrollWheel(with: event)
+    }
+
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         droppedText(sender.draggingPasteboard) == nil ? [] : .copy
     }

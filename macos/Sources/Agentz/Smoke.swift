@@ -521,6 +521,7 @@ final class SmokeTest {
         await continueAtReset(tmp)
         await sleepWhileWorking(tmp)
         await runningElsewhere(tmp)
+        await wheelWithoutClick(tmp)
         await quickTerminal(tmp)
         finish(nil)
     }
@@ -785,6 +786,33 @@ final class SmokeTest {
             && ws.status?.contains("another app") == true, "\(String(describing: ws.status))")
     }
 
+    /// The wheel over a terminal reaches its program without a click, also
+    /// when the mouse never moved over it: here it is picked in the list
+    /// from the keyboard, as with the arrow keys.
+    private func wheelWithoutClick(_ tmp: String) async {
+        let ws = workspace
+        ws.newSession(.shell, cwd: tmp)
+        guard let other = ws.currentTab else { return check("start a shell to pick first", false) }
+        ws.newSession(.shell, cwd: tmp)
+        guard let shell = ws.currentTab, shell !== other else { return check("start a shell to scroll in", false) }
+        _ = await wait(5) { shell.terminal.pid != nil }
+        // Takes the mouse, as Claude Code does, and writes down what it gets.
+        let file = tmp + "/mouse"
+        shell.terminal.run("printf '\\033[?1000h\\033[?1006h'; stty raw -echo; cat > \(shellQuote(file))")
+        let view = shell.terminal.view
+        check("the program takes the mouse", await wait(5) { view.isMouseCaptured })
+        pick(other.key)
+        window.focusSidebar(.list)
+        pick(shell.key)
+        check("the list keeps the keyboard", await wait(2) { !view.isHidden && !shell.terminal.isFocused && !other.terminal.isFocused })
+        scroll(view)
+        let got = { (try? String(contentsOfFile: file, encoding: .utf8)) ?? "" }
+        // An SGR report of button 64: the wheel turned up.
+        check("the wheel reaches it without a click", await wait(3) { got().contains("\u{1B}[<64;") }, got().debugDescription)
+        ws.close(shell.key)
+        ws.close(other.key)
+    }
+
     /// The quick terminal: a shell of its own, in no tab, that slides in
     /// and away and runs on meanwhile.
     private func quickTerminal(_ tmp: String) async {
@@ -900,6 +928,21 @@ private func click(_ view: NSView, at point: NSPoint) {
         ) else { continue }
         NSApp.sendEvent(event)
     }
+}
+
+/// One turn of the mouse wheel, up, over the middle of `view`, sent
+/// through its window like a real one.
+@MainActor
+private func scroll(_ view: NSView) {
+    guard let window = view.window,
+          let cg = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 1, wheel2: 0, wheel3: 0)
+    else { return }
+    // An event made this way has no window, so its place on the screen is
+    // its place in the window. The screen's y runs down from the top.
+    let point = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+    cg.location = CGPoint(x: point.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - point.y)
+    guard let event = NSEvent(cgEvent: cg) else { return }
+    window.sendEvent(event)
 }
 
 /// The mouse moving to `point` in `view`, with no button down.
