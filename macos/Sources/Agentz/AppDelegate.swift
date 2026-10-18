@@ -13,6 +13,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private var tickTimer: Timer?
     private var keyMonitor: Any?
     private var shortcutsWindow: ShortcutsWindowController?
+    private var quickTerminal: QuickTerminal?
+    /// The quick terminal's global key, from the Ghostty config.
+    private var hotKey: HotKey?
     /// Notices that come at the same moment become one notification.
     private var notices = NoticeBatcher()
 
@@ -63,6 +66,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         self.workspace = workspace
         let look = Look()
         self.look = look
+        let quick = QuickTerminal(settings: GhosttyApp.quickTerminal, look: look)
+        quickTerminal = quick
+        workspace.quickShellPid = { [weak quick] in quick?.shellPid }
         if SmokeTest.logPath == nil { remember(workspace.projectDir) }
         let controller = MainWindowController(
             workspace: workspace,
@@ -112,8 +118,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let scanner = Scanner(workspace)
         self.scanner = scanner
         scanner.start()
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak workspace] _ in
-            MainActor.assumeIsolated { workspace?.tick() }
+        tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak workspace, weak quick] _ in
+            MainActor.assumeIsolated {
+                workspace?.tick()
+                quick?.poll()
+            }
         }
         // Typing into a terminal starts a new turn, so the agent may tell
         // us again when it is done.
@@ -128,10 +137,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
 
         if let log = SmokeTest.logPath {
-            Task { await SmokeTest(workspace: workspace, window: controller, logPath: log).run() }
+            Task { await SmokeTest(workspace: workspace, window: controller, quick: quick, logPath: log).run() }
         } else if let saved {
             let failed = workspace.restore(saved)
             do { try saveTabs(failed) } catch { problem = "Could not keep unopened tabs: \(error)" }
+        }
+        // Not in the smoke test: the user may be using the key meanwhile.
+        if let trigger = quick.settings.hotKey, SmokeTest.logPath == nil {
+            hotKey = HotKey(trigger) { [weak quick] in quick?.toggle() }
+            if hotKey == nil { problem = "The quick terminal's key \(trigger.description) could not be set up." }
         }
         if let issue = GhosttyApp.configIssue {
             problem = "Your Ghostty config was not used: \(issue)"
@@ -225,7 +239,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
         guard let workspace, SmokeTest.logPath == nil else { return .terminateNow }
-        let (working, idle, commands) = workspace.quitCounts()
+        var (working, idle, commands) = workspace.quitCounts()
+        if quickTerminal?.terminal?.hasForegroundJob == true { commands += 1 }
         if working > 0 {
             guard confirm(
                 "\(plural(working, "agent is", "agents are")) working.",
@@ -315,6 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc func closeCurrent(_: Any?) {
+        if let quick = quickTerminal, quick.isKey { return quick.closeShell() }
         guard let key = workspace?.currentTab?.key else { return }
         closeSession(key)
     }
@@ -395,6 +411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     @objc func splitDown(_: Any?) { workspace?.toggleSplit(.down) }
     @objc func unsplit(_: Any?) { workspace?.unsplit() }
     @objc func focusOtherPane(_: Any?) { workspace?.focusOtherPane() }
+    @objc func toggleQuickTerminal(_: Any?) { quickTerminal?.toggle() }
 
     @objc func showShortcuts(_: Any?) {
         guard let menu = NSApp.mainMenu else { return }
@@ -450,8 +467,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
     }
 
+    /// What works on the session list and the shown session. It waits
+    /// while the quick terminal has the keyboard.
+    private static let sessionActions: Set<Selector> = [
+        #selector(newClaude(_:)), #selector(newCodex(_:)), #selector(newShell(_:)), #selector(togglePin(_:)),
+        #selector(toggleAllSessions(_:)), #selector(selectRange(_:)), #selector(focusList(_:)), #selector(focusFilter(_:)),
+        #selector(focusTerminal(_:)), #selector(nextSession(_:)), #selector(previousSession(_:)), #selector(nextAttention(_:)),
+        #selector(toggleSessionList(_:)), #selector(toggleAutoHide(_:)), #selector(splitRight(_:)), #selector(splitDown(_:)),
+        #selector(unsplit(_:)), #selector(focusOtherPane(_:)),
+    ]
+
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let workspace else { return false }
+        let inQuickTerminal = quickTerminal?.isKey == true
+        if inQuickTerminal, let action = item.action, Self.sessionActions.contains(action) { return false }
         switch item.action {
         case #selector(toggleAllSessions(_:)):
             item.state = workspace.range == .all ? .on : .off
@@ -460,7 +489,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         case #selector(togglePin(_:)):
             item.title = workspace.currentTab?.pinned == true ? "Unpin Session" : "Pin Session"
             return workspace.currentTab != nil
-        case #selector(closeCurrent(_:)), #selector(focusTerminal(_:)):
+        case #selector(closeCurrent(_:)):
+            // ⌘W in the quick terminal ends its shell.
+            item.title = inQuickTerminal ? "Close Quick Terminal" : "Close Session"
+            return inQuickTerminal || workspace.currentTab != nil
+        case #selector(focusTerminal(_:)):
             return workspace.currentTab != nil
         case #selector(splitRight(_:)):
             item.state = workspace.panes.split == .right ? .on : .off
@@ -472,6 +505,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return !workspace.attentionKeys.isEmpty
         case #selector(toggleAutoHide(_:)):
             item.state = windowController?.autoHide == true ? .on : .off
+        case #selector(toggleQuickTerminal(_:)):
+            item.state = quickTerminal?.isShown == true ? .on : .off
         default:
             break
         }
@@ -537,6 +572,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         add(view, "Split Right", #selector(splitRight(_:)), "d")
         add(view, "Split Down", #selector(splitDown(_:)), "D")
         add(view, "Unsplit", #selector(unsplit(_:)))
+        view.addItem(.separator())
+        let quick = add(view, "Quick Terminal", #selector(toggleQuickTerminal(_:)))
+        // Shows the global key. Without the hot key, e.g. when macOS
+        // refused it, the menu takes it while agentz is in front.
+        if let trigger = GhosttyApp.quickTerminal.hotKey, let key = HotKey.menuKey(trigger) {
+            quick.keyEquivalent = key
+            quick.keyEquivalentModifierMask = menuModifiers(trigger.modifiers)
+        }
         view.addItem(.separator())
         submenu(view, "Theme").delegate = self
 
@@ -634,6 +677,15 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
             }
         }
     }
+}
+
+private func menuModifiers(_ m: KeyTrigger.Modifiers) -> NSEvent.ModifierFlags {
+    var flags: NSEvent.ModifierFlags = []
+    if m.contains(.command) { flags.insert(.command) }
+    if m.contains(.shift) { flags.insert(.shift) }
+    if m.contains(.option) { flags.insert(.option) }
+    if m.contains(.control) { flags.insert(.control) }
+    return flags
 }
 
 private func plural(_ n: Int, _ one: String, _ many: String) -> String {

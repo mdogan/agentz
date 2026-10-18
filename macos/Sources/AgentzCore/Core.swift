@@ -66,6 +66,8 @@ public extension RunningElsewhere {
         switch app {
         case nil: "another app"
         case "Agentz": "another agentz window"
+        // QUICK_TERMINAL_APP in the Rust core.
+        case "Quick Terminal": "the quick terminal"
         case let app?: app
         }
     }

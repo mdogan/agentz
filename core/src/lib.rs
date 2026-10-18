@@ -247,8 +247,15 @@ impl SessionScanner {
 
     /// Everything the app shows. `dir` is the folder whose project the
     /// window shows; `shell_pids` are our shells; `new_codex_pids` are
-    /// Codex sessions we started that don't know their id yet.
-    pub fn scan(&self, dir: PathBuf, shell_pids: Vec<i32>, new_codex_pids: Vec<i32>) -> Scan {
+    /// Codex sessions we started that don't know their id yet;
+    /// `quick_shell` is the quick terminal's shell, if it runs.
+    pub fn scan(
+        &self,
+        dir: PathBuf,
+        shell_pids: Vec<i32>,
+        new_codex_pids: Vec<i32>,
+        quick_shell: Option<i32>,
+    ) -> Scan {
         let mut s = lock(&self.0);
         let sessions = s.scan_sessions(&dir);
         let worktrees = s
@@ -267,7 +274,8 @@ impl SessionScanner {
         let procs = procs::Snapshot::default();
         let shells = procs::shell_processes(&pids(&shell_pids), &procs, &sessions, codex_links);
         let threads = procs::codex_threads(&pids(&new_codex_pids), &procs, &sessions, codex_links);
-        let elsewhere = procs::claude_elsewhere(&procs, std::process::id(), None);
+        let quick = quick_shell.and_then(|p| u32::try_from(p).ok());
+        let elsewhere = procs::claude_elsewhere(&procs, std::process::id(), quick, None);
         let leftovers = procs::leftovers(&procs, leftover_args);
         let limits = Limits {
             claude: usage::claude(),
@@ -296,12 +304,14 @@ impl SessionScanner {
     }
 }
 
-/// Where the Claude session `id` runs, if a process outside this app has
-/// it open. Resuming it here too would make two processes write to it.
+/// Where the Claude session `id` runs, if a process outside this app's
+/// tabs has it open: another app, or `quick_shell`, the quick terminal's
+/// shell. Resuming it here too would make two processes write to it.
 #[uniffi::export]
-pub fn claude_running_elsewhere(id: String) -> Option<RunningElsewhere> {
+pub fn claude_running_elsewhere(id: String, quick_shell: Option<i32>) -> Option<RunningElsewhere> {
     let procs = procs::Snapshot::default();
-    procs::claude_elsewhere(&procs, std::process::id(), Some(&id))
+    let quick = quick_shell.and_then(|p| u32::try_from(p).ok());
+    procs::claude_elsewhere(&procs, std::process::id(), quick, Some(&id))
         .into_iter()
         .max_by_key(|s| s.busy)
 }

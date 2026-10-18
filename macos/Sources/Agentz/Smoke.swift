@@ -9,6 +9,7 @@ import AppKit
 final class SmokeTest {
     private let workspace: Workspace
     private let window: MainWindowController
+    private let quick: QuickTerminal
     private let logPath: String
     private var lines: [String] = []
     private var failed = false
@@ -18,9 +19,10 @@ final class SmokeTest {
         ProcessInfo.processInfo.environment["AGENTZ_SMOKE_LOG"]
     }
 
-    init(workspace: Workspace, window: MainWindowController, logPath: String) {
+    init(workspace: Workspace, window: MainWindowController, quick: QuickTerminal, logPath: String) {
         self.workspace = workspace
         self.window = window
+        self.quick = quick
         self.logPath = logPath
     }
 
@@ -519,6 +521,7 @@ final class SmokeTest {
         await continueAtReset(tmp)
         await sleepWhileWorking(tmp)
         await runningElsewhere(tmp)
+        await quickTerminal(tmp)
         finish(nil)
     }
 
@@ -780,6 +783,65 @@ final class SmokeTest {
         let left = ws.restore(SavedState(tabs: [SavedTab(agent: .claude, id: id, cwd: tmp, title: "elsewhere")]))
         check("restore leaves a session running elsewhere alone", ws.tabs.isEmpty && left.tabs.map(\.id) == [id]
             && ws.status?.contains("another app") == true, "\(String(describing: ws.status))")
+    }
+
+    /// The quick terminal: a shell of its own, in no tab, that slides in
+    /// and away and runs on meanwhile.
+    private func quickTerminal(_ tmp: String) async {
+        let ws = workspace
+        let quick = quick
+        quick.show()
+        check("quick terminal shows", quick.isShown && quick.isOnScreen)
+        check("quick terminal's shell starts", await wait(10) { quick.shellPid != nil })
+        guard let pid = quick.shellPid, let shell = quick.terminal else { return }
+        check("it is in no tab, and scans know it", !ws.tabs.contains { $0.terminal === shell } && ws.quickShellPid() == pid)
+        check("it gets the keyboard", await wait(2) { quick.isKey && shell.isFocused })
+        let newClaude = NSApp.mainMenu?.items.lazy.compactMap { menu in
+            menu.submenu?.items.first { $0.action == #selector(AppDelegate.newClaude(_:)) }
+        }.first
+        check("menu items for sessions wait", newClaude.map { !(NSApp.delegate as! AppDelegate).validateMenuItem($0) } ?? false)
+        if let screen = quick.screen {
+            let shown = quick.settings.shownFrame(visible: screen.visibleFrame)
+            check("it slides to its place", await wait(2) { quick.frame == shown }, "\(quick.frame) not \(shown)")
+        }
+        let out = tmp + "/quick-pwd"
+        shell.run("pwd > \(shellQuote(out))")
+        check("it starts in the home folder", await wait(5) {
+            (try? String(contentsOfFile: out, encoding: .utf8)) == NSHomeDirectory() + "\n"
+        }, (try? String(contentsOfFile: out, encoding: .utf8)) ?? "no file")
+
+        quick.toggle()
+        check("it slides away", await wait(2) { !quick.isShown && !quick.isOnScreen })
+        check("its shell runs on", kill(pid, 0) == 0)
+        quick.toggle()
+        check("it comes back with the same shell", await wait(2) { quick.isOnScreen } && quick.shellPid == pid)
+        shell.run("exit")
+        check("its shell exiting hides it", await wait(5) { quick.terminal == nil && !quick.isOnScreen })
+        quick.show()
+        check("the next show starts a new shell", await wait(10) { quick.shellPid.map { $0 != pid } ?? false })
+        // An idle shell closes without asking.
+        _ = await wait(5) { quick.terminal.map { !$0.hasForegroundJob && $0.foregroundGroup != nil } ?? false }
+        quick.closeShell()
+        check("closing ends it", quick.terminal == nil && !quick.isShown)
+
+        // As with its key, from another app: it comes in front of that app
+        // and takes the keyboard, and the other app gets it back after.
+        guard let other = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first else {
+            return lines.append("info no Finder to come from")
+        }
+        NSApp.yieldActivation(to: other)
+        other.activate()
+        guard await wait(3, { !NSApp.isActive }) else { return lines.append("info Finder did not come to the front") }
+        quick.show()
+        try? await Task.sleep(for: .seconds(1))
+        check("from another app, it takes the keyboard and stays", quick.isShown && quick.isKey && quick.isOnScreen,
+              "shown \(quick.isShown) key \(quick.isKey) active \(NSApp.isActive)")
+        check("the main window stays behind", window.window?.isKeyWindow == false)
+        quick.toggle()
+        check("the other app gets the keyboard back", await wait(3) {
+            NSWorkspace.shared.frontmostApplication == other && !quick.isOnScreen
+        }, NSWorkspace.shared.frontmostApplication?.localizedName ?? "none")
+        NSApp.activate()
     }
 
     /// `AGENTZ_SMOKE_SNAPSHOT=<file.png>` saves how the window looks. The

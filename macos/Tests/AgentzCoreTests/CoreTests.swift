@@ -73,8 +73,9 @@ final class FormatTests: XCTestCase {
         XCTAssertEqual(RunningElsewhere(id: "x", busy: false, app: "Ghostty").appName, "Ghostty")
         XCTAssertEqual(RunningElsewhere(id: "x", busy: false, app: "Agentz").appName, "another agentz window")
         XCTAssertEqual(RunningElsewhere(id: "x", busy: false, app: nil).appName, "another app")
+        XCTAssertEqual(RunningElsewhere(id: "x", busy: false, app: "Quick Terminal").appName, "the quick terminal")
         // No process outside this one has a made-up session open.
-        XCTAssertNil(claudeRunningElsewhere(UUID().uuidString.lowercased()))
+        XCTAssertNil(claudeRunningElsewhere(UUID().uuidString.lowercased(), nil))
     }
 }
 
@@ -181,6 +182,108 @@ final class SplitLookTests: XCTestCase {
         XCTAssertEqual(SplitLook(config: "unfocused-split-opacity = 0").unfocusedOpacity, 0.15)
         XCTAssertEqual(SplitLook(config: "unfocused-split-opacity = 2").unfocusedOpacity, 1)
         XCTAssertEqual(SplitLook(config: "unfocused-split-opacity = half").unfocusedOpacity, 0.7)
+    }
+}
+
+final class QuickTerminalTests: XCTestCase {
+    func testGhosttyDefaults() {
+        let settings = QuickTerminalSettings(config: "")
+        XCTAssertEqual(settings, QuickTerminalSettings())
+        XCTAssertEqual(settings.position, .top)
+        XCTAssertEqual(settings.screen, .main)
+        XCTAssertEqual(settings.animationDuration, 0.2)
+        XCTAssertTrue(settings.autohide)
+        XCTAssertEqual(settings.spaceBehavior, .move)
+        XCTAssertNil(settings.hotKey)
+    }
+
+    func testReadsTheConfig() {
+        let settings = QuickTerminalSettings(config: """
+        quick-terminal-position = bottom
+        quick-terminal-position = right
+        quick-terminal-size = 50%,500px
+        quick-terminal-screen = macos-menu-bar
+        quick-terminal-animation-duration = 0
+        quick-terminal-autohide = false
+        quick-terminal-space-behavior = remain
+        keybind = global:ctrl+`=toggle_quick_terminal
+        """)
+        XCTAssertEqual(settings.position, .right)
+        XCTAssertEqual(settings.primarySize, .percent(50))
+        XCTAssertEqual(settings.secondarySize, .points(500))
+        XCTAssertEqual(settings.screen, .menuBar)
+        XCTAssertEqual(settings.animationDuration, 0)
+        XCTAssertFalse(settings.autohide)
+        XCTAssertEqual(settings.spaceBehavior, .remain)
+        XCTAssertEqual(settings.hotKey, KeyTrigger(modifiers: .control, key: "`", global: true))
+    }
+
+    func testBadValuesKeepTheDefaults() {
+        let settings = QuickTerminalSettings(config: """
+        quick-terminal-position = middle
+        quick-terminal-size = 50
+        quick-terminal-screen = left
+        quick-terminal-animation-duration = fast
+        """)
+        XCTAssertEqual(settings, QuickTerminalSettings())
+        XCTAssertNil(QuickTerminalSettings(config: "quick-terminal-size = 1%,2%,3%").primarySize)
+    }
+
+    func testOnlyAGlobalKeyToggles() {
+        XCTAssertNil(QuickTerminalSettings(config: "keybind = ctrl+`=toggle_quick_terminal").hotKey)
+        XCTAssertNil(QuickTerminalSettings(config: "keybind = global:ctrl+t=new_tab").hotKey)
+        let settings = { (lines: String) in QuickTerminalSettings(config: lines).hotKey }
+        XCTAssertEqual(settings("keybind = all:global:super+shift+grave_accent=toggle_quick_terminal"),
+                       KeyTrigger(modifiers: [.command, .shift], key: "grave_accent", global: true))
+        // Like in Ghostty, a later line wins.
+        XCTAssertNil(settings("keybind = global:ctrl+`=toggle_quick_terminal\nkeybind = clear"))
+        XCTAssertNil(settings("keybind = global:ctrl+`=toggle_quick_terminal\nkeybind = ctrl+`=unbind"))
+        XCTAssertNotNil(settings("keybind = global:ctrl+`=toggle_quick_terminal\nkeybind = ctrl+a=unbind"))
+    }
+
+    func testKeyTriggers() {
+        XCTAssertEqual(KeyTrigger("ctrl+alt+F12"), KeyTrigger(modifiers: [.control, .option], key: "f12"))
+        XCTAssertEqual(KeyTrigger("cmd++"), KeyTrigger(modifiers: .command, key: "+"))
+        XCTAssertEqual(KeyTrigger("opt+control+A"), KeyTrigger(modifiers: [.option, .control], key: "a"))
+        XCTAssertNil(KeyTrigger("hyper+a"))
+        XCTAssertNil(KeyTrigger("ctrl+a>n"))
+        XCTAssertNil(KeyTrigger("ctrl+"))
+        XCTAssertEqual(KeyTrigger("global:ctrl+shift+`")?.description, "ctrl+shift+`")
+        let binding = KeyTrigger.binding("super+==increase_font_size:1")
+        XCTAssertEqual(binding?.0, KeyTrigger(modifiers: .command, key: "="))
+        XCTAssertEqual(binding?.1, "increase_font_size:1")
+    }
+
+    func testSizes() {
+        let screen = CGSize(width: 1600, height: 1000)
+        let size = { (lines: String) in QuickTerminalSettings(config: lines).size(on: screen) }
+        // Along its edge, then the other way; the rest is Ghostty's.
+        XCTAssertEqual(size(""), CGSize(width: 1600, height: 400))
+        XCTAssertEqual(size("quick-terminal-size = 50%,70%"), CGSize(width: 1120, height: 500))
+        XCTAssertEqual(size("quick-terminal-position = left\nquick-terminal-size = 25%"), CGSize(width: 400, height: 1000))
+        XCTAssertEqual(size("quick-terminal-position = center"), CGSize(width: 800, height: 400))
+        XCTAssertEqual(size("quick-terminal-position = center\nquick-terminal-size = 60%"), CGSize(width: 800, height: 600))
+        XCTAssertEqual(QuickTerminalSettings(config: "quick-terminal-position = center").size(on: CGSize(width: 1000, height: 1600)),
+                       CGSize(width: 400, height: 800))
+        // No bigger than the screen.
+        XCTAssertEqual(size("quick-terminal-size = 3000px"), CGSize(width: 1600, height: 1000))
+    }
+
+    func testFrames() {
+        // The menu bar's 30 points at the top, a 70-point Dock at the bottom.
+        let frame = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+        let visible = CGRect(x: 0, y: 70, width: 1600, height: 900)
+        let top = QuickTerminalSettings(config: "quick-terminal-size = 50%,70%")
+        XCTAssertEqual(top.shownFrame(visible: visible), CGRect(x: 240, y: 520, width: 1120, height: 450))
+        XCTAssertEqual(top.hiddenFrame(visible: visible, frame: frame), CGRect(x: 240, y: 1000, width: 1120, height: 450))
+        let left = QuickTerminalSettings(config: "quick-terminal-position = left\nquick-terminal-size = 400px,50%")
+        XCTAssertEqual(left.shownFrame(visible: visible), CGRect(x: 0, y: 295, width: 400, height: 450))
+        XCTAssertEqual(left.hiddenFrame(visible: visible, frame: frame), CGRect(x: -400, y: 295, width: 400, height: 450))
+        let bottom = QuickTerminalSettings(config: "quick-terminal-position = bottom")
+        XCTAssertEqual(bottom.shownFrame(visible: visible).minY, 70)
+        XCTAssertEqual(bottom.hiddenFrame(visible: visible, frame: frame).maxY, 0)
+        let center = QuickTerminalSettings(config: "quick-terminal-position = center")
+        XCTAssertEqual(center.hiddenFrame(visible: visible, frame: frame), center.shownFrame(visible: visible))
     }
 }
 

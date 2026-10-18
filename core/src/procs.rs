@@ -514,10 +514,19 @@ pub struct RunningElsewhere {
 /// ended without removing its file.
 const CLAUDE_START_SLACK: Duration = Duration::from_secs(1);
 
+/// What `RunningElsewhere::app` says for a Claude in the quick terminal.
+pub const QUICK_TERMINAL_APP: &str = "Quick Terminal";
+
 /// The Claude sessions running in processes that are not under `us`, our
-/// own pid, from `~/.claude/sessions/<pid>.json`. With `only`, just that
-/// session.
-pub fn claude_elsewhere(procs: &Snapshot, us: u32, only: Option<&str>) -> Vec<RunningElsewhere> {
+/// own pid, from `~/.claude/sessions/<pid>.json`. Those under `quick`, the
+/// quick terminal's shell, count too: it is ours, but not a tab. With
+/// `only`, just that session.
+pub fn claude_elsewhere(
+    procs: &Snapshot,
+    us: u32,
+    quick: Option<u32>,
+    only: Option<&str>,
+) -> Vec<RunningElsewhere> {
     let Some(dir) = claude_dir().map(|d| d.join("sessions")) else {
         return Vec::new();
     };
@@ -530,7 +539,7 @@ pub fn claude_elsewhere(procs: &Snapshot, us: u32, only: Option<&str>) -> Vec<Ru
     if entries.is_empty() {
         return Vec::new();
     }
-    claude_elsewhere_from(entries, procs.table(), us)
+    claude_elsewhere_from(entries, procs.table(), us, quick)
 }
 
 /// One `~/.claude/sessions/<pid>.json`.
@@ -572,6 +581,7 @@ fn claude_elsewhere_from(
     entries: Vec<RegistryEntry>,
     procs: &HashMap<u32, Process>,
     us: u32,
+    quick: Option<u32>,
 ) -> Vec<RunningElsewhere> {
     let mut out: Vec<_> = entries
         .into_iter()
@@ -583,6 +593,13 @@ fn claude_elsewhere_from(
                 return None;
             }
             let lineage = lineage(procs, e.pid);
+            if quick.is_some_and(|q| lineage.iter().any(|p| p.pid == q)) {
+                return Some(RunningElsewhere {
+                    id: e.id,
+                    busy: e.busy,
+                    app: Some(QUICK_TERMINAL_APP.into()),
+                });
+            }
             if lineage.iter().any(|p| p.pid == us) {
                 return None;
             }
@@ -1405,6 +1422,10 @@ mod tests {
         add(200, 1, "/Applications/Agentz.app/Contents/MacOS/agentz", t0);
         add(201, 200, "/usr/bin/login", t0);
         add(202, 201, "claude", t0);
+        // A Claude in the quick terminal's shell.
+        add(210, 200, "/usr/bin/login", t0);
+        add(211, 210, "-fish", t0);
+        add(212, 211, "claude", t0);
         // Its parent is gone.
         add(300, 1, "claude", t0);
         // Took the pid of a Claude that ended without removing its file.
@@ -1420,11 +1441,13 @@ mod tests {
                 entry(300, "orphan", false),
                 entry(102, "ghostty", true),
                 entry(202, "ours", false),
+                entry(212, "quick", true),
                 entry(400, "stale", false),
                 entry(500, "gone", false),
             ],
             &procs,
             200,
+            Some(211),
         );
         assert_eq!(
             found,
@@ -1438,6 +1461,11 @@ mod tests {
                     id: "orphan".into(),
                     busy: false,
                     app: None,
+                },
+                RunningElsewhere {
+                    id: "quick".into(),
+                    busy: true,
+                    app: Some(QUICK_TERMINAL_APP.into()),
                 },
             ]
         );

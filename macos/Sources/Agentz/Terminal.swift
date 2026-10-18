@@ -298,6 +298,8 @@ enum GhosttyApp {
     private static var usesDefaultTheme = true
     /// The user's Ghostty config, read once at launch.
     private static var userText: String?
+    /// The user's Ghostty config file as it is, with its global keybinds.
+    private static var userFile = ""
 
     /// What to do when a command in a shell ends, from the config the
     /// terminals use.
@@ -308,6 +310,13 @@ enum GhosttyApp {
     /// How split panes look, from the config the terminals use.
     static var splitLook: SplitLook {
         SplitLook(config: configText)
+    }
+
+    /// Where the quick terminal shows and the key that toggles it, from
+    /// the user's config.
+    static var quickTerminal: QuickTerminalSettings {
+        _ = controller
+        return QuickTerminalSettings(config: userFile)
     }
 
     /// The terminals' colors in the light or dark appearance.
@@ -386,7 +395,9 @@ enum GhosttyApp {
         // The wrapper writes a config file per load and leaves them behind.
         try? FileManager.default.removeItem(at: TerminalController.managedConfigDirectory)
         configText = defaults
-        userText = userConfig()
+        let file = userConfigFile()
+        userFile = file ?? ""
+        userText = file.map(forTerminals)
         guard let user = themedUserText else {
             return TerminalController(configSource: .generated(defaults), theme: .default)
         }
@@ -455,7 +466,7 @@ enum GhosttyApp {
 
     /// The user's Ghostty config, so terminals get their fonts and colors.
     /// `AGENTZ_GHOSTTY_CONFIG` names another file; empty means none.
-    private static func userConfig() -> String? {
+    private static func userConfigFile() -> String? {
         let env = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
         let xdg = env["XDG_CONFIG_HOME"] ?? home + "/.config"
@@ -463,9 +474,12 @@ enum GhosttyApp {
             xdg + "/ghostty/config",
             home + "/Library/Application Support/com.mitchellh.ghostty/config",
         ]
-        guard let path = candidates.first(where: { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }),
-              let text = try? String(contentsOfFile: path, encoding: .utf8)
-        else { return nil }
+        guard let path = candidates.first(where: { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }) else { return nil }
+        return try? String(contentsOfFile: path, encoding: .utf8)
+    }
+
+    /// The user's config as the terminal library takes it.
+    private static func forTerminals(_ text: String) -> String {
         let themeDirs = themeDirectories
         return text.split(separator: "\n", omittingEmptySubsequences: false).compactMap { line in
             let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
@@ -475,7 +489,8 @@ enum GhosttyApp {
                 // Themes ship with Ghostty.app, not with the library.
                 return "theme = " + resolveThemes(parts[1], in: themeDirs)
             case "keybind" where parts[1].hasPrefix("global:"):
-                // Global shortcuts belong to Ghostty.app.
+                // The library has no global keys. The quick terminal's
+                // is read from `userFile`.
                 return nil
             default:
                 return String(line)

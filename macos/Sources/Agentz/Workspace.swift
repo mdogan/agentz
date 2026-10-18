@@ -330,6 +330,9 @@ final class Workspace {
     /// was just resumed, e.g. at launch, may not read what is typed yet.
     static let settleTime: TimeInterval = 8
     @ObservationIgnored var requestScan: (() -> Void)?
+    /// The quick terminal's shell, while it runs. A Claude in it is not in
+    /// a tab, so it counts as running elsewhere.
+    @ObservationIgnored var quickShellPid: () -> Int32? = { nil }
     /// Asks whether to fork the session `title`, which runs in another
     /// app, instead of resuming it. True to fork.
     @ObservationIgnored var confirmFork: ((_ title: String, _ elsewhere: RunningElsewhere) -> Bool)?
@@ -465,7 +468,7 @@ final class Workspace {
         for (i, tab) in saved.tabs.enumerated() {
             // Resuming it here too would make two processes write to it. The
             // next launch tries again.
-            let elsewhere = tab.agent == .claude ? tab.id.flatMap(claudeRunningElsewhere) : nil
+            let elsewhere = tab.agent == .claude ? tab.id.flatMap { claudeRunningElsewhere($0, quickShellPid()) } : nil
             if elsewhere != nil { skipped += 1 }
             if elsewhere == nil, start(tab.agent, resume: tab.id, cwd: tab.cwd, title: tab.title, focus: false) {
                 tabs.last?.pinned = tab.pinned
@@ -828,7 +831,7 @@ final class Workspace {
     /// since resuming it too would make two processes write to it. Nil if
     /// the user would rather not.
     private func resumeMode(_ key: SessionKey) -> ResumeMode? {
-        guard key.agent == .claude, let other = claudeRunningElsewhere(key.id) else { return .resume }
+        guard key.agent == .claude, let other = claudeRunningElsewhere(key.id, quickShellPid()) else { return .resume }
         let title = rows.first { $0.key == key }?.title ?? sessions.first { $0.key == key }?.title ?? key.id
         return confirmFork?(title, other) == true ? .fork : nil
     }
@@ -1490,9 +1493,10 @@ final class Scanner {
         let dir = workspace.projectDir
         let pids = workspace.shellPids
         let codexPids = workspace.newCodexPids
+        let quickPid = workspace.quickShellPid()
         let scanner = self.scanner
         queue.async {
-            let scan = scanner.scan(dir, pids, codexPids)
+            let scan = scanner.scan(dir, pids, codexPids, quickPid)
             DispatchQueue.main.async {
                 self.scanning = false
                 self.workspace?.apply(scan, dir: dir)

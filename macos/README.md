@@ -57,6 +57,13 @@ You can also drag a session from the list onto the terminal. With one pane, it g
 
 **View › Auto-Hide Session List** gives the terminal the whole window. Rest the mouse at the window's left edge and the list slides in over the terminal; it slides away once the mouse leaves it. While you type in its filter, it stays. ⌘L, ⌘F and ⌃⌘S show it too, and then it stays until you go back to the terminal (⎋, ⌘J, or opening a session). A click outside it always hides it. The terminal keeps its size while the list comes and goes. Turn the setting off to put the list back next to the terminal.
 
+**View › Quick Terminal**, or its global key (see below), slides a shell of its own in from the edge of the screen (the top, unless set otherwise), over any app, like Ghostty's quick terminal. Do it again and it slides away, and the app you were in gets the keyboard back. Its shell keeps running while it is hidden. It also slides away when you click another window. When its shell exits, or you press ⌘W in it, it closes; the next one starts a new shell in your home folder.
+
+- It is not a session: the list does not show it, and it does not come back after quitting. While it has the keyboard, the menu items for sessions and the list are off.
+- A Claude you start in it shows in the list as running in the quick terminal, like one in another app. Opening it in agentz offers to fork it.
+- It follows Ghostty's `quick-terminal-position`, `quick-terminal-size`, `quick-terminal-screen`, `quick-terminal-animation-duration`, `quick-terminal-autohide` and `quick-terminal-space-behavior`.
+- A global key for `toggle_quick_terminal` in your Ghostty config, e.g. `keybind = global:ctrl+grave_accent=toggle_quick_terminal`, shows and hides it from any app. The menu item shows it. Ghostty needs the Accessibility permission for global keys; agentz does not. agentz and Ghostty.app read the same config, so with both running, both want the key. To give agentz a key of its own, point `AGENTZ_GHOSTTY_CONFIG` at another file.
+
 | Shortcut | Action |
 | --- | --- |
 | ⌘N / ⇧⌘N | new Claude / Codex session, in place of the shown shell if it is idle |
