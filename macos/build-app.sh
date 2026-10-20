@@ -11,7 +11,7 @@ app="$dir/.build/Agentz.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin/agentz" "$app/Contents/MacOS/agentz"
-# Ghostty's shell integration and terminfo, found through Bundle.main.
+# SwiftPM resources: agent icons, Ghostty's shell integration and terminfo.
 cp -R "$bin"/*.bundle "$app/Contents/Resources/"
 cp "$dir/Resources/Agentz.icns" "$app/Contents/Resources/Agentz.icns"
 cp "$dir/Info.plist" "$app/Contents/Info.plist"

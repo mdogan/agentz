@@ -27,6 +27,7 @@ let package = Package(
                 .product(name: "GhosttyTheme", package: "libghostty-spm"),
             ],
             path: "Sources/Agentz",
+            resources: [.process("Resources")],
             swiftSettings: swift5
         ),
         .testTarget(name: "AgentzCoreTests", dependencies: ["AgentzCore"], swiftSettings: swift5),

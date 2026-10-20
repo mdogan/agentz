@@ -1188,12 +1188,17 @@ struct EmptyPaneView: View {
 }
 
 extension Agent {
-    /// Text, so it takes the font and color around it.
-    var icon: Text {
+    /// Original brand marks, tinted to match the surrounding controls.
+    @ViewBuilder var icon: some View {
         switch self {
-        case .claude: Text("✻")
-        case .codex: Text("◆")
-        case .shell: Text(Image(systemName: "terminal"))
+        case .claude, .codex:
+            Image(displayName, bundle: .module)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 14, height: 14)
+                .accessibilityLabel(displayName)
+        case .shell: Image(systemName: "terminal")
         }
     }
 
