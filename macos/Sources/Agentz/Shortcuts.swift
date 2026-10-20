@@ -29,6 +29,7 @@ func shortcutGroups(_ menu: NSMenu) -> [ShortcutGroup] {
         return rows.isEmpty ? nil : ShortcutGroup(item.title, rows)
     }
     // Keep in sync with the list's onKeyPress handlers in Sidebar.swift, the
+    // keys of the sheet that asks where to start in StartPicker.swift, the
     // find bar's keys in FindBar.swift and the Ghostty keybinds in
     // Terminal.swift.
     return fromMenus + [
@@ -42,6 +43,11 @@ func shortcutGroups(_ menu: NSMenu) -> [ShortcutGroup] {
         ShortcutGroup("Filter", [
             ("↩", "Go to the session list"),
             ("⎋", "Clear the filter"),
+        ]),
+        ShortcutGroup("New Session Sheet", [
+            ("↑ / ↓", "Pick the previous / next folder"),
+            ("↩", "Start the session there"),
+            ("⎋", "Cancel"),
         ]),
         ShortcutGroup("Find Bar", [
             ("↩ / ↑", "Next match, up"),

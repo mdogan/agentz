@@ -72,7 +72,7 @@ final class SmokeTest {
         check("worktrees of the repo are listed", await wait(10) { ws.currentWorktree != nil }, "\(ws.worktrees.count) worktrees")
 
         // A shell: its pid, environment, folder and foreground job.
-        ws.newSession(.shell)
+        ws.newSession(.shell, cwd: ws.shownFolder)
         guard let shell = ws.currentTab else { return finish("no tab after newSession") }
         let shellKey = shell.key
         let t = shell.terminal
@@ -106,18 +106,35 @@ final class SmokeTest {
         lines.append("info command finished: " + (finished.map { "exit \($0.exitCode.map(String.init) ?? "?") after \(elapsed($0.seconds))" } ?? "not reported by \(Launch.shellName)"))
         check("shell name back", await wait(8) { shell.title == Launch.shellName }, shell.title)
 
-        // An agent started from the idle shell takes its place and folder.
-        ws.newSession(.codex)
+        // ⌘T asks where to start; ⎋ starts nothing.
+        let app = NSApp.delegate as! AppDelegate
+        let tabCount = ws.tabs.count
+        app.newShell(nil)
+        check("⌘T asks where to start", await pickerField() != nil)
+        if let sheet = window.window?.attachedSheet { press(.escape, in: sheet) }
+        check("⎋ closes it", await wait(3) { self.window.window?.attachedSheet == nil })
+        check("and starts nothing", ws.tabs.count == tabCount && ws.currentTab === shell)
+
+        // ⇧⌘N picks the idle shell's folder at first, and ↩ starts the agent
+        // there, in place of the shell. The temporary folder does not go to
+        // the user's recent folders.
+        let recents = UserDefaults.standard.stringArray(forKey: "recentFolders")
+        app.newCodex(nil)
+        check("⇧⌘N asks where to start", await pickerField() != nil)
+        if let sheet = window.window?.attachedSheet { press(.return, in: sheet) }
+        check("↩ closes it", await wait(3) { self.window.window?.attachedSheet == nil })
+        _ = await wait(3) { ws.currentTab?.key.agent == .codex }
         guard let codex = ws.currentTab, codex.key.agent == .codex else { return finish("no codex tab") }
         let codexKey = codex.key
         codex.turns.userInput()
         check("agent replaces the idle shell", !ws.tabs.contains { $0.key == shellKey })
         check("agent starts in the shell's folder", codex.cwd == tmp || realPath(codex.cwd) == tmp, codex.cwd)
+        check("the recent folders stay as they were", UserDefaults.standard.stringArray(forKey: "recentFolders") == recents)
         check("agent busy from its title", await wait(5) { codex.isBusy })
         check("quit counts a working agent", ws.quitCounts().working == 1)
 
         // Another tab, so the agent is not looked at and may notify.
-        ws.newSession(.shell)
+        ws.newSession(.shell, cwd: tmp)
         guard let other = ws.currentTab, other.key.agent == .shell else { return finish("no second shell") }
         check("notice when the agent is done", await wait(8) { self.notices.contains { $0.key == codexKey && $0.message == nil } })
         check("one notice per turn", notices.filter { $0.key == codexKey }.count == 1)
@@ -464,10 +481,10 @@ final class SmokeTest {
         check("a click focuses the first pane again", ws.panes.focused == 1 && firstView.window?.firstResponder === second.terminal.view)
         // ⌘N starts an agent in place of the split's idle shell. ⌘T opens a
         // shell on its own.
-        ws.newSession(.codex)
+        ws.newSession(.codex, cwd: ws.shownFolder, inPlaceOfShell: true)
         check("an agent takes the idle shell's pane", ws.panes.split == .right && ws.panes.keys[0] == first.key
             && ws.currentTab?.key.agent == .codex && !ws.tabs.contains { $0 === second }, "\(ws.panes)")
-        ws.newSession(.shell)
+        ws.newSession(.shell, cwd: tmp, inPlaceOfShell: true)
         check("a new shell leaves the split as it is", ws.panes.split == nil && ws.hiddenSplits.first?.keys.first == first.key)
         for tab in ws.tabs {
             ws.close(tab.key)
@@ -942,6 +959,18 @@ final class SmokeTest {
         return condition()
     }
 
+    /// The field of the sheet that asks where to start, once it has the
+    /// keyboard.
+    private func pickerField() async -> NSTextField? {
+        var field: NSTextField?
+        _ = await wait(3) {
+            let editor = self.window.window?.attachedSheet?.firstResponder as? NSTextView
+            field = editor?.delegate as? NSTextField
+            return field != nil
+        }
+        return field
+    }
+
     private func finish(_ error: String?) {
         if let error {
             failed = true
@@ -980,6 +1009,24 @@ private func scroll(_ view: NSView) {
     cg.location = CGPoint(x: point.x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - point.y)
     guard let event = NSEvent(cgEvent: cg) else { return }
     window.sendEvent(event)
+}
+
+/// A key without modifiers, sent to `window` like a real one.
+@MainActor
+private func press(_ key: Key, in window: NSWindow) {
+    guard let event = NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: window.windowNumber, context: nil, characters: key.characters,
+        charactersIgnoringModifiers: key.characters, isARepeat: false, keyCode: key.code
+    ) else { return }
+    window.sendEvent(event)
+}
+
+private enum Key {
+    case `return`, escape
+
+    var characters: String { self == .return ? "\r" : "\u{1b}" }
+    var code: UInt16 { self == .return ? 36 : 53 }
 }
 
 /// The mouse moving to `point` in `view`, with no button down.

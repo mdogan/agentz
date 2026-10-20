@@ -16,7 +16,7 @@ make test       # unit tests
 make smoke      # opens the app with real terminals and checks it (~40 s)
 ```
 
-`make install` in the repo root does the same install. After `make link`, `agentz` in a terminal opens the app for the current folder, like `code .`. `agentz ~/some/repo` opens that folder: ⌘N, ⇧⌘N and ⌘T start sessions there. **File › Open Folder…** (⌘O) does the same from the app.
+`make install` in the repo root does the same install. After `make link`, `agentz` in a terminal opens the app for the current folder, like `code .`. `agentz ~/some/repo` opens that folder: it goes to the top of the recent folders, and ⌘N, ⇧⌘N and ⌘T pick it while no session is shown. **File › Open Folder…** (⌘O) does the same from the app.
 
 To put the link somewhere else, use `make link PREFIX=...`.
 
@@ -27,6 +27,8 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 **Claude**, **Codex** and **Shell** at the top of the list start a new session. Each opens a menu of recent folders, the one you used last first, **Open Folder…**, and **Create Folder…**, which makes a new folder and starts the session in it. A git repo in it has a submenu of its worktrees: the session starts in the one you pick. **New Worktree…** checks out an existing branch, or makes a new branch from a worktree, in `<repo>.worktrees/<branch>` next to the repo. It copies git-ignored files like `.env` and `node_modules` into the new worktree as APFS clones (instant, no extra disk space until a file changes), and, if you ask, the uncommitted changes too, then starts the session in it.
 
 **Clean Up Worktrees…** in the same submenu lists the repo's other worktrees and says which can go without losing anything: nothing uncommitted, its commits in the main checkout's branch (or its upstream, also when they were squashed into one commit there), and no program working in it. Only those can be picked, and they are picked already. Removing one deletes its folder, with ignored files like `node_modules`; its branch stays. A worktree whose folder is gone is only forgotten. The others say why they stay, e.g. "2 commits not in main" or "claude runs in it".
+
+⌘N, ⇧⌘N and ⌘T ask where to start in a sheet: one list of the recent folders, each repo with its worktrees under it and **New Worktree…**, then **Open Folder…** and **Create Folder…**. The shown session's folder is picked already, so ⌘N and ↩ start Claude in the same folder. A folder that is not in the list, like a subfolder a shell went to, gets a row of its own on top. Type to narrow the list by folder, repo, branch or path (`api fix` finds the worktrees of `api` on a `fix/…` branch), ↑ ↓ to pick, ↩ to start, ⎋ to cancel. An agent started this way takes the place of the shown shell if it is idle.
 
 - **Click** a running session to show it. **Double-click** or press **Return** on any session to open it: it switches to it if it runs, otherwise it resumes it.
 - A spinner means the agent is working. A green dot means it waits for you.
@@ -42,7 +44,7 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 - Right-click a session to open it in a split, close it, pin it, show its folder, or copy its id.
 - A pinned session stays at the top of the list and can't be closed until you unpin it (right-click, or **File › Unpin Session**). A line separates pinned and active sessions from other sessions when both are shown. If its agent or shell ends, its row stays; open it to start it again. Pinned sessions come back on every launch, even after a crash.
 
-To see two sessions at once, split the pane: ⌘D puts a second pane to the right, ⇧⌘D puts it below. The two buttons at the right end of the title bar do the same. The new pane opens a shell in the same folder as the shown session; press ⌘N or ⇧⌘N there to start an agent in its place. To put a session from the list there instead, right-click it and pick **Open in Split Right** or **Open in Split Down**: it moves there if it runs, and is resumed there if not. If it was in another split, that split ends.
+To see two sessions at once, split the pane: ⌘D puts a second pane to the right, ⇧⌘D puts it below. The two buttons at the right end of the title bar do the same. The new pane opens a shell in the same folder as the shown session; press ⌘N or ⇧⌘N and ↩ there to start an agent in its place. To put a session from the list there instead, right-click it and pick **Open in Split Right** or **Open in Split Down**: it moves there if it runs, and is resumed there if not. If it was in another split, that split ends.
 
 You can also drag a session from the list onto the terminal. With one pane, it goes to the edge you drop it near (left, right, top or bottom) and the pane splits that way. In a split, it goes into the pane you drop it on. A highlight shows where it will land.
 
@@ -66,8 +68,8 @@ You can also drag a session from the list onto the terminal. With one pane, it g
 
 | Shortcut | Action |
 | --- | --- |
-| ⌘N / ⇧⌘N | new Claude / Codex session, in place of the shown shell if it is idle |
-| ⌘T | new shell |
+| ⌘N / ⇧⌘N | new Claude / Codex session: asks where, and takes the place of the shown shell if it is idle |
+| ⌘T | new shell: asks where |
 | ⌘W | close the shown session (asks first if it is working) |
 | ⌘] / ⌘[ | next / previous running session |
 | ⇧⌘A | next session that needs you |

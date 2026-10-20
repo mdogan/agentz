@@ -205,7 +205,7 @@ final class Workspace {
     private(set) var sessions: [Session] = []
     private(set) var loaded = false
     /// The folder the user last started a session in. ⌘N and friends
-    /// start there too.
+    /// offer it when no session is shown.
     private(set) var projectDir: String
     /// The worktrees of the project's repo, main first. Empty outside a
     /// repo.
@@ -293,7 +293,7 @@ final class Workspace {
         }
     }
     @ObservationIgnored let sleepBlocker = SleepBlocker()
-    /// Where new sessions start: the top of the project's git worktree.
+    /// The top of the project's git worktree.
     @ObservationIgnored private(set) var root: String
     @ObservationIgnored private var statusAt = Date.distantPast
     @ObservationIgnored private var nextNewId = 1
@@ -846,7 +846,7 @@ final class Workspace {
         if mode == .fork {
             // A new session. The original, and a tab of ours it had, stay as
             // they are.
-            startFromActiveShell(.claude, resume: key.id, fork: true, cwd: cwd, shellCwd: false, title: title)
+            startFromActiveShell(.claude, resume: key.id, fork: true, cwd: cwd, title: title)
             return
         }
         // The tab of an agent that quit makes way for the resumed one, and
@@ -855,7 +855,7 @@ final class Workspace {
         tabs.removeAll { $0.shows(key) && !$0.isRunning }
         // A Codex session that never got a transcript starts fresh.
         let resume = key.id.hasPrefix("new-") || key.agent == .shell ? nil : key.id
-        let started = startFromActiveShell(key.agent, resume: resume, cwd: cwd, shellCwd: false, title: title)
+        let started = startFromActiveShell(key.agent, resume: resume, cwd: cwd, title: title)
         guard ended.contains(where: \.pinned) else { return }
         if started {
             currentTab?.pinned = true
@@ -1054,24 +1054,27 @@ final class Workspace {
         open(key)
     }
 
-    /// Starts an agent in place of the idle shell in the focused pane, even
-    /// in a split. Anything else starts on its own, and a split on screen
-    /// stays as it is.
-    func newSession(_ agent: Agent) {
-        if agent == .shell || activeIdleShell() == nil {
-            guard checkFolder(root) else { return }
-            makeRoom()
-        }
-        startFromActiveShell(agent, resume: nil, cwd: root, shellCwd: true, title: newTitle(agent))
-    }
-
     /// Starts a new session in `cwd`, e.g. the folder of another session.
-    /// Unlike `newSession`, it never takes the place of the shown shell.
-    func newSession(_ agent: Agent, cwd: String) {
+    /// With `inPlaceOfShell`, an agent takes the place of the idle shell in
+    /// the focused pane, even in a split. Anything else starts on its own,
+    /// and a split on screen stays as it is.
+    func newSession(_ agent: Agent, cwd: String, inPlaceOfShell: Bool = false) {
         guard checkFolder(cwd) else { return }
+        if inPlaceOfShell, agent != .shell, activeIdleShell() != nil {
+            startFromActiveShell(agent, resume: nil, cwd: cwd, title: newTitle(agent))
+            return
+        }
         makeRoom()
         start(agent, resume: nil, cwd: cwd, title: newTitle(agent))
         prune()
+    }
+
+    /// The folder of the session in the focused pane: where a shell is now,
+    /// or where an agent started. Without one, where the project is.
+    var shownFolder: String {
+        currentTab.map { r in
+            r.key.agent == .shell ? r.terminal.pid.flatMap(workingDirectory) ?? r.cwd : r.cwd
+        } ?? root
     }
 
     /// False, with a status line, if the folder is gone.
@@ -1088,28 +1091,21 @@ final class Workspace {
     }
 
     /// The shell shown in the pane can be replaced only when it is at its
-    /// prompt and not pinned. Reads its real folder because not every shell
-    /// reports it.
-    private func activeIdleShell() -> (key: SessionKey, cwd: String)? {
+    /// prompt and not pinned.
+    private func activeIdleShell() -> SessionKey? {
         guard let r = currentTab, r.key.agent == .shell, r.isRunning, r.linked == nil, !r.pinned,
               !r.terminal.hasForegroundJob
         else { return nil }
-        return (r.key, r.terminal.pid.flatMap(workingDirectory) ?? r.cwd)
+        return r.key
     }
 
-    /// Starts an agent in place of the idle shell shown in the pane, if
-    /// there is one. With `shellCwd` it starts in the shell's folder.
-    /// Returns false if it could not start.
+    /// Starts an agent in `cwd`, in place of the idle shell shown in the
+    /// pane if there is one. Returns false if it could not start.
     @discardableResult
-    private func startFromActiveShell(
-        _ agent: Agent, resume: String?, fork: Bool = false, cwd: String, shellCwd: Bool, title: String
-    ) -> Bool {
+    private func startFromActiveShell(_ agent: Agent, resume: String?, fork: Bool = false, cwd: String, title: String) -> Bool {
         let shell = agent != .shell ? activeIdleShell() : nil
-        // A session opened from the list keeps its own folder: Claude finds
-        // its transcript by folder, and Codex would carry on in another repo.
-        let cwd = shellCwd ? shell?.cwd ?? cwd : cwd
         guard start(agent, resume: resume, fork: fork, cwd: cwd, title: title) else { return false }
-        if let key = shell?.key {
+        if let key = shell {
             tabs.removeAll { $0.key == key }
             rebuildRows()
         }
@@ -1151,9 +1147,7 @@ final class Workspace {
             panes.split = direction
             return
         }
-        let cwd = currentTab.map { r in
-            r.key.agent == .shell ? r.terminal.pid.flatMap(workingDirectory) ?? r.cwd : r.cwd
-        } ?? root
+        let cwd = shownFolder
         panes = PaneLayout(keys: [current, nil], split: direction, focused: 1)
         // Like the shell that replaces an agent that quit, it goes away if
         // the user moves on without typing into it.

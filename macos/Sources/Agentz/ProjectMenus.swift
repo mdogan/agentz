@@ -147,7 +147,8 @@ struct NewWorktreeView: View {
     let current: Worktree?
     let created: (NewWorktree) -> Void
     let switchTo: (Worktree) -> Void
-    @Environment(\.dismiss) private var dismiss
+    /// Closes the sheet it is in.
+    let close: () -> Void
     @State private var name = ""
     @State private var branches: [Branch]?
     /// The worktree a new branch starts from, by path.
@@ -211,7 +212,7 @@ struct NewWorktreeView: View {
                     ProgressView().controlSize(.small)
                 }
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel", action: close)
                     .keyboardShortcut(.cancelAction)
                 Button("Create", action: create)
                     .keyboardShortcut(.defaultAction)
@@ -309,7 +310,7 @@ struct NewWorktreeView: View {
                 Spacer()
                 Button("Switch to It") {
                     switchTo(wt)
-                    dismiss()
+                    close()
                 }
             }
         case let .fork(branch):
@@ -364,10 +365,24 @@ struct NewWorktreeView: View {
             switch result {
             case let .success(made):
                 created(made)
-                dismiss()
+                close()
             case let .failure(e):
                 error = errorMessage(e)
             }
+        }
+    }
+}
+
+extension Workspace {
+    /// Tells the user about the worktree `NewWorktreeView` made, with what
+    /// did not go well, and has the list look at the worktrees again.
+    func worktreeMade(_ made: NewWorktree) {
+        requestScan?()
+        if let problem = made.warnings.first {
+            let more = made.warnings.count > 1 ? " (and \(made.warnings.count - 1) more)" : ""
+            setStatus("Created \(tilde(made.path)). \(problem)\(more)")
+        } else {
+            setStatus("Created worktree \(tilde(made.path))")
         }
     }
 }

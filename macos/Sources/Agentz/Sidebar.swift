@@ -147,15 +147,10 @@ struct SidebarView: View {
                 current: worktree(containing: workspace.projectDir, in: request.repo.worktrees),
                 created: { made in
                     actions.start(request.agent, made.path, request.repo.dir)
-                    workspace.requestScan?()
-                    if let problem = made.warnings.first {
-                        let more = made.warnings.count > 1 ? " (and \(made.warnings.count - 1) more)" : ""
-                        workspace.setStatus("Created \(tilde(made.path)). \(problem)\(more)")
-                    } else {
-                        workspace.setStatus("Created worktree \(tilde(made.path))")
-                    }
+                    workspace.worktreeMade(made)
                 },
-                switchTo: { wt in actions.start(request.agent, wt.path, request.repo.dir) }
+                switchTo: { wt in actions.start(request.agent, wt.path, request.repo.dir) },
+                close: { newWorktree = nil }
             )
         }
     }

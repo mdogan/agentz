@@ -69,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let quick = QuickTerminal(settings: GhosttyApp.quickTerminal, look: look)
         quickTerminal = quick
         workspace.quickShellPid = { [weak quick] in quick?.shellPid }
-        if SmokeTest.logPath == nil { remember(workspace.projectDir) }
+        remember(workspace.projectDir)
         let controller = MainWindowController(
             workspace: workspace,
             look: look,
@@ -82,7 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 createFolder: { [weak self] agent in
                     self?.createFolder("Start a new \(agent.displayName) session in a new folder.")
                 },
-                recentFolders: { UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? [] },
+                recentFolders: { [weak self] in self?.recentFolders ?? [] },
                 clearRecentFolders: { UserDefaults.standard.removeObject(forKey: Self.recentsKey) },
                 notificationSettings: { [weak self] in self?.notificationSettings(nil) },
                 stopLeftovers: { [weak self] leftovers in self?.stopLeftovers(leftovers) }
@@ -182,22 +182,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private func open(_ dir: String, recent: Bool) {
         guard let workspace else { return }
         workspace.openProject(dir)
-        UserDefaults.standard.set(workspace.projectDir, forKey: "project")
+        if SmokeTest.logPath == nil { UserDefaults.standard.set(workspace.projectDir, forKey: "project") }
         if recent { remember(workspace.projectDir) }
     }
 
     /// Starts a session in `dir`, and makes `repo`, the folder picked from
-    /// the recent folders, the most recent one.
-    private func start(_ agent: Agent, in dir: String, repo: String) {
+    /// the recent folders, the most recent one. With `inPlaceOfShell`, an
+    /// agent takes the place of the shown shell if it is idle.
+    private func start(_ agent: Agent, in dir: String, repo: String, inPlaceOfShell: Bool = false) {
         guard let workspace else { return }
         open(dir, recent: false)
         remember(repo)
-        workspace.newSession(agent, cwd: dir)
+        workspace.newSession(agent, cwd: dir, inPlaceOfShell: inPlaceOfShell)
     }
 
+    private var recentFolders: [String] {
+        UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? []
+    }
+
+    /// Puts `dir` at the top of the recent folders. Not in the smoke test,
+    /// whose folders are gone once it is done.
     private func remember(_ dir: String) {
-        let recents = UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? []
-        UserDefaults.standard.set(addingRecent(dir, to: recents), forKey: Self.recentsKey)
+        guard SmokeTest.logPath == nil else { return }
+        UserDefaults.standard.set(addingRecent(dir, to: recentFolders), forKey: Self.recentsKey)
     }
 
     /// `--project <dir>` or a folder argument, for when the binary runs
@@ -285,9 +292,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     // MARK: - Actions
 
-    @objc func newClaude(_: Any?) { workspace?.newSession(.claude) }
-    @objc func newCodex(_: Any?) { workspace?.newSession(.codex) }
-    @objc func newShell(_: Any?) { workspace?.newSession(.shell) }
+    @objc func newClaude(_: Any?) { askWhereToStart(.claude) }
+    @objc func newCodex(_: Any?) { askWhereToStart(.codex) }
+    @objc func newShell(_: Any?) { askWhereToStart(.shell) }
+
+    /// ⌘N, ⇧⌘N and ⌘T: asks for a recent folder or a worktree of its repo,
+    /// with the shown session's folder picked already. An agent takes the
+    /// place of the shown shell if it is idle.
+    private func askWhereToStart(_ agent: Agent) {
+        guard let workspace, let windowController else { return }
+        let (places, picked) = startPlaces(here: workspace.shownFolder, recents: recentFolders)
+        windowController.showSheet { close in
+            StartPicker(agent: agent, places: places, picked: picked, close: close) { [weak self] choice in
+                close()
+                // Once the sheet is gone: what comes next may ask more.
+                DispatchQueue.main.async { self?.start(agent, at: choice) }
+            }
+        }
+    }
+
+    private func start(_ agent: Agent, at choice: StartChoice) {
+        switch choice {
+        case let .folder(dir, repo):
+            start(agent, in: dir, repo: repo, inPlaceOfShell: true)
+        case let .newWorktree(repo):
+            newWorktree(agent, in: repo)
+        case .openFolder:
+            if let dir = chooseFolder("Start a new \(agent.displayName) session in this folder.", prompt: "Start") {
+                start(agent, in: dir, repo: dir, inPlaceOfShell: true)
+            }
+        case .createFolder:
+            if let dir = createFolder("Start a new \(agent.displayName) session in a new folder.") {
+                start(agent, in: dir, repo: dir, inPlaceOfShell: true)
+            }
+        }
+    }
+
+    /// Asks for a branch, makes a worktree of `repo` for it and starts the
+    /// agent there.
+    private func newWorktree(_ agent: Agent, in repo: RecentRepo) {
+        guard let workspace else { return }
+        windowController?.showSheet { close in
+            NewWorktreeView(
+                worktrees: repo.worktrees,
+                current: worktree(containing: workspace.projectDir, in: repo.worktrees),
+                created: { [weak self] made in
+                    self?.start(agent, in: made.path, repo: repo.dir, inPlaceOfShell: true)
+                    workspace.worktreeMade(made)
+                },
+                switchTo: { [weak self] wt in self?.start(agent, in: wt.path, repo: repo.dir, inPlaceOfShell: true) },
+                close: close
+            )
+        }
+    }
 
     @objc func openFolder(_: Any?) {
         guard let dir = chooseFolder("New sessions start in this folder.", prompt: "Open") else { return }
@@ -500,6 +557,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let inQuickTerminal = quickTerminal?.isKey == true
         if inQuickTerminal, let action = item.action, Self.sessionActions.contains(action) { return false }
         switch item.action {
+        case #selector(newClaude(_:)), #selector(newCodex(_:)), #selector(newShell(_:)):
+            // One asks already, or something else does.
+            return windowController?.window?.attachedSheet == nil
         case #selector(toggleAllSessions(_:)):
             item.state = workspace.range == .all ? .on : .off
         case #selector(selectRange(_:)):
@@ -555,9 +615,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         app.addItem(withTitle: "Quit Agentz", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let file = submenu(main, "File")
-        add(file, "New Claude Session", #selector(newClaude(_:)), "n")
-        add(file, "New Codex Session", #selector(newCodex(_:)), "N")
-        add(file, "New Shell", #selector(newShell(_:)), "t")
+        add(file, "New Claude Session…", #selector(newClaude(_:)), "n")
+        add(file, "New Codex Session…", #selector(newCodex(_:)), "N")
+        add(file, "New Shell…", #selector(newShell(_:)), "t")
         file.addItem(.separator())
         add(file, "Open Folder…", #selector(openFolder(_:)), "o")
         file.addItem(.separator())
