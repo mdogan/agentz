@@ -67,6 +67,8 @@ struct Row: Identifiable, Equatable {
     /// since then.
     var turnStarted: Date?
     var action: Action?
+    /// How full its agent's context window is.
+    var context: ContextWindow?
     /// What the list sorts by, newest first. For a session with a tab of
     /// ours, when the tab started: new and resumed sessions go to the top
     /// and stay there, instead of moving up each time the agent writes.
@@ -119,12 +121,19 @@ enum SessionRange: CaseIterable {
     }
 
     func includes(_ updated: Date, now: Date) -> Bool {
+        guard self != .active else { return false }
+        return since(now: now).map { updated >= $0 } ?? true
+    }
+
+    /// The oldest a session in the range can be, nil for no limit. Active
+    /// sessions get today's, as most of them ran today: the first scan
+    /// reads only sessions this new.
+    func since(now: Date) -> Date? {
         switch self {
-        case .active: false
-        case .today: updated >= Calendar.current.startOfDay(for: now)
-        case .week: updated >= now.addingTimeInterval(-7 * 86400)
-        case .month: updated >= now.addingTimeInterval(-30 * 86400)
-        case .all: true
+        case .active, .today: Calendar.current.startOfDay(for: now)
+        case .week: now.addingTimeInterval(-7 * 86400)
+        case .month: now.addingTimeInterval(-30 * 86400)
+        case .all: nil
         }
     }
 }
@@ -204,6 +213,9 @@ struct RepoFilter: Equatable {
 final class Workspace {
     private(set) var sessions: [Session] = []
     private(set) var loaded = false
+    /// `sessions` has all of them, not only the recent ones the first scan
+    /// reads.
+    private(set) var allLoaded = false
     /// The folder the user last started a session in. ⌘N and friends
     /// offer it when no session is shown.
     private(set) var projectDir: String
@@ -558,6 +570,7 @@ final class Workspace {
         // Nil when nothing changed since the last scan.
         if let scanned = scan.sessions { sessions = scanned }
         loaded = true
+        if scan.complete { allLoaded = true }
         if scan.limits != limits { limits = scan.limits }
         if dir == projectDir, scan.worktrees != worktrees {
             worktrees = scan.worktrees
@@ -675,7 +688,7 @@ final class Workspace {
             let place = place(s.cwd)
             return Row(
                 key: key, title: s.title, cwd: s.cwd, place: place, branch: shownBranch(s.branch, place: place), pr: s.pr,
-                updated: s.updated, turnStarted: s.turnStarted, action: s.action, order: order,
+                updated: s.updated, turnStarted: s.turnStarted, action: s.action, context: s.context, order: order,
                 pinned: tab?.pinned ?? false, active: tab != nil
             )
         }
@@ -1000,9 +1013,10 @@ final class Workspace {
 
     /// Types `continue` into each session that asked for it once its limit
     /// resets, once per stop, when its agent runs here, has settled in and
-    /// is not working. One that went on is done with.
+    /// is not working. One that went on is done with. Waits for the full
+    /// list: a session the first scan left out has not gone on.
     private func continueAfterLimits() {
-        guard loaded, !continueAtReset.isEmpty else { return }
+        guard allLoaded, !continueAtReset.isEmpty else { return }
         let now = Date()
         var keys = continueAtReset
         for key in continueAtReset {
@@ -1488,13 +1502,15 @@ final class Scanner {
         let pids = workspace.shellPids
         let codexPids = workspace.newCodexPids
         let quickPid = workspace.quickShellPid()
+        let since = workspace.range.since(now: Date())
         let scanner = self.scanner
         queue.async {
-            let scan = scanner.scan(dir, pids, codexPids, quickPid)
+            let scan = scanner.scan(dir, pids, codexPids, quickPid, since)
             DispatchQueue.main.async {
                 self.scanning = false
                 self.workspace?.apply(scan, dir: dir)
-                if self.again {
+                // The first scan left out old sessions; read them now.
+                if self.again || !scan.complete {
                     self.again = false
                     self.scan()
                 }

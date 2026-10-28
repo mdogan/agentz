@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::action::{self, Action};
+use crate::usage::ContextWindows;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, uniffi::Enum)]
 #[serde(rename_all = "lowercase")]
@@ -55,6 +56,19 @@ pub struct Session {
     pub turn_started: Option<SystemTime>,
     /// The last tool the agent called in that turn.
     pub action: Option<Action>,
+    /// How full its context window was after the model's last answer.
+    pub context: Option<ContextWindow>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ContextWindow {
+    /// Tokens in the context: what the model read for its last answer, or
+    /// what was left after the last compaction.
+    pub used: u64,
+    /// How many tokens fit. Codex says it in its rollout, Claude only to its
+    /// status line, so it is unknown for Claude sessions that did not run
+    /// ours.
+    pub size: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -90,6 +104,9 @@ struct Parsed {
     limit: Option<(String, Option<SystemTime>)>,
     turn_started: Option<SystemTime>,
     action: Option<Action>,
+    /// Tokens in the context, and the window's size if the transcript says.
+    context: Option<u64>,
+    window: Option<u64>,
     skip: bool,
 }
 
@@ -106,6 +123,7 @@ pub struct Scanner {
     /// Codex rollout files from the last scan, newest first.
     codex_files: Vec<PathBuf>,
     thread_names: ThreadNames,
+    claude_windows: ContextWindows,
 }
 
 /// Codex's `session_index.jsonl`, read again only when it changes.
@@ -130,17 +148,26 @@ impl ThreadNames {
 }
 
 impl Scanner {
-    pub fn scan(&mut self) -> Vec<Session> {
+    /// All sessions. With `since`, a transcript last changed before then is
+    /// left out if no scan read it yet, so a first scan can show recent
+    /// sessions sooner; a later scan without it reads the rest.
+    pub fn scan(&mut self, since: Option<SystemTime>) -> Vec<Session> {
         let mut out = Vec::new();
         let mut seen = Vec::new();
 
         if let Some(dir) = claude_projects_dir() {
+            let mut windows = std::mem::take(&mut self.claude_windows);
+            let sizes = windows.read();
             for path in claude_files(&dir) {
-                if let Some(s) = self.visit(&path, Agent::Claude) {
+                if let Some(mut s) = self.visit(&path, Agent::Claude, since) {
+                    if let Some(c) = &mut s.context {
+                        c.size = sizes.get(&s.id).copied();
+                    }
                     out.push(s);
                 }
                 seen.push(path);
             }
+            self.claude_windows = windows;
         }
 
         if let Some(home) = codex_home() {
@@ -151,7 +178,7 @@ impl Scanner {
             walk_jsonl(&home.join("sessions"), &mut files);
             let mut by_mtime = Vec::new();
             for path in files {
-                if let Some(mut s) = self.visit(&path, Agent::Codex) {
+                if let Some(mut s) = self.visit(&path, Agent::Codex, since) {
                     if let Some(name) = names.get(&s.id) {
                         s.title = name.clone();
                     }
@@ -179,7 +206,7 @@ impl Scanner {
         &self.codex_files
     }
 
-    fn visit(&mut self, path: &Path, agent: Agent) -> Option<Session> {
+    fn visit(&mut self, path: &Path, agent: Agent, since: Option<SystemTime>) -> Option<Session> {
         let meta = fs::metadata(path).ok()?;
         let len = meta.len();
         let mtime = meta.modified().ok()?;
@@ -200,6 +227,7 @@ impl Scanner {
                 e.mtime = mtime;
                 e
             }
+            None if since.is_some_and(|t| mtime < t) => return None,
             None => {
                 let recent = SystemTime::now()
                     .duration_since(mtime)
@@ -245,6 +273,10 @@ impl Scanner {
             }),
             turn_started: p.turn_started,
             action: p.action.clone(),
+            context: p.context.map(|used| ContextWindow {
+                used,
+                size: p.window,
+            }),
         })
     }
 }
@@ -297,8 +329,10 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
     let mut reader = BufReader::new(file);
     let mut line = String::new();
     // Claude calls tools often, and only the last call matters, so only
-    // that one is parsed, after the loop.
+    // that one is parsed, after the loop. The same for what tells how full
+    // the context is.
     let mut last_call = String::new();
+    let mut last_context = String::new();
     loop {
         line.clear();
         let n = match reader.read_line(&mut line) {
@@ -311,7 +345,8 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
         }
         p.offset += n as u64;
 
-        if line.contains("\"type\":\"tool_use\"") && line.contains("\"type\":\"assistant\"") {
+        let assistant = line.contains("\"type\":\"assistant\"");
+        if assistant && line.contains("\"type\":\"tool_use\"") {
             last_call.clone_from(&line);
         } else if line.contains("\"type\":\"user\"")
             // Not a tool's result, which most of them are.
@@ -323,14 +358,16 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
             p.action = None;
             last_call.clear();
         }
+        if is_claude_context(&line, assistant) {
+            last_context.clone_from(&line);
+        }
         if let Some(branch) = git_branch(&line) {
             p.branch = branch;
         }
         // Claude writes a stop at the limit as an error message of its own.
         // Anything the user or Claude says after it means it went on.
         let limit = line.contains("\"rate_limit\"") && line.contains("\"isApiErrorMessage\":true");
-        let after_limit = p.limit.is_some()
-            && (line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\""));
+        let after_limit = p.limit.is_some() && (assistant || line.contains("\"type\":\"user\""));
         if (limit || after_limit)
             && let Ok(v) = serde_json::from_str::<Value>(&line)
         {
@@ -386,7 +423,46 @@ fn parse_claude(path: &Path, mut p: Parsed) -> Parsed {
     {
         p.action = Some(action);
     }
+    if let Ok(v) = serde_json::from_str::<Value>(&last_context) {
+        p.context = claude_context(&v);
+    }
     p
+}
+
+/// True for a Claude transcript line that tells how full the context is:
+/// an answer of the model in this conversation, not a sub-agent's or one
+/// Claude made up itself, or a compaction. `assistant`: the line is the
+/// model's. Quotes inside strings are escaped, so a transcript quoted in a
+/// message does not count.
+fn is_claude_context(line: &str, assistant: bool) -> bool {
+    if assistant {
+        line.contains("\"usage\":{")
+            && !line.contains("\"isSidechain\":true")
+            && !line.contains("\"model\":\"<synthetic>\"")
+    } else {
+        // Compactions are short lines; long ones, like tools' results, are
+        // not searched.
+        line.len() < 16 * 1024 && line.contains("\"subtype\":\"compact_boundary\"")
+    }
+}
+
+/// The tokens in the context after a line `is_claude_context` picked: the
+/// input of the answer, cached or not, like Claude's own `/context`. After a
+/// compaction, what it kept, if it says.
+fn claude_context(v: &Value) -> Option<u64> {
+    if v["subtype"] == "compact_boundary" {
+        return v["compactMetadata"]["postTokens"].as_u64();
+    }
+    let usage = &v["message"]["usage"];
+    let used = [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .filter_map(|k| usage[k].as_u64())
+    .sum();
+    (used > 0).then_some(used)
 }
 
 fn parse_codex(path: &Path) -> Parsed {
@@ -465,8 +541,9 @@ const CODEX_CALLS: [&str; 4] = [
 ];
 
 /// Reads the rest of a Codex rollout, from where `p` stopped, for when its
-/// last turn started, its last tool call, and a stop at the rate limit: a
-/// turn that ended with `usage_limit_exceeded`. A new turn means it went on.
+/// last turn started, its last tool call, how full its context is, and a
+/// stop at the rate limit: a turn that ended with `usage_limit_exceeded`. A
+/// new turn means it went on.
 fn parse_codex_tail(path: &Path, mut p: Parsed) -> Parsed {
     let Ok(mut file) = File::open(path) else {
         return p;
@@ -476,6 +553,9 @@ fn parse_codex_tail(path: &Path, mut p: Parsed) -> Parsed {
     }
     let mut reader = BufReader::new(file);
     let mut line = String::new();
+    // Codex counts tokens after every model call; only the last count is
+    // parsed, after the loop.
+    let mut last_count = String::new();
     loop {
         line.clear();
         let n = match reader.read_line(&mut line) {
@@ -487,6 +567,10 @@ fn parse_codex_tail(path: &Path, mut p: Parsed) -> Parsed {
             break;
         }
         p.offset += n as u64;
+        if line.contains("\"token_count\"") && line.contains("\"last_token_usage\"") {
+            last_count.clone_from(&line);
+            continue;
+        }
         if !line.contains("\"usage_limit_exceeded\"")
             && !line.contains("\"task_started\"")
             && !CODEX_CALLS.iter().any(|c| line.contains(c))
@@ -514,6 +598,15 @@ fn parse_codex_tail(path: &Path, mut p: Parsed) -> Parsed {
             && let Some(message) = str_field(&payload["error"], "message")
         {
             p.limit = Some((message, v["timestamp"].as_str().and_then(parse_time)));
+        }
+    }
+    // `{"last_token_usage": {"input_tokens", "cached_input_tokens", ...},
+    // "model_context_window"}`. The input includes the cached tokens.
+    if let Ok(v) = serde_json::from_str::<Value>(&last_count) {
+        let info = &v["payload"]["info"];
+        if let Some(used) = info["last_token_usage"]["input_tokens"].as_u64() {
+            p.context = Some(used);
+            p.window = info["model_context_window"].as_u64();
         }
     }
     p
@@ -698,7 +791,7 @@ mod tests {
         .unwrap();
 
         let mut scanner = Scanner::default();
-        assert!(scanner.visit(&path, Agent::Codex).is_none());
+        assert!(scanner.visit(&path, Agent::Codex, None).is_none());
 
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(
@@ -708,7 +801,7 @@ mod tests {
         .unwrap();
         drop(file);
 
-        let session = scanner.visit(&path, Agent::Codex).unwrap();
+        let session = scanner.visit(&path, Agent::Codex, None).unwrap();
         assert_eq!(session.id, "test-id");
         assert_eq!(session.title, "first prompt");
         assert_eq!(session.cwd, Path::new("/tmp"));
@@ -730,7 +823,7 @@ mod tests {
         .unwrap();
 
         let mut scanner = Scanner::default();
-        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        let session = scanner.visit(&path, Agent::Claude, None).unwrap();
         assert_eq!(session.title, "fix the bug");
         assert_eq!(session.cwd, Path::new("/work"));
 
@@ -743,7 +836,7 @@ mod tests {
         )
         .unwrap();
         drop(file);
-        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        let session = scanner.visit(&path, Agent::Claude, None).unwrap();
         assert_eq!(session.title, "Named");
         fs::remove_file(path).unwrap();
     }
@@ -762,7 +855,7 @@ mod tests {
         )
         .unwrap();
         let mut scanner = Scanner::default();
-        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        let session = scanner.visit(&path, Agent::Claude, None).unwrap();
         assert_eq!(session.branch.as_deref(), Some("fix/x"));
         assert_eq!(
             session.pr,
@@ -780,7 +873,7 @@ mod tests {
         )
         .unwrap();
         drop(file);
-        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        let session = scanner.visit(&path, Agent::Claude, None).unwrap();
         assert_eq!(session.branch, None);
         assert_eq!(session.pr.map(|pr| pr.number), Some(1600));
         fs::remove_file(path).unwrap();
@@ -804,7 +897,7 @@ mod tests {
 "#,
         );
         let mut scanner = Scanner::default();
-        let limit = scanner.visit(&path, Agent::Claude).unwrap().limit;
+        let limit = scanner.visit(&path, Agent::Claude, None).unwrap().limit;
         assert_eq!(
             limit,
             Some(LimitStop {
@@ -820,25 +913,41 @@ mod tests {
 {"type":"system","subtype":"info","content":"\"type\":\"user\""}
 "#,
         );
-        assert!(scanner.visit(&path, Agent::Claude).unwrap().limit.is_some());
+        assert!(
+            scanner
+                .visit(&path, Agent::Claude, None)
+                .unwrap()
+                .limit
+                .is_some()
+        );
         append(
             r#"{"type":"user","message":{"content":"continue"}}
 "#,
         );
-        assert_eq!(scanner.visit(&path, Agent::Claude).unwrap().limit, None);
+        assert_eq!(
+            scanner.visit(&path, Agent::Claude, None).unwrap().limit,
+            None
+        );
         // An answer ends it too.
         append(
             r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"content":[{"type":"text","text":"limit"}]}}
 "#,
         );
-        let limit = scanner.visit(&path, Agent::Claude).unwrap().limit.unwrap();
+        let limit = scanner
+            .visit(&path, Agent::Claude, None)
+            .unwrap()
+            .limit
+            .unwrap();
         // Without a timestamp, the file's time.
         assert!(limit.at > SystemTime::now() - std::time::Duration::from_secs(60));
         append(
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Going on."}]}}
 "#,
         );
-        assert_eq!(scanner.visit(&path, Agent::Claude).unwrap().limit, None);
+        assert_eq!(
+            scanner.visit(&path, Agent::Claude, None).unwrap().limit,
+            None
+        );
         fs::remove_file(path).unwrap();
     }
 
@@ -856,7 +965,11 @@ mod tests {
         )
         .unwrap();
         let mut scanner = Scanner::default();
-        let limit = scanner.visit(&path, Agent::Codex).unwrap().limit.unwrap();
+        let limit = scanner
+            .visit(&path, Agent::Codex, None)
+            .unwrap()
+            .limit
+            .unwrap();
         assert_eq!(
             limit.message,
             "You've hit your usage limit. Try again at Aug 5th, 2026 9:34 AM."
@@ -872,7 +985,7 @@ mod tests {
         )
         .unwrap();
         drop(file);
-        let session = scanner.visit(&path, Agent::Codex).unwrap();
+        let session = scanner.visit(&path, Agent::Codex, None).unwrap();
         assert_eq!(session.limit, None);
         assert_eq!(session.title, "go");
         fs::remove_file(path).unwrap();
@@ -898,7 +1011,7 @@ mod tests {
 "#,
         );
         let mut scanner = Scanner::default();
-        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        let session = scanner.visit(&path, Agent::Claude, None).unwrap();
         assert_eq!(
             session.turn_started,
             Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_788_427_927_350))
@@ -914,7 +1027,7 @@ mod tests {
 {"type":"assistant","message":{"content":[{"type":"text","text":"All pass."}]}}
 "#,
         );
-        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        let session = scanner.visit(&path, Agent::Claude, None).unwrap();
         assert!(session.turn_started.is_some());
         assert!(session.action.is_some());
         // A new prompt starts a turn without an action.
@@ -922,7 +1035,7 @@ mod tests {
             r#"{"type":"user","timestamp":"2026-09-03T10:00:00Z","message":{"content":"thanks"}}
 "#,
         );
-        let session = scanner.visit(&path, Agent::Claude).unwrap();
+        let session = scanner.visit(&path, Agent::Claude, None).unwrap();
         assert_eq!(
             session.turn_started,
             Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_788_429_600))
@@ -956,7 +1069,7 @@ mod tests {
 "#,
         );
         let mut scanner = Scanner::default();
-        let session = scanner.visit(&path, Agent::Codex).unwrap();
+        let session = scanner.visit(&path, Agent::Codex, None).unwrap();
         assert_eq!(
             session.turn_started,
             Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_788_427_927_350))
@@ -969,12 +1082,111 @@ mod tests {
             r#"{"timestamp":"2026-09-03T10:00:00Z","type":"event_msg","payload":{"type":"task_started"}}
 "#,
         );
-        let session = scanner.visit(&path, Agent::Codex).unwrap();
+        let session = scanner.visit(&path, Agent::Codex, None).unwrap();
         assert_eq!(
             session.turn_started,
             Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_788_429_600))
         );
         assert_eq!(session.action, None);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn claude_context_is_from_the_last_answer_or_compaction() {
+        let path =
+            std::env::temp_dir().join(format!("agentz-claude-{}.jsonl", uuid::Uuid::new_v4()));
+        let append = |text: &str| {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(text.as_bytes()).unwrap();
+        };
+        append(
+            r#"{"type":"user","cwd":"/work","message":{"content":"read the logs"}}
+{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"Reading."}],"usage":{"input_tokens":2,"cache_creation_input_tokens":830,"cache_read_input_tokens":536795,"output_tokens":561,"iterations":[{"input_tokens":9}]}}}
+"#,
+        );
+        let mut scanner = Scanner::default();
+        let context = scanner.visit(&path, Agent::Claude, None).unwrap().context;
+        assert_eq!(
+            context,
+            Some(ContextWindow {
+                used: 537_627,
+                size: None
+            })
+        );
+        // Not a sub-agent's answer, one Claude made up, or a transcript
+        // quoted in a tool's result.
+        append(
+            r#"{"type":"assistant","isSidechain":true,"message":{"content":[],"usage":{"input_tokens":5}}}
+{"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[],"usage":{"input_tokens":0}}}
+{"type":"user","message":{"content":[{"tool_use_id":"t1","type":"tool_result","content":"{\"type\":\"assistant\",\"usage\":{\"input_tokens\":7}}"}]}}
+"#,
+        );
+        let context = scanner.visit(&path, Agent::Claude, None).unwrap().context;
+        assert_eq!(context.map(|c| c.used), Some(537_627));
+        append(
+            r#"{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","compactMetadata":{"trigger":"auto","preTokens":967939,"postTokens":20348}}
+"#,
+        );
+        let context = scanner.visit(&path, Agent::Claude, None).unwrap().context;
+        assert_eq!(context.map(|c| c.used), Some(20_348));
+        append(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}],"usage":{"input_tokens":3,"cache_creation_input_tokens":30000,"cache_read_input_tokens":12000}}}
+"#,
+        );
+        let context = scanner.visit(&path, Agent::Claude, None).unwrap().context;
+        assert_eq!(context.map(|c| c.used), Some(42_003));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn codex_context_is_from_the_last_token_count() {
+        let path = std::env::temp_dir().join(format!(
+            "agentz-codex-context-{}.jsonl",
+            uuid::Uuid::new_v4()
+        ));
+        fs::write(
+            &path,
+            r#"{"type":"session_meta","payload":{"id":"c3","cwd":"/tmp","source":"cli","originator":"codex-tui"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":900,"output_tokens":20},"model_context_window":475000}}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":423058,"cached_input_tokens":422656,"output_tokens":1068},"model_context_window":475000}}}
+{"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex"}}}
+"#,
+        )
+        .unwrap();
+        let mut scanner = Scanner::default();
+        let context = scanner.visit(&path, Agent::Codex, None).unwrap().context;
+        assert_eq!(
+            context,
+            Some(ContextWindow {
+                used: 423_058,
+                size: Some(475_000)
+            })
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_scan_since_a_time_leaves_out_older_transcripts_not_read_yet() {
+        let path =
+            std::env::temp_dir().join(format!("agentz-claude-{}.jsonl", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            r#"{"type":"user","cwd":"/work","message":{"content":"old work"}}
+"#,
+        )
+        .unwrap();
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let later = mtime + std::time::Duration::from_secs(1);
+        let mut scanner = Scanner::default();
+        assert!(scanner.visit(&path, Agent::Claude, Some(later)).is_none());
+        assert!(scanner.visit(&path, Agent::Claude, Some(mtime)).is_some());
+        // Once read, it stays, whatever the time.
+        assert!(scanner.visit(&path, Agent::Claude, Some(later)).is_some());
         fs::remove_file(path).unwrap();
     }
 

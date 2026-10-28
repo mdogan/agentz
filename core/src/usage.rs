@@ -6,12 +6,16 @@
 //!              Users can also install it in Claude's user settings, so
 //!              manually launched sessions report their limits too.
 //! Codex:       writes `rate_limits` into the rollout file after each turn.
+//!
+//! The status line also saves the size of each Claude session's context
+//! window, which its transcript does not say.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -349,15 +353,14 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Result<()> 
 pub fn status_line() -> anyhow::Result<i32> {
     let mut input = Vec::new();
     std::io::stdin().read_to_end(&mut input)?;
-    if let Ok(v) = serde_json::from_slice::<Value>(&input)
-        && parse_claude(&v["rate_limits"]).is_some()
-        && let Some(path) = claude_file()
-    {
-        // Write and rename, so the UI never reads half a file.
-        let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
-        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-        if fs::write(&tmp, v["rate_limits"].to_string()).is_ok() {
-            let _ = fs::rename(&tmp, &path);
+    if let Ok(v) = serde_json::from_slice::<Value>(&input) {
+        if parse_claude(&v["rate_limits"]).is_some()
+            && let Some(path) = claude_file()
+        {
+            replace_file(&path, &v["rate_limits"].to_string());
+        }
+        if let Some(dir) = context_windows_dir() {
+            save_context_window(&dir, &v);
         }
     }
 
@@ -386,6 +389,109 @@ pub fn status_line() -> anyhow::Result<i32> {
 /// Quotes `s` for `sh`.
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Writes `text` to `path` and renames it there, so the UI never reads half
+/// a file.
+fn replace_file(path: &Path, text: &str) {
+    let _ = fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    if fs::write(&tmp, text).is_ok() {
+        let _ = fs::rename(&tmp, path);
+    }
+}
+
+// ---------- Claude's context windows ----------
+
+/// A window size saved this long ago is removed once a new session saves
+/// one, so the folder stays small.
+const CONTEXT_WINDOW_AGE: Duration = Duration::from_secs(30 * 86_400);
+
+/// Where the status line saves each Claude session's context window size,
+/// in a file named after the session.
+fn context_windows_dir() -> Option<PathBuf> {
+    Some(dirs::cache_dir()?.join("agentz").join("claude-context"))
+}
+
+/// Saves the size of the session's context window, from Claude's
+/// `{"session_id", "context_window": {"context_window_size"}}`. Only when
+/// it changed: the status line runs after every message.
+fn save_context_window(dir: &Path, v: &Value) {
+    let (Some(id), Some(size)) = (
+        v["session_id"].as_str(),
+        v["context_window"]["context_window_size"].as_u64(),
+    ) else {
+        return;
+    };
+    // It is a file name.
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return;
+    }
+    let path = dir.join(id);
+    let saved = fs::read_to_string(&path).ok();
+    if saved.as_deref().and_then(|s| s.trim().parse().ok()) == Some(size) {
+        return;
+    }
+    replace_file(&path, &size.to_string());
+    if saved.is_none() {
+        remove_old_files(dir);
+    }
+}
+
+fn remove_old_files(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for e in entries.flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).is_ok_and(|t| {
+            now.duration_since(t)
+                .is_ok_and(|age| age > CONTEXT_WINDOW_AGE)
+        });
+        if old {
+            let _ = fs::remove_file(e.path());
+        }
+    }
+}
+
+/// The context window size of each Claude session, by id, as the status
+/// line saved them. Read again only when one was saved: each save renames
+/// a file into the folder, which changes the folder's time.
+#[derive(Default)]
+pub struct ContextWindows {
+    stamp: Option<SystemTime>,
+    sizes: HashMap<String, u64>,
+}
+
+impl ContextWindows {
+    pub fn read(&mut self) -> &HashMap<String, u64> {
+        match context_windows_dir() {
+            Some(dir) => self.read_dir(&dir),
+            None => &self.sizes,
+        }
+    }
+
+    fn read_dir(&mut self, dir: &Path) -> &HashMap<String, u64> {
+        let stamp = fs::metadata(dir).and_then(|m| m.modified()).ok();
+        if stamp != self.stamp {
+            self.stamp = stamp;
+            self.sizes = fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter_map(|e| {
+                    let id = e.file_name().into_string().ok()?;
+                    // Not a file being written.
+                    if id.contains('.') {
+                        return None;
+                    }
+                    let size = fs::read_to_string(e.path()).ok()?.trim().parse().ok()?;
+                    Some((id, size))
+                })
+                .collect();
+        }
+        &self.sizes
+    }
 }
 
 // ---------- Codex ----------
@@ -523,6 +629,46 @@ mod tests {
         );
         fs::remove_file(path).unwrap();
         fs::remove_file(old).unwrap();
+    }
+
+    #[test]
+    fn claude_context_windows_are_saved_when_they_change() {
+        let dir = std::env::temp_dir().join(format!("agentz-context-{}", uuid::Uuid::new_v4()));
+        let status = |id: &str, size: u64| serde_json::json!({ "session_id": id, "context_window": { "context_window_size": size } });
+        let mut windows = ContextWindows::default();
+        assert!(windows.read_dir(&dir).is_empty());
+        save_context_window(&dir, &status("a-1", 200_000));
+        save_context_window(&dir, &status("b-2", 1_000_000));
+        // Not a file name, and no size.
+        save_context_window(&dir, &status("../x", 5));
+        save_context_window(&dir, &serde_json::json!({ "session_id": "c-3" }));
+        let sizes = windows.read_dir(&dir).clone();
+        assert_eq!(sizes.len(), 2);
+        assert_eq!(sizes["a-1"], 200_000);
+        assert_eq!(sizes["b-2"], 1_000_000);
+
+        // The same size again is not written.
+        let time = |id| fs::metadata(dir.join(id)).unwrap().modified().unwrap();
+        let before = time("a-1");
+        std::thread::sleep(Duration::from_millis(10));
+        save_context_window(&dir, &status("a-1", 200_000));
+        assert_eq!(time("a-1"), before);
+        save_context_window(&dir, &status("a-1", 1_000_000));
+        assert_eq!(windows.read_dir(&dir)["a-1"], 1_000_000);
+
+        // A new session's size removes the ones saved long ago.
+        let old = SystemTime::now() - CONTEXT_WINDOW_AGE - Duration::from_secs(60);
+        File::options()
+            .write(true)
+            .open(dir.join("b-2"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        save_context_window(&dir, &status("d-4", 400_000));
+        let sizes = windows.read_dir(&dir);
+        assert!(!sizes.contains_key("b-2"));
+        assert_eq!(sizes["d-4"], 400_000);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

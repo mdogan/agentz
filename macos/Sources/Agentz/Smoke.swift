@@ -551,7 +551,7 @@ final class SmokeTest {
         let oldElsewhere = ws.elsewhere
         // Ignore real agents outside this smoke run for these checks.
         func applyElsewhere(_ elsewhere: [RunningElsewhere]) {
-            ws.apply(Scan(sessions: nil, shells: [], codexThreads: [:], limits: ws.limits,
+            ws.apply(Scan(sessions: nil, complete: true, shells: [], codexThreads: [:], limits: ws.limits,
                           worktrees: ws.worktrees, elsewhere: elsewhere, leftovers: []), dir: tmp)
         }
         applyElsewhere([])

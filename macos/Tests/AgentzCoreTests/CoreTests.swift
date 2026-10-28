@@ -556,6 +556,12 @@ final class TextTests: XCTestCase {
         // In this Mac's language: 1.2 GB, or 1,2 GB.
         let size = memorySize(1_288_490_189)
         XCTAssertTrue(size.hasPrefix("1") && size.contains("2") && size.hasSuffix("GB"), size)
+        XCTAssertEqual(tokenCount(950), "950")
+        XCTAssertEqual(tokenCount(537_627), "538k")
+        XCTAssertEqual(tokenCount(999_499), "999k")
+        XCTAssertEqual(tokenCount(999_500), "1M")
+        XCTAssertEqual(tokenCount(1_000_000), "1M")
+        XCTAssertEqual(tokenCount(1_249_999), "1.2M")
     }
 
     func testTimesOfDay() {

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::SystemTime;
 
 mod action;
 mod procs;
@@ -184,6 +185,9 @@ pub struct Scan {
     /// All sessions, newest first. None when they are the same as in the
     /// last scan of the same folder.
     pub sessions: Option<Vec<Session>>,
+    /// False when old sessions were left out, to show the others sooner.
+    /// Then scan again right away for the rest.
+    pub complete: bool,
     pub shells: Vec<ShellProcess>,
     /// The thread each new Codex has open, by pid.
     pub codex_threads: HashMap<i32, String>,
@@ -213,11 +217,14 @@ struct ScanState {
     project: Option<(PathBuf, project::Project)>,
     /// The sessions the last scan returned, and the folder it was for.
     returned: Option<(PathBuf, Vec<Session>)>,
+    /// A scan ran. Only the first one leaves out old sessions.
+    scanned: bool,
 }
 
 impl ScanState {
-    /// All sessions, with `in_project` set for the project of `dir`.
-    fn scan_sessions(&mut self, dir: &Path) -> Vec<Session> {
+    /// All sessions, with `in_project` set for the project of `dir`. See
+    /// `sessions::Scanner::scan` for `since`.
+    fn scan_sessions(&mut self, dir: &Path, since: Option<SystemTime>) -> Vec<Session> {
         let fresh = matches!(&self.project, Some((d, p)) if d == dir && !p.is_stale());
         if !fresh {
             self.project = Some((dir.to_path_buf(), project::Project::detect(dir)));
@@ -225,7 +232,7 @@ impl ScanState {
         let Some((_, project)) = &self.project else {
             unreachable!()
         };
-        let mut sessions = self.sessions.scan();
+        let mut sessions = self.sessions.scan(since);
         for s in &mut sessions {
             s.in_project = project.contains(&s.cwd);
         }
@@ -242,22 +249,27 @@ impl SessionScanner {
 
     /// Only the sessions, with `in_project` set for the project of `dir`.
     pub fn sessions(&self, dir: PathBuf) -> Vec<Session> {
-        lock(&self.0).scan_sessions(&dir)
+        lock(&self.0).scan_sessions(&dir, None)
     }
 
     /// Everything the app shows. `dir` is the folder whose project the
     /// window shows; `shell_pids` are our shells; `new_codex_pids` are
     /// Codex sessions we started that don't know their id yet;
-    /// `quick_shell` is the quick terminal's shell, if it runs.
+    /// `quick_shell` is the quick terminal's shell, if it runs. The list
+    /// shows sessions changed `since` then: the first scan reads only
+    /// those, so they show sooner, and is not `complete`.
     pub fn scan(
         &self,
         dir: PathBuf,
         shell_pids: Vec<i32>,
         new_codex_pids: Vec<i32>,
         quick_shell: Option<i32>,
+        since: Option<SystemTime>,
     ) -> Scan {
         let mut s = lock(&self.0);
-        let sessions = s.scan_sessions(&dir);
+        let since = since.filter(|_| !s.scanned);
+        s.scanned = true;
+        let sessions = s.scan_sessions(&dir, since);
         let worktrees = s
             .project
             .as_ref()
@@ -291,6 +303,7 @@ impl SessionScanner {
         }
         Scan {
             sessions: changed.then_some(sessions),
+            complete: since.is_none(),
             shells: shells.into_iter().map(Into::into).collect(),
             codex_threads: threads
                 .into_iter()

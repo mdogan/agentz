@@ -727,6 +727,10 @@ private struct RowView: View {
                 Text(" · ").fixedSize()
                 PullRequestLink(pr: pr, look: look)
             }
+            if let context = row.context {
+                Text(" · ").fixedSize()
+                ContextGauge(context: context, agent: row.key.agent, look: look)
+            }
             if !leftovers.isEmpty {
                 Text(" · ").fixedSize()
                 Label(memorySize(leftovers.reduce(0) { $0 + $1.memory }), systemImage: "memorychip")
@@ -747,7 +751,8 @@ private struct RowView: View {
     }
 
     /// What the agent does, in place of where and when it ran: the last
-    /// tool it called, and how long the turn has gone on.
+    /// tool it called, how long the turn has gone on, and how full its
+    /// context is.
     private var activity: some View {
         HStack(spacing: 0) {
             Group {
@@ -763,6 +768,10 @@ private struct RowView: View {
                 Text(" · \(goingOn(now.timeIntervalSince(started)))")
                     .fixedSize()
                     .help("Working since \(clockTime(started, now: now))")
+            }
+            if let context = row.context {
+                Text(" · ").fixedSize()
+                ContextGauge(context: context, agent: row.key.agent, look: look)
             }
         }
         .font(.system(size: 11))
@@ -907,6 +916,63 @@ private struct LinkButton: View {
         .fixedSize()
         .onHover { hovered = $0 }
         .help(help)
+    }
+}
+
+/// How full a session's context window is: a ring and the percent used, or
+/// only the tokens when the window's size is not known.
+private struct ContextGauge: View {
+    let context: ContextWindow
+    let agent: Agent
+    let look: Look
+
+    var body: some View {
+        HStack(spacing: 3) {
+            if let fraction {
+                ZStack {
+                    Circle().stroke(look.faint, lineWidth: 1.5)
+                    Circle()
+                        .trim(from: 0, to: min(fraction, 1))
+                        .stroke(style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                }
+                .frame(width: 8, height: 8)
+                Text("\(percent)%")
+            } else {
+                Image(systemName: "circle.dashed")
+                    .font(.system(size: 8))
+                Text(tokenCount(context.used))
+            }
+        }
+        .monospacedDigit()
+        .foregroundStyle(color)
+        .fixedSize()
+        .help(help)
+    }
+
+    private var fraction: Double? {
+        guard let size = context.size, size > 0 else { return nil }
+        return Double(context.used) / Double(size)
+    }
+
+    private var percent: Int { Int(((fraction ?? 0) * 100).rounded()) }
+
+    /// Like the rate limits: yellow when 20% is left, red when 10% is.
+    private var color: Color {
+        guard let fraction else { return look.secondary }
+        return fraction >= 0.9 ? look.red : fraction >= 0.8 ? look.yellow : look.secondary
+    }
+
+    private var help: String {
+        let used = tokenCount(context.used)
+        if let size = context.size {
+            return "Context: \(used) of \(tokenCount(size)) tokens (\(percent)%)"
+        }
+        let size = agent == .claude
+            ? "Claude tells its size only to agentz's status line, which this session did not run. "
+                + "Agentz › Install Claude Status Line adds it to sessions started outside agentz."
+            : "Its size is not known."
+        return "Context: \(used) tokens\n\(size)"
     }
 }
 

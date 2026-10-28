@@ -49,6 +49,17 @@ public func memorySize(_ bytes: UInt64) -> String {
     ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .memory)
 }
 
+/// A number of tokens, e.g. `950`, `538k` or `1.2M`.
+public func tokenCount(_ n: UInt64) -> String {
+    switch n {
+    case ..<1000: return "\(n)"
+    case ..<999_500: return "\((n + 500) / 1000)k"
+    default:
+        let tenths = (n + 50000) / 100_000
+        return tenths % 10 == 0 ? "\(tenths / 10)M" : "\(tenths / 10).\(tenths % 10)M"
+    }
+}
+
 /// A time of day, e.g. `2:10 PM`, with `tomorrow` or the weekday when it
 /// is not today.
 public func clockTime(_ date: Date, now: Date = Date()) -> String {

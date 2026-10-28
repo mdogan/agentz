@@ -34,6 +34,7 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 - A spinner means the agent is working. A green dot means it waits for you.
 - While any agent is working, agentz keeps the Mac awake, including for sessions off screen or Claude sessions running in another app. Once all agents are idle or have quit, normal sleep resumes. The display can still sleep.
 - While an agent works, its second line says what it does and how long it has been at it since your last prompt, e.g. "Run the tests · 3m" with a terminal icon: the command it runs (or what Claude says the command does), the file it reads or edits, what it searches for, or the tool it uses. Hover over it for more. It comes from the agent's transcript, so Claude sessions working outside agentz show it too.
+- The second line also shows how full the agent's context window is, e.g. "54%" with a ring: the tokens the model read for its last answer, out of what fits. It turns yellow at 80% and red at 90%. Hover over it for the tokens, e.g. "538k of 1M tokens". After a compaction it shows what was kept. Claude tells the window's size only to its status line, so a Claude session that did not run agentz's status line shows only the tokens, e.g. "538k".
 - A session that finished, asks for something or quit while you were away gets a colored row with a badge, and its second line says what the agent said, e.g. "Claude needs your permission to use Bash". The count at the top of the list and the pill in the title bar ("2 need you") say how many there are. Click either one, or press ⇧⌘A, to go to the next one. The Dock icon shows the same number. All of these count sessions the list's filters hide, too. Once you look at it, it no longer needs you.
 - You count as away when agentz is not in front, and also when nobody used the keyboard or mouse for 5 minutes, though agentz is in front. So a session on screen that finishes while you are at lunch still gets marked, and notifies you.
 - Right-click a session that needs you and pick **Remind Me Later** to put it off for 15 minutes, 1 or 3 hours, or until 9:00. Until then it looks like any other row, with a moon, and does not count. Then it needs you again and you get a notification. **Remind Me Now** ends that early, and so does looking at it. Reminders do not outlast quitting agentz.
@@ -95,7 +96,7 @@ A shell can tell you when a long command ends, as Ghostty does: set `notify-on-c
 
 **Quit** (⌘Q) asks first if an agent or a command is still running. The open tabs come back on the next launch.
 
-Rate limits for Claude and Codex show at the bottom of the list. To also get Claude's limits from a `claude` you start by hand, use **Agentz › Install Claude Status Line**.
+Rate limits for Claude and Codex show at the bottom of the list. To also get Claude's limits, and the size of its context window, from a `claude` you start by hand, use **Agentz › Install Claude Status Line**.
 
 ## Settings
 
