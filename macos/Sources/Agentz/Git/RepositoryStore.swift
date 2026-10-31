@@ -112,11 +112,12 @@ final class RepositoryStore: ObservableObject {
     }
 
     /// Every change-list row in the order the list draws them: staged first,
-    /// then conflicts, then working tree. Shift-click ranges follow this order.
+    /// then conflicts, then working tree. Each section is in folder-tree order.
+    /// Shift-click ranges follow this order.
     var changeEntries: [ChangeEntry] {
-        stagedChanges.map { ChangeEntry($0, staged: true) }
-            + conflictedChanges.map { ChangeEntry($0, staged: false) }
-            + unstagedChanges.map { ChangeEntry($0, staged: false) }
+        ChangeTree.ordered(stagedChanges.map { ChangeEntry($0, staged: true) })
+            + ChangeTree.ordered(conflictedChanges.map { ChangeEntry($0, staged: false) })
+            + ChangeTree.ordered(unstagedChanges.map { ChangeEntry($0, staged: false) })
     }
 
     var selectedChangeEntries: [ChangeEntry] {

@@ -122,6 +122,8 @@ private struct ChangeList: View {
     @State private var pendingDiscard: [ChangeEntry] = []
     @State private var pendingConflictResolution: ConflictResolutionRequest?
     @FocusState private var isListFocused: Bool
+    /// Folders the user folded, as `ChangeTreeRow.folder` ids.
+    @State private var collapsedFolders: Set<String> = []
 
     var body: some View {
         let entries = store.changeEntries
@@ -144,15 +146,7 @@ private struct ChangeList: View {
                         if stagedEntries.isEmpty {
                             EmptyChangeRow(title: "No staged changes")
                         } else {
-                            ForEach(stagedEntries) { entry in
-                                ChangeRow(
-                                    entry: entry,
-                                    requestDiscard: requestDiscard,
-                                    requestConflictResolution: requestConflictResolution,
-                                    focusList: focusList
-                                )
-                                .tag(entry.id)
-                            }
+                            treeRows(stagedEntries, section: "staged")
                         }
                     } header: {
                         ChangeSectionHeader(
@@ -167,15 +161,7 @@ private struct ChangeList: View {
 
                     if !conflictEntries.isEmpty {
                         Section {
-                            ForEach(conflictEntries) { entry in
-                                ChangeRow(
-                                    entry: entry,
-                                    requestDiscard: requestDiscard,
-                                    requestConflictResolution: requestConflictResolution,
-                                    focusList: focusList
-                                )
-                                .tag(entry.id)
-                            }
+                            treeRows(conflictEntries, section: "conflicts")
                         } header: {
                             ChangeSectionHeader(
                                 title: "Conflicts",
@@ -192,15 +178,7 @@ private struct ChangeList: View {
                         if unstagedEntries.isEmpty {
                             EmptyChangeRow(title: "No unstaged changes")
                         } else {
-                            ForEach(unstagedEntries) { entry in
-                                ChangeRow(
-                                    entry: entry,
-                                    requestDiscard: requestDiscard,
-                                    requestConflictResolution: requestConflictResolution,
-                                    focusList: focusList
-                                )
-                                .tag(entry.id)
-                            }
+                            treeRows(unstagedEntries, section: "unstaged")
                         }
                     } header: {
                         ChangeSectionHeader(
@@ -275,6 +253,39 @@ private struct ChangeList: View {
             }
         } message: {
             Text(ConflictResolutionPrompt.message(for: pendingConflictResolution))
+        }
+    }
+
+    /// One section's files as a folder tree.
+    @ViewBuilder
+    private func treeRows(_ entries: [ChangeEntry], section: String) -> some View {
+        ForEach(ChangeTree.rows(entries, section: section, collapsed: collapsedFolders)) { row in
+            switch row {
+            case let .folder(id, name, depth, count, isCollapsed):
+                ChangeFolderRow(
+                    name: name,
+                    depth: depth,
+                    count: count,
+                    isCollapsed: isCollapsed
+                ) {
+                    if isCollapsed {
+                        collapsedFolders.remove(id)
+                    } else {
+                        collapsedFolders.insert(id)
+                    }
+                    focusList()
+                }
+            case let .file(entry, name, depth):
+                ChangeRow(
+                    entry: entry,
+                    displayName: name,
+                    depth: depth,
+                    requestDiscard: requestDiscard,
+                    requestConflictResolution: requestConflictResolution,
+                    focusList: focusList
+                )
+                .tag(entry.id)
+            }
         }
     }
 
@@ -506,10 +517,52 @@ private struct EmptyChangeRow: View {
     }
 }
 
+/// A folder line in the change tree. Click to fold or unfold it.
+private struct ChangeFolderRow: View {
+    let name: String
+    let depth: Int
+    let count: Int
+    let isCollapsed: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isCollapsed ? 0 : 90))
+                    .frame(width: 12)
+                Image(systemName: isCollapsed ? "folder" : "folder.fill")
+                    .foregroundStyle(.secondary)
+                Text(name)
+                    .font(.body)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+                    .layoutPriority(1)
+                Text("\(count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(GitForkHoverButtonStyle(.compactRow(isSelected: false)))
+        .padding(.leading, CGFloat(depth) * ChangeRow.indentStep)
+        .help(isCollapsed ? "Show the files in \(name)" : "Hide the files in \(name)")
+        .listRowInsets(EdgeInsets(top: 1, leading: 7, bottom: 1, trailing: 7))
+        .listRowBackground(Color.clear)
+    }
+}
+
 private struct ChangeRow: View {
     @EnvironmentObject private var store: RepositoryStore
     @Environment(\.openChange) private var openChange
+    static let indentStep: CGFloat = 14
     let entry: ChangeEntry
+    /// The file name shown in the tree. The full path stays in the tooltip.
+    let displayName: String
+    let depth: Int
     let requestDiscard: ([ChangeEntry]) -> Void
     let requestConflictResolution: ([ChangeEntry], ConflictResolutionSide) -> Void
     let focusList: () -> Void
@@ -534,7 +587,7 @@ private struct ChangeRow: View {
                     .frame(width: 22, height: 22)
                     .background(Color.statusColor(statusSymbol).opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
 
-                Text(change.path)
+                Text(displayName)
                     .font(.body)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -616,6 +669,7 @@ private struct ChangeRow: View {
                 requestConflictResolution: requestConflictResolution
             )
         }
+        .padding(.leading, CGFloat(depth) * Self.indentStep)
         .listRowInsets(EdgeInsets(top: 1, leading: 7, bottom: 1, trailing: 7))
         .listRowBackground(SystemSelectionHighlightRemover())
     }
