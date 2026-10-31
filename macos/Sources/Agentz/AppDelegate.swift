@@ -406,7 +406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let agent = tab.linked?.agent ?? tab.key.agent
         if tab.isBusy {
             guard confirm("\(agent.displayName) is working.", "Closing stops it.", button: "Close") else { return }
-        } else if tab.key.agent == .shell, tab.linked == nil, tab.terminal.hasForegroundJob {
+        } else if tab.key.agent == .shell, tab.linked == nil, tab.terminal?.hasForegroundJob == true {
             guard confirm("The shell is running a command.", "Closing stops it.", button: "Close") else { return }
         }
         workspace.close(key)
@@ -495,25 +495,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     // MARK: - Git
 
-    /// The git panel's store, while the panel shows a repository.
-    private var gitStore: RepositoryStore? { windowController?.git.shownStore }
+    /// The git tab in the focused pane.
+    private var gitTab: GitSession? { workspace?.currentTab?.git }
 
-    @objc func showGitChanges(_: Any?) { showGit(.changes) }
-    @objc func showGitHistory(_: Any?) { showGit(.history) }
-    @objc func showGitBranches(_: Any?) { showGit(.branches) }
-
-    private func showGit(_ tab: GitPanel.Tab) {
-        guard let controller = windowController else { return }
-        controller.git.tab = tab
-        controller.setGitShown(true)
+    /// Where the Git menu acts: the git tab in the focused pane, or else
+    /// the Changes panel while it shows a repository.
+    private var gitStore: RepositoryStore? {
+        gitTab?.store ?? windowController?.git.shownStore
     }
+
+    /// The git tab of the shown session's repository, or of the one picked
+    /// in the list.
+    @objc func openGit(_: Any?) {
+        guard let workspace else { return }
+        if gitTab != nil { return }
+        guard let folder = workspace.gitFolder else {
+            workspace.setStatus("Show or pick a session in a git repository first.")
+            return
+        }
+        workspace.openGit(folder)
+    }
+
+    /// In a git tab, its changes; elsewhere, the Changes panel.
+    @objc func showGitChanges(_: Any?) {
+        if let gitTab {
+            gitTab.store.selectChanges()
+        } else {
+            windowController?.setGitShown(true)
+        }
+    }
+
+    @objc func showGitHistory(_: Any?) { gitTab?.store.selectReference(nil) }
 
     @objc func switchBranch(_: Any?) { gitStore?.showBranchPicker() }
-    @objc func newBranch(_: Any?) {
-        if gitStore != nil { windowController?.git.showingBranchSheet = true }
-    }
-    @objc func pathHistory(_: Any?) { gitStore?.showPathHistoryPicker() }
-    @objc func openCommit(_: Any?) { gitStore?.showCommitHashPicker() }
+    @objc func newBranch(_: Any?) { gitStore?.isShowingNewBranchSheet = true }
+    @objc func pathHistory(_: Any?) { gitTab?.store.showPathHistoryPicker() }
+    @objc func openCommit(_: Any?) { gitTab?.store.showCommitHashPicker() }
     @objc func gitFetch(_: Any?) { gitStore?.fetch() }
     @objc func gitPull(_: Any?) { gitStore?.pull() }
     @objc func gitPush(_: Any?) { gitStore?.requestPushConfirmation() }
@@ -586,7 +603,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         #selector(focusTerminal(_:)), #selector(nextSession(_:)), #selector(previousSession(_:)), #selector(nextAttention(_:)),
         #selector(toggleSessionList(_:)), #selector(toggleAutoHide(_:)), #selector(splitRight(_:)), #selector(splitDown(_:)),
         #selector(unsplit(_:)), #selector(focusOtherPane(_:)), #selector(toggleGit(_:)),
-        #selector(showGitChanges(_:)), #selector(showGitHistory(_:)), #selector(showGitBranches(_:)),
+        #selector(openGit(_:)), #selector(showGitChanges(_:)), #selector(showGitHistory(_:)),
         #selector(switchBranch(_:)), #selector(newBranch(_:)), #selector(pathHistory(_:)), #selector(openCommit(_:)),
         #selector(gitFetch(_:)), #selector(gitPull(_:)), #selector(gitPush(_:)), #selector(gitRefresh(_:)),
     ]
@@ -628,16 +645,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item.state = windowController?.autoHide == true ? .on : .off
         case #selector(toggleGit(_:)):
             item.state = windowController?.isGitShown == true ? .on : .off
-        case #selector(showGitChanges(_:)), #selector(showGitHistory(_:)), #selector(showGitBranches(_:)):
-            let tab: GitPanel.Tab = switch item.action {
-            case #selector(showGitChanges(_:)): .changes
-            case #selector(showGitHistory(_:)): .history
-            default: .branches
-            }
-            item.state = windowController.map { $0.isGitShown && $0.git.tab == tab } == true ? .on : .off
+        case #selector(openGit(_:)), #selector(showGitChanges(_:)):
             return windowController != nil
-        case #selector(switchBranch(_:)), #selector(newBranch(_:)), #selector(pathHistory(_:)),
-             #selector(openCommit(_:)), #selector(gitRefresh(_:)):
+        case #selector(showGitHistory(_:)), #selector(pathHistory(_:)), #selector(openCommit(_:)):
+            // They show the history, which only a git tab has.
+            return gitTab?.store.repositoryURL != nil
+        case #selector(switchBranch(_:)), #selector(newBranch(_:)), #selector(gitRefresh(_:)):
             return gitStore != nil
         case #selector(gitFetch(_:)), #selector(gitPull(_:)), #selector(gitPush(_:)):
             return gitStore.map { !$0.isLoading } ?? false
@@ -708,7 +721,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let sidebar = add(view, "Toggle Session List", #selector(toggleSessionList(_:)), "s")
         sidebar.keyEquivalentModifierMask = [.command, .control]
         add(view, "Auto-Hide Session List", #selector(toggleAutoHide(_:)))
-        add(view, "Git Panel", #selector(toggleGit(_:)), "g").keyEquivalentModifierMask = [.command, .option]
+        add(view, "Changes Panel", #selector(toggleGit(_:)), "C")
         view.addItem(.separator())
         add(view, "Split Right", #selector(splitRight(_:)), "d")
         add(view, "Split Down", #selector(splitDown(_:)), "D")
@@ -724,12 +737,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         view.addItem(.separator())
         submenu(view, "Theme").delegate = self
 
-        // The git panel's, for the shown session's repository. GitFork's
-        // keys, where agentz has no other use for them.
+        // For the git tab in the focused pane, else for the Changes panel's
+        // repository. GitFork's keys, where agentz has no other use for them.
         let git = submenu(main, "Git")
+        add(git, "Open Git", #selector(openGit(_:)), "g").keyEquivalentModifierMask = [.command, .option]
         add(git, "Changes", #selector(showGitChanges(_:)), "p")
         add(git, "History", #selector(showGitHistory(_:)))
-        add(git, "Branches", #selector(showGitBranches(_:)))
         git.addItem(.separator())
         add(git, "Switch Branch…", #selector(switchBranch(_:)), "b")
         add(git, "New Branch…", #selector(newBranch(_:)))

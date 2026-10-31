@@ -425,7 +425,7 @@ struct SidebarView: View {
         }
         Divider()
         if let row = workspace.rows.first(where: { $0.key == key }) {
-            ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
+            ForEach([Agent.claude, .codex, .shell, .git], id: \.self) { agent in
                 Button(agent.newHere) { workspace.newSession(agent, cwd: row.cwd) }
             }
             Divider()
@@ -1028,11 +1028,10 @@ struct FolderApp: Identifiable {
 
     static let zed = "dev.zed.Zed"
 
-    /// Finder, and Zed and GitFork when they are installed. Looked up once.
+    /// Finder, and Zed when it is installed. Looked up once.
     static let installed: [FolderApp] = [
         ("com.apple.finder", "Open in Finder"),
         (zed, "Open in Zed"),
-        ("io.dogan.gitfork", "Open in GitFork"),
     ].compactMap { id, title in
         NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { FolderApp(id: id, title: title, url: $0) }
     }
@@ -1041,14 +1040,6 @@ struct FolderApp: Identifiable {
         let folder = URL(fileURLWithPath: dir)
         if id == "com.apple.finder" {
             NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: folder.path)
-        } else if id == "io.dogan.gitfork" {
-            // GitFork takes gitfork://open?path=<dir> and finds the repository root itself.
-            var link = URLComponents()
-            link.scheme = "gitfork"
-            link.host = "open"
-            link.queryItems = [URLQueryItem(name: "path", value: folder.standardizedFileURL.path)]
-            guard let link = link.url else { return }
-            NSWorkspace.shared.open([link], withApplicationAt: url, configuration: NSWorkspace.OpenConfiguration())
         } else {
             NSWorkspace.shared.open([folder], withApplicationAt: url, configuration: NSWorkspace.OpenConfiguration())
         }
@@ -1262,6 +1253,7 @@ extension Agent {
                 .frame(width: 14, height: 14)
                 .accessibilityLabel(displayName)
         case .shell: Image(systemName: "terminal")
+        case .git: Image(systemName: "arrow.triangle.branch")
         }
     }
 
@@ -1270,11 +1262,16 @@ extension Agent {
         case .claude: "Claude"
         case .codex: "Codex"
         case .shell: "Shell"
+        case .git: "Git"
         }
     }
 
     /// Starts one in the folder of the session it is for.
     var newHere: String {
-        self == .shell ? "New Shell Here" : "New \(displayName) Session Here"
+        switch self {
+        case .shell: "New Shell Here"
+        case .git: "Open Git Here"
+        default: "New \(displayName) Session Here"
+        }
     }
 }

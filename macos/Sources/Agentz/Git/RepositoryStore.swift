@@ -49,6 +49,8 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var pendingBranchMove: GitBranchMove?
     @Published var isConfirmingPush = false
     @Published var isShowingBranchPicker = false
+    /// The sheet that names a new branch at HEAD.
+    @Published var isShowingNewBranchSheet = false
     @Published var isShowingPathHistoryPicker = false
     @Published var isShowingCommitHashPicker = false
     @Published var isShowingKeyboardShortcuts = false

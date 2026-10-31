@@ -60,13 +60,21 @@ You can also drag a session from the list onto the terminal. With one pane, it g
 
 **View › Auto-Hide Session List** gives the terminal the whole window. Rest the mouse at the window's left edge and the list slides in over the terminal; it slides away once the mouse leaves it. While you type in its filter, it stays. ⌘L, ⇧⌘F and ⌃⌘S show it too, and then it stays until you go back to the terminal (⎋, ⌘J, or opening a session). A click outside it always hides it. The terminal keeps its size while the list comes and goes. Turn the setting off to put the list back next to the terminal.
 
-**View › Git Panel** (⌥⌘G), or the branch button at the right end of the title bar, shows the git panel on the right: the repository of the shown session, or with no session shown, of the one picked in the list. It follows the sessions; there is no other way to pick a repository. It is GitFork's git client, moved into agentz. At its top: the repository, the branch (click it to switch to another), and fetch, pull, push, new branch and refresh. Under them, three tabs:
+**View › Changes Panel** (⇧⌘C), or the ± button at the right end of the title bar, shows the Changes panel on the right: the staged and unstaged changes in the repository of the shown session, or with no session shown, of the one picked in the list. It follows the sessions; there is no other way to pick a repository.
 
-- **Changes**: the staged and unstaged files. Stage or unstage a file with its button, several with ↩ and ⌫, or all of them. The picked file's diff is below; stage, unstage or discard a hunk there, or select lines and stage, unstage or discard just those. Space opens the diff side by side in a window of its own. A file in a merge conflict shows its conflicts, to resolve with ours, theirs, or by hand. **Commit** (⌘↩) commits the staged files, also as an amend or signed; the menu next to it stashes changes.
-- **History**: the commits, with their graph, branches and tags, and a search. The picked commit's files and diffs are below.
-- **Branches**: the local and remote branches, tags, worktrees, stashes and unreachable commits. Right-click one for what it can do: switch to it, rename, delete (also on the remote), push, or move it into a folder; apply or drop a stash; delete or prune a worktree. Picking a branch, tag or stash shows its history. A worktree's menu starts a Claude, Codex or shell session in it, and the panel then shows that.
+- At its top: the branch (click it to switch to another), the repository, a button that opens its git tab (see below), and refresh.
+- The staged and unstaged files. Stage or unstage a file with its button, several with ↩ and ⌫, or all of them. The picked file's diff is below, and the first file's shows by itself as files change; stage, unstage or discard a hunk there, or select lines and stage, unstage or discard just those. Space opens the diff side by side in a window of its own. A file in a merge conflict shows its conflicts, to resolve with ours, theirs, or by hand.
+- **Commit** (⌘↩) commits the staged files, also as an amend or signed; the menu next to it stashes changes.
+- It reads the repository again by itself when files in it or in its git folder change, at most once a second, and only while the panel is shown and the window can be seen. Its own reads write nothing in `.git`.
 
-It reads the repository again by itself when files in it or in its git folder change, at most once a second, and only while the panel is shown and the window can be seen. Its own reads write nothing in `.git`. **Git › Git Command Log** (⇧⌘L) lists every git command it ran and how each went. The **Git** menu has the rest, with GitFork's keys where agentz has no other use for them.
+**Git › Open Git** (⌥⌘G) opens a git tab for the shown session's repository: GitFork's git client, moved into agentz, in a pane like a terminal. Right-click a session and pick **Open Git Here** for its repository. A git tab is a session like the others: it has a row in the list, named after its branch, goes into splits (e.g. Claude on the left and its repository's git on the right), comes back on the next launch, and closes with ⌘W. There is one per worktree; opening it again shows the one there is.
+
+- At its top: open the repository in Zed or Finder, fetch, pull, push, new branch and refresh; where HEAD is (click it to switch to another branch); and the repository.
+- On the left: the changes, all commits, unreachable commits, and the local and remote branches, tags, stashes and worktrees. Right-click one for what it can do: switch to a branch, rename, delete (also on the remote), push, or move it into a folder; apply or drop a stash; delete or prune a worktree, or start a session or a git tab in it.
+- In the middle: the history, with its graph and a search, or the changes as in the Changes panel. On the right: the picked commit's files and diffs, or the picked file's diff.
+- It reads the repository again when files change, like the Changes panel, while it is in a pane on screen. It has its own view of the repository: what it shows does not change the Changes panel.
+
+The **Git** menu works on the git tab in the focused pane, or else on the Changes panel's repository, with GitFork's keys where agentz has no other use for them. **Git › Git Command Log** (⇧⌘L) lists every git command they ran and how each went.
 
 **View › Quick Terminal**, or its global key (see below), slides a shell of its own in from the edge of the screen (the top, unless set otherwise), over any app, like Ghostty's quick terminal. Do it again and it slides away, and the app you were in gets the keyboard back. Its shell keeps running while it is hidden. It also slides away when you click another window. When its shell exits, or you press ⌘W in it, it closes; the next one starts a new shell in your home folder.
 
@@ -90,8 +98,9 @@ It reads the repository again by itself when files in it or in its git folder ch
 | ⇧⌘F | filter sessions |
 | ⇧⌘I | show all sessions, or only today's again |
 | ⌃⌘S | hide or show the session list |
-| ⌥⌘G | show or hide the git panel |
-| ⌘P / ⌘B | the git panel's changes / switch to another branch |
+| ⇧⌘C | show or hide the Changes panel |
+| ⌥⌘G | open the git tab of the shown session's repository |
+| ⌘P / ⌘B | the changes / switch to another branch |
 | ⌘R / ⇧⌘L | read the repository again / the git command log |
 | ⌘+ / ⌘- / ⌘0 | font size |
 | ⌘K | clear the screen |

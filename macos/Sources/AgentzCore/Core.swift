@@ -9,11 +9,12 @@ public extension Agent {
         case .claude: "claude"
         case .codex: "codex"
         case .shell: "shell"
+        case .git: "git"
         }
     }
 
     init?(name: String) {
-        guard let agent = [Agent.claude, .codex, .shell].first(where: { $0.name == name }) else { return nil }
+        guard let agent = [Agent.claude, .codex, .shell, .git].first(where: { $0.name == name }) else { return nil }
         self = agent
     }
 }

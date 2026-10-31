@@ -2,8 +2,8 @@ import AgentzCore
 import AppKit
 import SwiftUI
 
-/// The window: sessions on the left, the shown terminal in the middle,
-/// and the git panel on the right while it is shown.
+/// The window: sessions on the left, the shown terminal or git tab in the
+/// middle, and the Changes panel on the right while it is shown.
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let workspace: Workspace
@@ -13,9 +13,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let split = NSSplitViewController()
     private let sidebar: NSHostingController<SidebarView>
     private let sidebarItem: NSSplitViewItem
-    /// The git panel's state: the shown session's repository.
+    /// The Changes panel's state: the shown session's repository.
     let git: GitPanelModel
-    /// The git panel's place in the split; collapsed while hidden.
+    /// The Changes panel's place in the split; collapsed while hidden.
     private let gitItem: NSSplitViewItem
     private var gitObservation: NSKeyValueObservation?
     /// The list over the terminal, in auto-hide mode.
@@ -42,7 +42,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         git.store.startSession = { [weak workspace] agent, folder in
             workspace?.newSession(agent, cwd: folder.path)
         }
-        let gitView = NSHostingController(rootView: GitPanel(model: git, look: look))
+        let gitView = NSHostingController(rootView: GitPanel(model: git, look: look) { [weak workspace, weak git] in
+            if let root = git?.store.repositoryURL { workspace?.openGit(root.path) }
+        })
         // The width it has when first shown; later, the one it had.
         gitView.view.frame.size.width = Self.gitWidth
         gitItem = NSSplitViewItem(inspectorWithViewController: gitView)
@@ -120,7 +122,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let window = self.window else { return }
-                git.setWindowVisible(window.occlusionState.contains(.visible))
+                let visible = window.occlusionState.contains(.visible)
+                git.setWindowVisible(visible)
+                for tab in workspace.tabs { tab.git?.setWindowVisible(visible) }
             }
         }
         layout()
@@ -179,7 +183,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let tab = workspace.currentTab {
             // A list shown from the keyboard is done with.
             if overlay.held { overlay.hide() }
-            tab.terminal.focus()
+            tab.content.focus()
         } else {
             // An empty pane: the list picks what it shows.
             focusSidebar(.list)
@@ -191,7 +195,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guard let tab = workspace.currentTab else { return }
         // A list shown from the keyboard is done with.
         if overlay.held { overlay.hide() }
-        tab.terminal.showFind()
+        tab.terminal?.showFind()
     }
 
     /// Shows `content` in a sheet over the window. It gets a function that
@@ -232,12 +236,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     var isGitShown: Bool { !gitItem.isCollapsed }
 
+    /// How wide the Changes panel is on screen: 0 while hidden.
+    var gitPanelWidth: CGFloat {
+        let view = gitItem.viewController.view
+        return view.isHiddenOrHasHiddenAncestor || view.window == nil ? 0 : view.frame.width
+    }
+
     func toggleGit() {
         setGitShown(!isGitShown)
     }
 
     func setGitShown(_ shown: Bool) {
-        gitItem.animator().isCollapsed = !shown
+        // An animation needs the window on screen to finish; without it,
+        // e.g. while the screen is locked, the panel would stay in sight.
+        if window?.occlusionState.contains(.visible) == true {
+            gitItem.animator().isCollapsed = !shown
+        } else {
+            gitItem.isCollapsed = !shown
+        }
         gitShownChanged(shown)
     }
 
@@ -247,8 +263,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         git.isShown = shown
     }
 
-    /// The panel shows the repository of the session on screen, or of the
-    /// one picked in the list.
+    /// The panel shows the changes in the repository of the session on
+    /// screen, or of the one picked in the list.
     private func followGit() {
         if git.isShown { git.follow(workspace.gitFolder) }
     }
@@ -308,7 +324,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// takes Return.
     private func leaveList() {
         if let tab = workspace.currentTab {
-            tab.terminal.focus()
+            tab.content.focus()
         } else {
             window?.makeFirstResponder(nil)
         }
@@ -325,7 +341,7 @@ private func userIdleTime() -> TimeInterval {
 /// The title bar's buttons. The split buttons each do what their View
 /// menu item does: split the pane that way, turn the split, or unsplit it.
 /// The one for the current split is filled in. The last one shows or hides
-/// the git panel.
+/// the Changes panel.
 private struct SplitButtons: View {
     let workspace: Workspace
     let look: Look
@@ -387,7 +403,7 @@ private struct GitButton: View {
     var body: some View {
         let on = git.isShown
         Button(action: toggle) {
-            Image(systemName: "arrow.triangle.branch")
+            Image(systemName: "plus.forwardslash.minus")
                 .font(.system(size: 12, weight: on ? .semibold : .regular))
                 .foregroundStyle(on ? look.accent : look.secondary)
                 .frame(width: 26, height: 22)
@@ -396,8 +412,8 @@ private struct GitButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .help(on ? "Hide Git (⌥⌘G)" : "Show Git (⌥⌘G)")
-        .accessibilityLabel(on ? "Hide Git" : "Show Git")
+        .help(on ? "Hide Changes (⇧⌘C)" : "Show Changes (⇧⌘C)")
+        .accessibilityLabel(on ? "Hide Changes" : "Show Changes")
     }
 }
 
@@ -451,12 +467,30 @@ final class PaneViewController: NSViewController {
     private var draggedRatio: CGFloat?
     /// A session from the list is dragged over the pane area.
     var onSessionDrag: (() -> Void)?
+    /// Sees clicks in git tabs, which say nothing of them as terminals do.
+    private var clicks: Any?
 
     init(workspace: Workspace, look: Look) {
         self.workspace = workspace
         self.look = look
         placeholders = [0, 1].map { PlaceholderView(rootView: EmptyPaneView(workspace: workspace, look: look, pane: $0)) }
         super.init(nibName: nil, bundle: nil)
+        clicks = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            MainActor.assumeIsolated { self?.clicked(event) }
+            return event
+        }
+    }
+
+    /// A click in the git tab of a split's other pane makes that pane the
+    /// one the user works in.
+    private func clicked(_ event: NSEvent) {
+        let layout = workspace.panes
+        guard event.window === view.window, let split = layout.split else { return }
+        let point = container.convert(event.locationInWindow, from: nil)
+        guard let i = paneRects(split, ratio: layout.ratio).firstIndex(where: { $0.contains(point) }), i != layout.focused,
+              let key = layout.keys[i], workspace.tabs.first(where: { $0.key == key })?.git != nil
+        else { return }
+        workspace.clickedPane(i)
     }
 
     @available(*, unavailable)
@@ -542,14 +576,14 @@ final class PaneViewController: NSViewController {
         _ = view
         let tabs = workspace.tabs
         let layout = workspace.panes
-        let live = Set(tabs.map { ObjectIdentifier($0.terminal.view) })
+        let live = Set(tabs.map { ObjectIdentifier($0.content.paneView) })
         for sub in terminals.subviews where !live.contains(ObjectIdentifier(sub)) {
             if (view.window?.firstResponder as? NSView)?.isDescendant(of: sub) == true { view.window?.makeFirstResponder(nil) }
             sub.removeFromSuperview()
         }
         let rects = paneRects(layout.split, ratio: layout.ratio)
         for tab in tabs {
-            let v = tab.terminal.view
+            let v = tab.content.paneView
             let pane = layout.keys.firstIndex(of: tab.key)
             if v.superview !== terminals {
                 // At its pane's size from the start, so the program does
@@ -560,8 +594,8 @@ final class PaneViewController: NSViewController {
             // A hidden first responder hands the keyboard to the next view
             // on screen, which may be the other pane's terminal. Its find
             // bar's field too.
-            if pane == nil, tab.terminal.isFocused { view.window?.makeFirstResponder(nil) }
-            tab.terminal.setVisible(pane != nil)
+            if pane == nil, tab.content.isFocused { view.window?.makeFirstResponder(nil) }
+            tab.content.setVisible(pane != nil)
         }
         layoutPanes()
     }
@@ -573,7 +607,7 @@ final class PaneViewController: NSViewController {
         let rects = paneRects(layout.split, ratio: draggedRatio ?? layout.ratio)
         var empty = Set(layout.keys.indices)
         for (i, key) in layout.keys.enumerated() {
-            guard let v = workspace.tabs.first(where: { $0.key == key })?.terminal.view else { continue }
+            guard let v = workspace.tabs.first(where: { $0.key == key })?.content.paneView else { continue }
             empty.remove(i)
             if v.frame != rects[i] { v.frame = rects[i] }
         }

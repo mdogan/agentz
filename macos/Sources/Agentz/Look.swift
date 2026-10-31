@@ -82,6 +82,7 @@ final class Look {
         case .claude: Color(isDark ? RGB(0.85, 0.47, 0.34) : RGB(0.75, 0.33, 0.2))
         case .codex: accent
         case .shell: secondary
+        case .git: magenta
         }
     }
 

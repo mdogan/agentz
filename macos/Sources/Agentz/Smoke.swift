@@ -75,7 +75,7 @@ final class SmokeTest {
         ws.newSession(.shell, cwd: ws.shownFolder)
         guard let shell = ws.currentTab else { return finish("no tab after newSession") }
         let shellKey = shell.key
-        let t = shell.terminal
+        let t = shell.terminal!
         check("shell pid found", await wait(10) { t.pid != nil })
         let name = t.pid.flatMap(processName)
         check("pid is the login shell", name.map { $0.hasSuffix(Launch.shellName) } ?? false, "name=\(name ?? "nil") shell=\(Launch.shellName)")
@@ -139,7 +139,7 @@ final class SmokeTest {
         check("notice when the agent is done", await wait(8) { self.notices.contains { $0.key == codexKey && $0.message == nil } })
         check("one notice per turn", notices.filter { $0.key == codexKey }.count == 1)
         codex.turns.userInput()
-        codex.terminal.run("")
+        codex.terminal!.run("")
         check("agent's own notification text", await wait(5) { self.notices.contains { $0.key == codexKey && $0.message == "Done: OK" } })
         check("the agent wants the user, with what it said", await wait(2) {
             ws.attentionKeys == [codexKey] && ws.waitingMessages[codexKey] == "Done: OK"
@@ -156,18 +156,18 @@ final class SmokeTest {
         ws.showNextAttention()
         check("switch to the agent", ws.current == codexKey)
         check("looking at it ends the attention", await wait(2) { ws.attentionKeys.isEmpty && ws.waitingMessages.isEmpty })
-        codex.terminal.run("")
+        codex.terminal!.run("")
         check("quit agent is replaced by a shell", await wait(5) {
             ws.currentTab?.key.agent == .shell && ws.currentTab?.placeholder == true && !ws.tabs.contains { $0.key == codexKey }
         })
 
         // Exiting a shell closes its tab.
-        other.terminal.run("exit")
+        other.terminal!.run("exit")
         check("exited shell tab is removed", await wait(5) { !ws.tabs.contains { $0 === other } })
 
         // Closing a tab hangs up on its program.
-        let placeholderPid = ws.currentTab?.terminal.pid
-        weak let closedView = ws.currentTab?.terminal.view
+        let placeholderPid = ws.currentTab?.terminal!.pid
+        weak let closedView = ws.currentTab?.terminal!.view
         weak let closedTerminal = ws.currentTab?.terminal
         if let key = ws.currentTab?.key { ws.close(key) }
         check("closed tab is removed", ws.tabs.isEmpty, "\(ws.tabs.count) left")
@@ -200,9 +200,9 @@ final class SmokeTest {
         check("back on the shell", ws.current == shown.key)
         // Past the first seconds, where a quit means it failed to start.
         _ = await wait(3.5) { false }
-        quitter.terminal.run("")
+        quitter.terminal!.run("")
         _ = await wait(0.3) { false }
-        quitter.terminal.run("")
+        quitter.terminal!.run("")
         check("notice when an agent quits while away", await wait(5) {
             self.notices.contains { $0.key == quitKey && $0.message?.hasPrefix("It quit") == true }
         })
@@ -225,7 +225,7 @@ final class SmokeTest {
         ws.close(pinned.key)
         check("pinned tab is not closed", ws.tabs.contains { $0 === pinned })
         check("saved state keeps the pin", ws.savedState().tabs.first?.pinned == true)
-        pinned.terminal.run("exit")
+        pinned.terminal!.run("exit")
         check("pinned tab stays when its shell exits", await wait(5) { !pinned.isRunning && ws.tabs.contains { $0 === pinned } })
         ws.open(unpinned.key)
         check("moving around keeps the ended pinned tab", ws.tabs.contains { $0 === pinned })
@@ -244,7 +244,7 @@ final class SmokeTest {
         guard let left = ws.currentTab else { return finish("no shell to split") }
         ws.split(.right)
         guard let right = ws.currentTab, right !== left else { return finish("no shell in the new pane") }
-        let leftView = left.terminal.view, rightView = right.terminal.view
+        let leftView = left.terminal!.view, rightView = right.terminal!.view
         check("split shows both tabs", ws.panes.keys == [left.key, right.key] && ws.panes.focused == 1)
         check("both terminals are visible", !leftView.isHidden && !rightView.isHidden)
         check("panes side by side", leftView.frame.maxX < rightView.frame.minX && leftView.frame.height == rightView.frame.height
@@ -252,7 +252,7 @@ final class SmokeTest {
         check("new pane starts in the shown tab's folder", right.cwd == tmp || realPath(right.cwd) == tmp, right.cwd)
 
         // A click into a terminal works in its pane.
-        left.terminal.focus()
+        left.terminal!.focus()
         check("focus follows the terminal", ws.panes.focused == 0 && ws.selection == left.key)
 
         // The list puts the split's two sessions together and marks them.
@@ -266,7 +266,7 @@ final class SmokeTest {
         ws.setRatio(0.3)
         ws.newSession(.shell, cwd: tmp)
         guard let third = ws.currentTab, third !== left, third !== right else { return finish("no shell to show on its own") }
-        let thirdView = third.terminal.view
+        let thirdView = third.terminal!.view
         check("a new session opens on its own", ws.panes == PaneLayout(keys: [third.key])
             && ws.hiddenSplits == [PaneLayout(keys: [left.key, right.key], split: .right, focused: 0, ratio: 0.3)],
             "\(ws.panes) \(ws.hiddenSplits)")
@@ -323,7 +323,7 @@ final class SmokeTest {
         // Unsplitting keeps the focused pane's tab; the other one runs on.
         ws.unsplit()
         check("unsplit keeps the focused tab", ws.panes == PaneLayout(keys: [fourth.key]))
-        check("it fills the pane again", fourth.terminal.view.frame == fourth.terminal.view.superview?.bounds, "\(fourth.terminal.view.frame)")
+        check("it fills the pane again", fourth.terminal!.view.frame == fourth.terminal!.view.superview?.bounds, "\(fourth.terminal!.view.frame)")
         check("the other tab runs on, hidden", third.isRunning && thirdView.isHidden)
         check("the hidden split stays", ws.hiddenSplits.map(\.keys) == [[left.key, right.key]])
 
@@ -341,8 +341,8 @@ final class SmokeTest {
         check("closing a pane's tab ends the split", ws.panes == PaneLayout(keys: [left.key]) && !ws.tabs.contains { $0 === fifth })
         ws.split(.down)
         guard let sixth = ws.currentTab, sixth !== left else { return finish("no shell in the fourth split") }
-        _ = await wait(5) { sixth.terminal.pid != nil }
-        sixth.terminal.run("exit")
+        _ = await wait(5) { sixth.terminal!.pid != nil }
+        sixth.terminal!.run("exit")
         check("an exited shell ends the split", await wait(5) { ws.panes == PaneLayout(keys: [left.key]) }, "\(ws.panes.keys)")
         // The same off screen.
         ws.split(.right)
@@ -368,9 +368,9 @@ final class SmokeTest {
         if let first = ws.panes.keys[0].flatMap({ key in ws.tabs.first { $0.key == key } }),
            let second = ws.panes.keys.last?.flatMap({ key in ws.tabs.first { $0.key == key } })
         {
-            check("restored panes are laid out", !first.terminal.view.isHidden && !second.terminal.view.isHidden
-                && first.terminal.view.frame.maxX < second.terminal.view.frame.minX,
-                "\(first.terminal.view.frame) \(second.terminal.view.frame)")
+            check("restored panes are laid out", !first.terminal!.view.isHidden && !second.terminal!.view.isHidden
+                && first.terminal!.view.frame.maxX < second.terminal!.view.frame.minX,
+                "\(first.terminal!.view.frame) \(second.terminal!.view.frame)")
         }
         for tab in ws.tabs {
             ws.close(tab.key)
@@ -456,16 +456,16 @@ final class SmokeTest {
         // mouse afterwards does not select text.
         ws.newSession(.shell, cwd: tmp)
         guard let first = ws.currentTab else { return finish("no shell to click") }
-        first.terminal.view.window?.makeFirstResponder(nil)
-        click(first.terminal.view, at: NSPoint(x: 40, y: 40))
-        check("a click reaches the only terminal", first.terminal.isFocused)
+        first.terminal!.view.window?.makeFirstResponder(nil)
+        click(first.terminal!.view, at: NSPoint(x: 40, y: 40))
+        check("a click reaches the only terminal", first.terminal!.isFocused)
         ws.split(.right)
         guard let second = ws.currentTab, second !== first else { return finish("no second pane to click from") }
-        _ = await wait(5) { first.terminal.pid != nil && second.terminal.pid != nil }
-        first.terminal.run("echo one two three four five six seven eight nine ten")
-        second.terminal.run("echo one two three four five six seven eight nine ten")
+        _ = await wait(5) { first.terminal!.pid != nil && second.terminal!.pid != nil }
+        first.terminal!.run("echo one two three four five six seven eight nine ten")
+        second.terminal!.run("echo one two three four five six seven eight nine ten")
         _ = await wait(1) { false }
-        let firstView = first.terminal.view
+        let firstView = first.terminal!.view
         click(firstView, at: NSPoint(x: 40, y: firstView.bounds.height - 10))
         _ = await wait(0.5) { false }
         check("a click focuses the other pane", ws.panes.focused == 0 && firstView.window?.firstResponder === firstView,
@@ -473,12 +473,12 @@ final class SmokeTest {
         move(firstView, to: NSPoint(x: 300, y: firstView.bounds.height - 10))
         _ = await wait(0.3) { false }
         check("the click ends with the mouse up", firstView.selectionMenuPoint(at: .zero) == nil)
-        move(second.terminal.view, to: NSPoint(x: 300, y: firstView.bounds.height - 10))
+        move(second.terminal!.view, to: NSPoint(x: 300, y: firstView.bounds.height - 10))
         _ = await wait(0.3) { false }
-        check("the pane left behind has no click stuck either", second.terminal.view.selectionMenuPoint(at: .zero) == nil)
-        click(second.terminal.view, at: NSPoint(x: 40, y: firstView.bounds.height - 10))
+        check("the pane left behind has no click stuck either", second.terminal!.view.selectionMenuPoint(at: .zero) == nil)
+        click(second.terminal!.view, at: NSPoint(x: 40, y: firstView.bounds.height - 10))
         _ = await wait(0.5) { false }
-        check("a click focuses the first pane again", ws.panes.focused == 1 && firstView.window?.firstResponder === second.terminal.view)
+        check("a click focuses the first pane again", ws.panes.focused == 1 && firstView.window?.firstResponder === second.terminal!.view)
         // ⌘N starts an agent in place of the split's idle shell. ⌘T opens a
         // shell on its own.
         ws.newSession(.codex, cwd: ws.shownFolder, inPlaceOfShell: true)
@@ -494,7 +494,7 @@ final class SmokeTest {
         // terminal, which keeps its size. A point stands in for the mouse.
         ws.newSession(.shell, cwd: tmp)
         guard let under = ws.currentTab else { return finish("no shell for auto-hide") }
-        let underView = under.terminal.view
+        let underView = under.terminal!.view
         let overlay = window.overlay
         let narrow = underView.frame.width
         window.setAutoHide(true)
@@ -506,7 +506,7 @@ final class SmokeTest {
         check("⌘L shows the list over the terminal", overlay.isShown && overlay.held && !overlay.panel.isHidden && underView.frame.width == wide)
         check("the list gets the keyboard", await wait(2) { overlay.hasFocus })
         window.focusTerminal()
-        check("going to the terminal hides it", !overlay.isShown && under.terminal.isFocused)
+        check("going to the terminal hides it", !overlay.isShown && under.terminal!.isFocused)
         check("it slides away", await wait(1) { overlay.panel.isHidden })
         let mouse = overlay.mouseLocation
         var pointer = NSPoint(x: 2, y: 200)
@@ -523,7 +523,7 @@ final class SmokeTest {
         pointer = NSPoint(x: overlay.panel.frame.width + 100, y: 200)
         check("typing in the filter holds it", await wait(1.5) { overlay.held } && overlay.isShown)
         click(underView, at: NSPoint(x: underView.bounds.width - 40, y: 40))
-        check("a click outside hides it", !overlay.isShown && under.terminal.isFocused)
+        check("a click outside hides it", !overlay.isShown && under.terminal!.isFocused)
         overlay.mouseLocation = mouse
         window.setAutoHide(false)
         check("off again, the list is back in the split", await wait(2) { abs(underView.frame.width - narrow) <= 1 }
@@ -542,6 +542,7 @@ final class SmokeTest {
         await find(tmp)
         await quickTerminal(tmp)
         await gitPanel(tmp)
+        await gitTab(tmp)
         finish(nil)
     }
 
@@ -599,7 +600,7 @@ final class SmokeTest {
         first.turns.receive(.progress(true))
         ws.tick()
         check("another turn blocks sleep again", ws.sleepBlocker.isBlocking)
-        first.terminal.run("")
+        first.terminal!.run("")
         check("an agent exiting releases the sleep blocker", await wait(5) {
             applyElsewhere([])
             return !first.isRunning && !ws.sleepBlocker.isBlocking
@@ -647,7 +648,7 @@ final class SmokeTest {
 
         away = true
         codex.turns.userInput()
-        codex.terminal.run("")
+        codex.terminal!.run("")
         check("it wants the user again", await wait(5) { ws.attentionKeys == [key] && ws.waitingMessages[key] == "Done: OK" })
         let before = notices.count
         ws.snooze(key, until: Date().addingTimeInterval(1.5))
@@ -661,7 +662,7 @@ final class SmokeTest {
         check("looking at it ends the snooze too", await wait(2) { ws.snoozed.isEmpty && ws.attentionKeys.isEmpty })
         // Not in its first seconds, where quitting means it failed to start.
         _ = await wait(max(3.5 - Date().timeIntervalSince(codex.spawnedAt), 0)) { false }
-        codex.terminal.run("")
+        codex.terminal!.run("")
         _ = await wait(5) { !codex.isRunning }
         for tab in ws.tabs {
             ws.close(tab.key)
@@ -677,8 +678,8 @@ final class SmokeTest {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         ws.newSession(.shell, cwd: dir)
         guard let shell = ws.currentTab else { return check("start a shell to leave something running", false) }
-        _ = await wait(5) { shell.terminal.pid != nil }
-        shell.terminal.run("sh -c 'sleep 301 >/dev/null 2>&1 &'")
+        _ = await wait(5) { shell.terminal!.pid != nil }
+        shell.terminal!.run("sh -c 'sleep 301 >/dev/null 2>&1 &'")
         check("what was left running is found, for the session in its folder", await wait(12) {
             ws.leftovers[shell.key]?.contains { $0.command == "sleep 301" && $0.processes == 1 } == true
         }, "\(ws.leftovers)")
@@ -814,16 +815,16 @@ final class SmokeTest {
         guard let other = ws.currentTab else { return check("start a shell to pick first", false) }
         ws.newSession(.shell, cwd: tmp)
         guard let shell = ws.currentTab, shell !== other else { return check("start a shell to scroll in", false) }
-        _ = await wait(5) { shell.terminal.pid != nil }
+        _ = await wait(5) { shell.terminal!.pid != nil }
         // Takes the mouse, as Claude Code does, and writes down what it gets.
         let file = tmp + "/mouse"
-        shell.terminal.run("printf '\\033[?1000h\\033[?1006h'; stty raw -echo; cat > \(shellQuote(file))")
-        let view = shell.terminal.view
+        shell.terminal!.run("printf '\\033[?1000h\\033[?1006h'; stty raw -echo; cat > \(shellQuote(file))")
+        let view = shell.terminal!.view
         check("the program takes the mouse", await wait(5) { view.isMouseCaptured })
         pick(other.key)
         window.focusSidebar(.list)
         pick(shell.key)
-        check("the list keeps the keyboard", await wait(2) { !view.isHidden && !shell.terminal.isFocused && !other.terminal.isFocused })
+        check("the list keeps the keyboard", await wait(2) { !view.isHidden && !shell.terminal!.isFocused && !other.terminal!.isFocused })
         scroll(view)
         let got = { (try? String(contentsOfFile: file, encoding: .utf8)) ?? "" }
         // An SGR report of button 64: the wheel turned up.
@@ -838,7 +839,7 @@ final class SmokeTest {
         let ws = workspace
         ws.newSession(.shell, cwd: tmp)
         guard let shell = ws.currentTab else { return check("start a shell to find in", false) }
-        let t = shell.terminal
+        let t = shell.terminal!
         _ = await wait(5) { t.pid != nil }
         // A line to find, with more than a screen of lines under it.
         t.run("echo find-me; seq 300")
@@ -964,11 +965,11 @@ final class SmokeTest {
         window.setGitShown(false)
         ws.newSession(.shell, cwd: repo)
         guard let shell = ws.currentTab else { return check("start a shell for the git panel", false) }
-        _ = await wait(5) { shell.terminal.pid != nil }
+        _ = await wait(5) { shell.terminal!.pid != nil }
         check("the git panel starts hidden here", !git.isShown && app.validateMenuItem(item) && item.state == .off)
         app.toggleGit(nil)
         _ = app.validateMenuItem(item)
-        check("⌥⌘G shows it", window.isGitShown && git.isShown && item.state == .on)
+        check("⇧⌘C shows it", window.isGitShown && git.isShown && item.state == .on)
         check("it shows the session's repository", await wait(8) {
             git.place == .repository && store.repositoryURL.map { realPath($0.path) == realPath(repo) } == true
                 && store.branch == "main" && store.changes.isEmpty
@@ -1009,19 +1010,80 @@ final class SmokeTest {
         }, "\(store.changes.count) changes, \(store.stashes.count) stashes")
         snapshot("git-history")
 
-        shell.terminal.run("cd \(shellQuote(tmp))")
+        shell.terminal!.run("cd \(shellQuote(tmp))")
         check("it follows the shell out of the repository", await wait(5) {
             git.place == .notARepo(folder: tmp) || git.place == .notARepo(folder: realPath(tmp) ?? tmp)
         }, "\(git.place)")
         app.toggleGit(nil)
         _ = app.validateMenuItem(item)
-        check("⌥⌘G hides it again", !window.isGitShown && !git.isShown && item.state == .off)
+        check("⇧⌘C hides it again", !window.isGitShown && !git.isShown && item.state == .off)
+        check("and it is out of sight", await wait(3) { self.window.gitPanelWidth == 0 }, "width \(window.gitPanelWidth)")
+        ws.close(shell.key)
+    }
+
+    /// A git tab: GitFork's whole client for a worktree, in a pane like a
+    /// terminal, one per worktree, kept across launches.
+    private func gitTab(_ tmp: String) async {
+        let ws = workspace
+        let repo = tmp + "/tab"
+        try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+        for args in [["init", "-q", "-b", "main"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["commit", "-q", "--allow-empty", "-m", "first"]] {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", repo] + args
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+        }
+        let root = realPath(repo) ?? repo
+        let key = SessionKey(.git, root)
+        ws.newSession(.shell, cwd: repo)
+        guard let shell = ws.currentTab else { return check("start a shell for the git tab", false) }
+        let before = ws.quitCounts()
+        let app = NSApp.delegate as! AppDelegate
+        let item = NSMenuItem(title: "", action: #selector(AppDelegate.openGit(_:)), keyEquivalent: "")
+        check("Open Git works from a shell in a repository", app.validateMenuItem(item))
+        app.openGit(nil)
+        guard let tab = ws.tabs.first(where: { $0.key == key }), let git = tab.git else {
+            return check("Open Git opens a git tab for the shell's worktree", false, "\(ws.tabs.map(\.key))")
+        }
+        check("Open Git opens a git tab for the shell's worktree", ws.current == key && tab.terminal == nil)
+        check("it reads the repository, and its row is named after the branch", await wait(8) {
+            git.store.branch == "main" && ws.rows.contains { $0.key == key && $0.title == "main" }
+        }, "\(git.store.branch) \(ws.rows.map(\.title))")
+        check("its view shows, and it reads while it shows", !git.paneView.isHidden && git.paneView.window != nil)
+        _ = await wait(5) { git.store.operationLabel == nil && !git.store.commits.isEmpty }
+        snapshot("git-tab")
+        ws.openGit(repo + "/.")
+        check("one git tab per worktree", ws.tabs.filter { $0.key.agent == .git }.count == 1 && ws.current == key)
+        check("quitting stops nothing in it", ws.quitCounts() == before)
+
+        ws.openInSplit(shell.key, .right)
+        check("it shares a split with the shell", ws.panes.split == .right && ws.panes.keys.contains(key)
+            && ws.panes.keys.contains(shell.key) && !git.paneView.isHidden && !shell.terminal!.view.isHidden)
+        if let i = ws.panes.keys.firstIndex(of: key) {
+            ws.focusPane(1 - i)
+            click(git.paneView, at: NSPoint(x: git.paneView.bounds.midX, y: git.paneView.bounds.midY))
+            check("a click in it makes its pane the focused one", ws.panes.focused == i, "focused=\(ws.panes.focused) git=\(i)")
+        }
+        check("it is saved with the tabs", ws.savedState().tabs.contains { $0.agent == .git && realPath($0.cwd) == root })
+
+        ws.unsplit()
+        ws.close(key)
+        check("closing it removes it", !ws.tabs.contains { $0.key == key } && !git.isRunning)
+        _ = ws.restore(SavedState(tabs: [SavedTab(agent: .git, id: nil, cwd: root, title: "main", pinned: false)], project: ws.projectDir))
+        check("a saved git tab comes back", ws.tabs.contains { $0.key == key && $0.git != nil })
+        ws.close(key)
+
+        check("outside a repository there is none", !ws.openGit(tmp) && !ws.tabs.contains { $0.key == SessionKey(.git, tmp) })
         ws.close(shell.key)
     }
 
     private func snapshot(_ name: String? = nil) {
         guard var path = ProcessInfo.processInfo.environment["AGENTZ_SMOKE_SNAPSHOT"],
-              let view = NSApp.windows.first(where: { $0.isVisible })?.contentView?.superview,
+              let view = window.window?.contentView?.superview,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)
         else { return }
         if let name { path = (path as NSString).deletingPathExtension + "-\(name).png" }

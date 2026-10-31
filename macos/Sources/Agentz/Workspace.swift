@@ -2,11 +2,33 @@ import AgentzCore
 import AppKit
 import Observation
 
-/// An agent or shell we started, keyed by the session it belongs to.
+/// What a tab shows in its pane: a terminal running an agent or a shell,
+/// or a repository's git client.
+@MainActor
+protocol PaneContent: AnyObject {
+    var paneView: NSView { get }
+    /// False once its program ended. A git client runs until its tab closes.
+    var isRunning: Bool { get }
+    /// It, or something in it, has the keyboard.
+    var isFocused: Bool { get }
+    func focus()
+    /// Only the views in a pane show; the others keep their size.
+    func setVisible(_ visible: Bool)
+    /// Ends it, when its tab goes away.
+    func close()
+}
+
+extension Terminal: PaneContent {
+    var paneView: NSView { view }
+}
+
+/// An agent, shell or git client we started, keyed by the session it
+/// belongs to.
 @MainActor
 final class Tab {
     var key: SessionKey
-    let terminal: Terminal
+    /// What its pane shows.
+    let content: PaneContent
     var cwd: String
     let spawnedAt = Date()
     var fallbackTitle: String
@@ -26,13 +48,17 @@ final class Tab {
     /// every launch.
     var pinned = false
 
-    init(key: SessionKey, terminal: Terminal, cwd: String, title: String, resumed: Bool) {
+    init(key: SessionKey, content: PaneContent, cwd: String, title: String, resumed: Bool) {
         self.key = key
-        self.terminal = terminal
+        self.content = content
         self.cwd = cwd
         fallbackTitle = title
         self.resumed = resumed
     }
+
+    /// The terminal of an agent or shell; nil for a git client.
+    var terminal: Terminal? { content as? Terminal }
+    var git: GitSession? { content as? GitSession }
 
     /// True if this tab shows `key`: its own session, or the session of the
     /// agent running inside it.
@@ -40,15 +66,17 @@ final class Tab {
         self.key == key || linked == key
     }
 
-    /// A shell is named after the command it runs, e.g. `vim`.
+    /// A shell is named after the command it runs, e.g. `vim`, and a git
+    /// client after the branch it is on.
     var title: String {
-        if key.agent == .shell, let fg = foreground, terminal.foregroundGroup == fg.group {
+        if let git { return git.title }
+        if key.agent == .shell, let fg = foreground, terminal?.foregroundGroup == fg.group {
             return fg.name
         }
         return fallbackTitle
     }
 
-    var isRunning: Bool { terminal.isRunning }
+    var isRunning: Bool { content.isRunning }
     var isBusy: Bool { isRunning && busy }
 }
 
@@ -296,7 +324,7 @@ final class Workspace {
             // However a tab goes away, its terminal goes with it, and a
             // hidden split it was in ends.
             for old in oldValue where !tabs.contains(where: { $0 === old }) {
-                old.terminal.close()
+                old.content.close()
                 waiting[ObjectIdentifier(old)] = nil
                 quit.remove(ObjectIdentifier(old))
                 endHiddenSplit(with: old.key)
@@ -371,13 +399,13 @@ final class Workspace {
 
     /// Pids of our running shells, for the process scan.
     var shellPids: [Int32] {
-        tabs.filter { $0.key.agent == .shell && $0.isRunning }.compactMap(\.terminal.pid)
+        tabs.filter { $0.key.agent == .shell && $0.isRunning }.compactMap { $0.terminal?.pid }
     }
 
     /// Pids of the Codex processes we started whose thread we don't know.
     var newCodexPids: [Int32] {
         tabs.filter { $0.key.agent == .codex && $0.key.id.hasPrefix("new-") && $0.isRunning }
-            .compactMap(\.terminal.pid)
+            .compactMap { $0.terminal?.pid }
     }
 
     func setStatus(_ message: String) {
@@ -450,11 +478,11 @@ final class Workspace {
         let cwd: String = if let linked {
             linked.cwd
         } else if agent == .shell {
-            r.terminal.pid.flatMap(workingDirectory) ?? r.cwd
+            r.terminal?.pid.flatMap(workingDirectory) ?? r.cwd
         } else {
             r.cwd
         }
-        let title = session?.title ?? (agent == .shell ? Launch.shellName : r.fallbackTitle)
+        let title = session?.title ?? (agent == .shell ? Launch.shellName : r.title)
         return SavedTab(agent: agent, id: id, cwd: cwd, title: title, pinned: r.pinned)
     }
 
@@ -528,7 +556,7 @@ final class Workspace {
         var cwdChanged = false
         let present = isUserPresent()
         for r in tabs {
-            r.terminal.poll()
+            r.terminal?.poll()
         }
         for r in tabs {
             let looking = present && panes.keys.contains(r.key)
@@ -551,7 +579,8 @@ final class Workspace {
             notify?("\(key.agent.displayName) is waiting", title, notice.message, key)
         }
         let titleChanged = tabs.contains { r in
-            r.key.agent == .shell && r.linked == nil && rows.contains { $0.key == r.key && $0.title != r.title }
+            (r.key.agent == .shell && r.linked == nil || r.key.agent == .git)
+                && rows.contains { $0.key == r.key && $0.title != r.title }
         }
         if cwdChanged || titleChanged {
             rebuildRows()
@@ -638,7 +667,7 @@ final class Workspace {
     /// it, so that session's row opens the shell instead of a second copy.
     private func linkShells(_ shells: [ShellProcess]) {
         for r in tabs where r.key.agent == .shell {
-            let found = r.terminal.pid.flatMap { pid in shells.first { $0.pid == pid } }
+            let found = r.terminal?.pid.flatMap { pid in shells.first { $0.pid == pid } }
             r.foreground = found?.foreground
             let linked = found?.agent
             if linked != nil {
@@ -663,7 +692,7 @@ final class Workspace {
     /// takes that thread's id.
     private func bindNewCodexSessions(_ threads: [Int32: String]) {
         for r in tabs where r.key.agent == .codex && r.key.id.hasPrefix("new-") {
-            guard let id = r.terminal.pid.flatMap({ threads[$0] }) else { continue }
+            guard let id = r.terminal?.pid.flatMap({ threads[$0] }) else { continue }
             let key = SessionKey(.codex, id)
             guard !tabs.contains(where: { $0 !== r && $0.shows(key) }) else { continue }
             let old = r.key
@@ -1030,7 +1059,7 @@ final class Workspace {
                   now.timeIntervalSince(r.spawnedAt) >= Self.settleTime
             else { continue }
             continuedFor[key] = info.stop.at
-            r.terminal.run("continue")
+            r.terminal?.run("continue")
             r.turns.userInput()
             waiting[ObjectIdentifier(r)] = nil
             let title = sessions.first { $0.key == key }?.title ?? r.fallbackTitle
@@ -1073,6 +1102,10 @@ final class Workspace {
     /// the focused pane, even in a split. Anything else starts on its own,
     /// and a split on screen stays as it is.
     func newSession(_ agent: Agent, cwd: String, inPlaceOfShell: Bool = false) {
+        if agent == .git {
+            openGit(cwd)
+            return
+        }
         guard checkFolder(cwd) else { return }
         if inPlaceOfShell, agent != .shell, activeIdleShell() != nil {
             startFromActiveShell(agent, resume: nil, cwd: cwd, title: newTitle(agent))
@@ -1101,7 +1134,7 @@ final class Workspace {
     /// Where the tab works now: a shell's current folder, else where its
     /// agent started.
     private func folder(of r: Tab) -> String {
-        r.key.agent == .shell ? r.terminal.pid.flatMap(workingDirectory) ?? r.cwd : r.cwd
+        r.key.agent == .shell ? r.terminal?.pid.flatMap(workingDirectory) ?? r.cwd : r.cwd
     }
 
     /// False, with a status line, if the folder is gone.
@@ -1121,7 +1154,7 @@ final class Workspace {
     /// prompt and not pinned.
     private func activeIdleShell() -> SessionKey? {
         guard let r = currentTab, r.key.agent == .shell, r.isRunning, r.linked == nil, !r.pinned,
-              !r.terminal.hasForegroundJob
+              r.terminal?.hasForegroundJob == false
         else { return nil }
         return r.key
     }
@@ -1249,7 +1282,7 @@ final class Workspace {
     /// running, in the list.
     func unsplit() {
         guard panes.split != nil else { return }
-        let hadFocus = [currentTab, otherTab].contains { $0?.terminal.isFocused == true }
+        let hadFocus = [currentTab, otherTab].contains { $0?.content.isFocused == true }
         dropPane(current == nil ? panes.focused : 1 - panes.focused)
         prune()
         if hadFocus { focusTerminal?() }
@@ -1268,6 +1301,14 @@ final class Workspace {
         let moved = panes.focused == i
         panes = PaneLayout(keys: [panes.keys[1 - i]])
         if moved, let r = currentTab { selection = r.linked ?? r.key }
+    }
+
+    /// A click in pane `i` makes it the one the user works in. The click
+    /// itself moves the keyboard, as a terminal's does.
+    func clickedPane(_ i: Int) {
+        guard panes.split != nil, panes.keys.indices.contains(i), panes.focused != i else { return }
+        panes.focused = i
+        if let r = currentTab { selection = r.linked ?? r.key }
     }
 
     /// Makes pane `i` the one the user works in, and moves the keyboard to
@@ -1302,6 +1343,7 @@ final class Workspace {
         _ agent: Agent, resume: String?, fork: Bool = false, cwd: String, title: String, focus: Bool = true, pane: Int? = nil
     ) -> Bool {
         guard checkFolder(cwd) else { return false }
+        if agent == .git { return startGit(cwd, focus: focus, pane: pane) }
         let key: SessionKey
         var args: [String] = []
         switch (agent, resume) {
@@ -1327,11 +1369,13 @@ final class Workspace {
         case (.shell, _):
             key = SessionKey(.shell, "shell-\(nextNewId)")
             nextNewId += 1
+        case (.git, _):
+            return false
         }
         let launch = agent == .shell ? Launch.shell() : Launch.agent(agent, args: args, cwd: cwd)
         let terminal = Terminal(command: launch.command, cwd: cwd, env: launch.env)
         // A fork's own id has no transcript to resume until Claude writes it.
-        let tab = Tab(key: key, terminal: terminal, cwd: cwd, title: title, resumed: resume != nil && agent != .shell && !fork)
+        let tab = Tab(key: key, content: terminal, cwd: cwd, title: title, resumed: resume != nil && agent != .shell && !fork)
         terminal.onSignal = { [weak tab] signal in tab?.turns.receive(signal) }
         terminal.onExit = { [weak self, weak tab] in
             guard let self, let tab else { return }
@@ -1357,11 +1401,69 @@ final class Workspace {
         return true
     }
 
+    // MARK: - Git
+
+    /// Shows the git client of the repository `cwd` is in, in a tab of its
+    /// own: the one there is for that worktree, or a new one. A split on
+    /// screen stays as it is. False, with a status line, outside a
+    /// repository.
+    @discardableResult
+    func openGit(_ cwd: String) -> Bool {
+        guard checkFolder(cwd) else { return false }
+        let root = projectRoot(cwd)
+        if let r = tabs.first(where: { $0.key == SessionKey(.git, root) && $0.isRunning }) {
+            selection = r.key
+            show(r, for: r.key)
+            focusTerminal?()
+            return true
+        }
+        guard isGitWorktree(root) else {
+            setStatus("\(tilde(cwd)) is not in a git repository.")
+            return false
+        }
+        makeRoom()
+        let started = startGit(root, focus: true, pane: nil)
+        prune()
+        return started
+    }
+
+    /// Adds a git client for the worktree `cwd` is in, in the focused pane
+    /// unless `pane` says another.
+    private func startGit(_ cwd: String, focus: Bool, pane: Int?) -> Bool {
+        let root = projectRoot(cwd)
+        guard isGitWorktree(root) else {
+            setStatus("\(tilde(cwd)) is not in a git repository.")
+            return false
+        }
+        let key = SessionKey(.git, root)
+        // One per worktree.
+        tabs.removeAll { $0.key == key }
+        let session = GitSession(root: URL(fileURLWithPath: root, isDirectory: true))
+        // Opening another worktree there starts a session in it.
+        session.store.startSession = { [weak self] agent, folder in
+            if agent == .git { self?.openGit(folder.path) } else { self?.newSession(agent, cwd: folder.path) }
+        }
+        let tab = Tab(key: key, content: session, cwd: root, title: "Git", resumed: false)
+        let pane = pane ?? panes.focused
+        panes.keys[pane] = key
+        tabs.append(tab)
+        if pane == panes.focused { selection = key }
+        rebuildRows()
+        if focus { focusTerminal?() }
+        return true
+    }
+
+    /// A worktree's top folder has `.git`: a folder, or a file in a linked
+    /// worktree.
+    private func isGitWorktree(_ root: String) -> Bool {
+        FileManager.default.fileExists(atPath: root + "/.git")
+    }
+
     private func exited(_ tab: Tab) {
         guard let i = tabs.firstIndex(where: { $0 === tab }) else { return }
         let key = tab.key
         let pane = panes.keys.firstIndex(of: key)
-        let hadFocus = tab.terminal.isFocused
+        let hadFocus = tab.content.isFocused
         let early = Date().timeIntervalSince(tab.spawnedAt) < 3
         if key.agent != .shell, early {
             setStatus("\(key.agent.name) quit right after starting. Is it installed and in your login shell's PATH?")
@@ -1468,7 +1570,7 @@ final class Workspace {
     /// The user typed into a terminal: a new turn starts, and a placeholder
     /// shell becomes a real one.
     func userTyped(in view: NSView) {
-        guard let r = tabs.first(where: { $0.terminal.view === view }) else { return }
+        guard let r = tabs.first(where: { $0.content.paneView === view }) else { return }
         r.turns.userInput()
         r.placeholder = false
         waiting[ObjectIdentifier(r)] = nil
@@ -1478,10 +1580,11 @@ final class Workspace {
     /// agents; a shell counts only while it runs a command.
     func quitCounts() -> (working: Int, idle: Int, commands: Int) {
         var working = 0, idle = 0, commands = 0
-        for r in tabs where r.isRunning && !r.placeholder {
+        // A git client stops nothing.
+        for r in tabs where r.isRunning && !r.placeholder && r.key.agent != .git {
             if r.key.agent != .shell || r.linked != nil {
                 if r.isBusy { working += 1 } else { idle += 1 }
-            } else if r.terminal.hasForegroundJob {
+            } else if r.terminal?.hasForegroundJob == true {
                 commands += 1
             }
         }

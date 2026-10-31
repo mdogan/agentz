@@ -255,7 +255,11 @@ mod tests {
         save_in(
             &dir,
             SavedState {
-                tabs: vec![tab(Agent::Shell, None), tab(Agent::Claude, Some("one"))],
+                tabs: vec![
+                    tab(Agent::Shell, None),
+                    tab(Agent::Git, None),
+                    tab(Agent::Claude, Some("one")),
+                ],
                 active: Some(1),
                 ..SavedState::default()
             },
@@ -274,11 +278,12 @@ mod tests {
         )
         .unwrap();
         let saved = take_in(&dir).unwrap().unwrap();
-        assert_eq!(saved.tabs.len(), 3);
+        assert_eq!(saved.tabs.len(), 4);
         assert_eq!(saved.tabs[0].agent, Agent::Shell);
-        assert_eq!(saved.tabs[1].id.as_deref(), Some("one"));
-        assert_eq!(saved.tabs[2].id.as_deref(), Some("two"));
-        assert_eq!(saved.active, Some(2));
+        assert_eq!(saved.tabs[1].agent, Agent::Git);
+        assert_eq!(saved.tabs[2].id.as_deref(), Some("one"));
+        assert_eq!(saved.tabs[3].id.as_deref(), Some("two"));
+        assert_eq!(saved.active, Some(3));
         assert_eq!(take_in(&dir).unwrap(), None);
         fs::remove_dir_all(dir).unwrap();
     }

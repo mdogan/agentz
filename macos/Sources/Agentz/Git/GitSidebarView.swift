@@ -3,6 +3,10 @@ import SwiftUI
 
 struct GitSidebarView: View {
     @EnvironmentObject private var store: RepositoryStore
+    /// With rows for the changes and the whole history, as in GitFork's
+    /// window. The git tab has them; a list that has its own way there
+    /// leaves them out.
+    var showsSections = false
     @State private var branchesExpanded = true
     @State private var remotesExpanded = false
     @State private var tagsExpanded = false
@@ -32,13 +36,42 @@ struct GitSidebarView: View {
     var body: some View {
         List {
             Section {
+                if showsSections {
+                    SidebarRow(
+                        title: WorkspaceSection.changes.rawValue,
+                        icon: WorkspaceSection.changes.icon,
+                        isSelected: store.selectedSection == .changes,
+                        size: .regular
+                    ) {
+                        store.selectChanges()
+                    } badge: {
+                        if !store.changes.isEmpty {
+                            Text("\(store.changes.count)")
+                        }
+                    }
+
+                    SidebarRow(
+                        title: WorkspaceSection.history.rawValue,
+                        icon: WorkspaceSection.history.icon,
+                        isSelected: store.selectedSection == .history
+                            && store.selectedReference == nil
+                            && store.selectedStash == nil
+                            && store.historyScope == .all,
+                        size: .regular
+                    ) {
+                        store.selectReference(nil)
+                    } badge: {
+                        EmptyView()
+                    }
+                }
+
                 SidebarRow(
                     title: "Unreachable Commits",
                     icon: "lifepreserver",
                     isSelected: store.selectedSection == .history
                         && store.selectedStash == nil
                         && store.historyScope == .lostAndDangling,
-                    size: .regular
+                    indent: showsSections ? 29 : 0
                 ) {
                     store.selectLostAndDanglingCommits()
                 } badge: {
@@ -200,11 +233,11 @@ private struct WorktreeSidebarRow: View {
         }
         .help(worktree.path)
         .contextMenu {
-            ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
+            ForEach([Agent.claude, .codex, .shell, .git], id: \.self) { agent in
                 Button(agent.newHere) {
                     open(agent)
                 }
-                .disabled(worktree.isPrunable)
+                .disabled(worktree.isPrunable || agent == .git && worktree.isCurrent)
             }
 
             if worktree.isPrunable {

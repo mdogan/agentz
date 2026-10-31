@@ -23,6 +23,9 @@ pub enum Agent {
     Codex,
     /// A plain shell started from agentz. It has no transcript.
     Shell,
+    /// A repository's git client in a tab of its own. It has no
+    /// transcript; its id is the top folder of the worktree it shows.
+    Git,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
@@ -308,7 +311,7 @@ fn parse(path: &Path, agent: Agent, prev: Parsed, whole: bool) -> Parsed {
                 p
             }
         }
-        Agent::Shell => prev,
+        Agent::Shell | Agent::Git => prev,
     }
 }
 
