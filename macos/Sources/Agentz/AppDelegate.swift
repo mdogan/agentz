@@ -81,7 +81,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 close: { [weak self] key in self?.closeSession(key) },
                 start: { [weak self] agent, dir, repo in self?.start(agent, in: dir, repo: repo) },
                 chooseFolder: { [weak self] agent in
-                    self?.chooseFolder("Start a new \(agent.displayName) session in this folder.", prompt: "Start")
+                    agent == .git
+                        ? self?.chooseFolder("Open the git of the repository this folder is in.", prompt: "Open")
+                        : self?.chooseFolder("Start a new \(agent.displayName) session in this folder.", prompt: "Start")
                 },
                 createFolder: { [weak self] agent in
                     self?.createFolder("Start a new \(agent.displayName) session in a new folder.")
@@ -645,6 +647,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item.state = windowController?.autoHide == true ? .on : .off
         case #selector(toggleGit(_:)):
             item.state = windowController?.isGitShown == true ? .on : .off
+            // A git tab on screen has the changes itself.
+            return windowController?.isGitTabShown == false
         case #selector(openGit(_:)), #selector(showGitChanges(_:)):
             return windowController != nil
         case #selector(showGitHistory(_:)), #selector(pathHistory(_:)), #selector(openCommit(_:)):

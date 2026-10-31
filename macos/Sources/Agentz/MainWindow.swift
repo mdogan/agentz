@@ -42,8 +42,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         git.store.startSession = { [weak workspace] agent, folder in
             workspace?.newSession(agent, cwd: folder.path)
         }
-        let gitView = NSHostingController(rootView: GitPanel(model: git, look: look) { [weak workspace, weak git] in
-            if let root = git?.store.repositoryURL { workspace?.openGit(root.path) }
+        let gitView = NSHostingController(rootView: GitPanel(model: git, look: look) { [weak workspace, weak git] change in
+            if let root = git?.store.repositoryURL { workspace?.openGit(root.path, showing: change) }
         })
         // The width it has when first shown; later, the one it had.
         gitView.view.frame.size.width = Self.gitWidth
@@ -77,8 +77,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         split.addSplitViewItem(gitItem)
         if !autoHide { split.splitView.autosaveName = Self.splitName }
         // After the split's saved layout, which may say otherwise.
-        let gitShown = SmokeTest.logPath == nil && UserDefaults.standard.bool(forKey: Self.gitShownKey)
-        gitItem.isCollapsed = !gitShown
+        gitWanted = SmokeTest.logPath == nil && UserDefaults.standard.bool(forKey: Self.gitShownKey)
+        gitItem.isCollapsed = !gitWanted
         window.contentViewController = split
         window.setContentSize(NSSize(width: 1200, height: 760))
         window.center()
@@ -111,11 +111,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         // Dragging a session out of the list, to drop it on a pane.
         pane.onSessionDrag = { [weak self] in self?.overlay.hide() }
-        // Shown or hidden by a toggle, or by dragging its edge.
+        // Hidden by dragging its edge, too.
         gitObservation = gitItem.observe(\.isCollapsed) { [weak self] item, _ in
-            MainActor.assumeIsolated { self?.gitShownChanged(!item.isCollapsed) }
+            MainActor.assumeIsolated { self?.gitCollapsed(item.isCollapsed) }
         }
-        gitShownChanged(gitShown)
+        updateGitPanel()
         // Nothing is read for the panel while the window can't be seen.
         NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
@@ -149,7 +149,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func layout() {
         pane.sync()
         updateTitle()
-        followGit()
+        updateGitPanel()
     }
 
     private func updateTitle() {
@@ -234,7 +234,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private static let gitWidths: ClosedRange<CGFloat> = 340 ... 1000
     private static let gitShownKey = "gitPanelShown"
 
+    /// The user wants the Changes panel, as kept across launches. It still
+    /// hides while a git tab is on screen, which has the changes itself.
+    private var gitWanted = false
+
     var isGitShown: Bool { !gitItem.isCollapsed }
+
+    /// A git tab is in a pane on screen, either one of a split: the Changes
+    /// panel stays hidden then, and can't be shown.
+    var isGitTabShown: Bool { workspace.panes.keys.contains { $0?.agent == .git } }
 
     /// How wide the Changes panel is on screen: 0 while hidden.
     var gitPanelWidth: CGFloat {
@@ -243,24 +251,43 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func toggleGit() {
-        setGitShown(!isGitShown)
+        guard !isGitTabShown else { return }
+        setGitShown(!gitWanted)
     }
 
+    /// Shows or hides the Changes panel from now on, and on the next launch.
     func setGitShown(_ shown: Bool) {
-        // An animation needs the window on screen to finish; without it,
-        // e.g. while the screen is locked, the panel would stay in sight.
-        if window?.occlusionState.contains(.visible) == true {
-            gitItem.animator().isCollapsed = !shown
-        } else {
-            gitItem.isCollapsed = !shown
-        }
-        gitShownChanged(shown)
+        gitWanted = shown
+        if SmokeTest.logPath == nil { UserDefaults.standard.set(shown, forKey: Self.gitShownKey) }
+        updateGitPanel()
     }
 
-    private func gitShownChanged(_ shown: Bool) {
-        if SmokeTest.logPath == nil { UserDefaults.standard.set(shown, forKey: Self.gitShownKey) }
+    /// The panel shows when it is wanted and no git tab is on screen.
+    private func updateGitPanel() {
+        let shown = gitWanted && !isGitTabShown
+        if isGitShown != shown {
+            // An animation needs the window on screen to finish; without
+            // it, e.g. while the screen is locked, the panel would stay in
+            // sight.
+            if window?.occlusionState.contains(.visible) == true {
+                gitItem.animator().isCollapsed = !shown
+            } else {
+                gitItem.isCollapsed = !shown
+            }
+        }
         if shown { git.follow(workspace.gitFolder) }
         git.isShown = shown
+    }
+
+    /// The panel was collapsed or expanded. Not by `updateGitPanel`, which
+    /// expects that: the user dragged its edge.
+    private func gitCollapsed(_ collapsed: Bool) {
+        guard collapsed != !(gitWanted && !isGitTabShown) else { return }
+        if isGitTabShown {
+            updateGitPanel()
+        } else {
+            setGitShown(!collapsed)
+        }
     }
 
     /// The panel shows the changes in the repository of the session on
@@ -356,7 +383,7 @@ private struct SplitButtons: View {
             }
             SplitButton(workspace: workspace, look: look, direction: .right)
             SplitButton(workspace: workspace, look: look, direction: .down)
-            GitButton(git: git, look: look, toggle: toggleGit)
+            GitButton(git: git, look: look, blocked: workspace.panes.keys.contains { $0?.agent == .git }, toggle: toggleGit)
         }
         .padding(.horizontal, 8)
         .frame(maxHeight: .infinity)
@@ -397,6 +424,8 @@ private struct AttentionButton: View {
 private struct GitButton: View {
     let git: GitPanelModel
     let look: Look
+    /// A git tab is on screen.
+    let blocked: Bool
     let toggle: () -> Void
     @State private var hovered = false
 
@@ -411,8 +440,10 @@ private struct GitButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(blocked)
+        .opacity(blocked ? 0.4 : 1)
         .onHover { hovered = $0 }
-        .help(on ? "Hide Changes (⇧⌘C)" : "Show Changes (⇧⌘C)")
+        .help(blocked ? "The git tab shows the changes itself" : on ? "Hide Changes (⇧⌘C)" : "Show Changes (⇧⌘C)")
         .accessibilityLabel(on ? "Hide Changes" : "Show Changes")
     }
 }

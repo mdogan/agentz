@@ -1,5 +1,6 @@
 import AgentzCore
 import AppKit
+import Combine
 import SwiftUI
 
 /// A tab that shows a repository's git client: GitFork's whole window, in a
@@ -15,6 +16,9 @@ final class GitSession: PaneContent {
     private(set) var isRunning = true
     private var visible = false
     private var windowVisible = true
+    /// A change to show once the repository is read and has it.
+    private var pendingChange: ChangeEntryID?
+    private var changesRead: AnyCancellable?
 
     init(root: URL) {
         self.root = root
@@ -22,6 +26,25 @@ final class GitSession: PaneContent {
         // Read once now; watch only while shown.
         store.setMonitoringActive(false)
         store.openRepository(root)
+        // `changes` is published before it changes: look after.
+        changesRead = store.$changes.receive(on: DispatchQueue.main).sink { [weak self] _ in
+            MainActor.assumeIsolated { self?.showPendingChange() }
+        }
+    }
+
+    /// Shows the changes, with the diff of the file `id`, as soon as the
+    /// repository has it.
+    func showChange(_ id: ChangeEntryID) {
+        pendingChange = id
+        store.selectChanges()
+        showPendingChange()
+    }
+
+    private func showPendingChange() {
+        guard let id = pendingChange, store.changeEntries.contains(where: { $0.id == id }) else { return }
+        pendingChange = nil
+        if store.selectedSection != .changes { store.selectChanges() }
+        store.selectChangeEntry(id)
     }
 
     /// The branch it is on, for the session list.

@@ -1405,15 +1405,16 @@ final class Workspace {
 
     /// Shows the git client of the repository `cwd` is in, in a tab of its
     /// own: the one there is for that worktree, or a new one. A split on
-    /// screen stays as it is. False, with a status line, outside a
-    /// repository.
+    /// screen stays as it is. With `change`, it shows that changed file's
+    /// diff. False, with a status line, outside a repository.
     @discardableResult
-    func openGit(_ cwd: String) -> Bool {
+    func openGit(_ cwd: String, showing change: ChangeEntryID? = nil) -> Bool {
         guard checkFolder(cwd) else { return false }
         let root = projectRoot(cwd)
         if let r = tabs.first(where: { $0.key == SessionKey(.git, root) && $0.isRunning }) {
             selection = r.key
             show(r, for: r.key)
+            if let change { r.git?.showChange(change) }
             focusTerminal?()
             return true
         }
@@ -1423,6 +1424,7 @@ final class Workspace {
         }
         makeRoom()
         let started = startGit(root, focus: true, pane: nil)
+        if started, let change { currentTab?.git?.showChange(change) }
         prune()
         return started
     }

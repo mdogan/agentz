@@ -339,6 +339,63 @@ final class SurfaceView: TerminalView {
         addCursorRect(bounds, cursor: cursor)
     }
 
+    // MARK: - A mouse-up lost to another window
+
+    /// The left button went down here, and where the mouse was last while
+    /// it stayed down. Nil once it came up.
+    private var leftDown: NSEvent?
+    private var resignKeyObserver: NSObjectProtocol?
+
+    /// True while the left button that went down here has not come up.
+    var isLeftButtonDown: Bool { leftDown != nil }
+
+    override func mouseDown(with event: NSEvent) {
+        // Its mouse-up never came: end that click first.
+        releaseLeftButton()
+        leftDown = event
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if leftDown != nil { leftDown = event }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        leftDown = nil
+        super.mouseUp(with: event)
+    }
+
+    /// When another window takes the keyboard while the button is down
+    /// here, e.g. another app comes to the front in the middle of a drag,
+    /// the mouse-up goes there. The program here, like Claude Code
+    /// selecting text with the mouse, would think the button is still held
+    /// and go on selecting as the mouse moves. It gets a mouse-up instead.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let resignKeyObserver { NotificationCenter.default.removeObserver(resignKeyObserver) }
+        resignKeyObserver = nil
+        guard let window else { return }
+        resignKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.releaseLeftButton() }
+        }
+    }
+
+    /// Tells the terminal the left button came up, where the mouse was
+    /// last, if it went down here and did not.
+    func releaseLeftButton() {
+        guard let down = leftDown, let window else { return }
+        leftDown = nil
+        guard let up = NSEvent.mouseEvent(
+            with: .leftMouseUp, location: down.locationInWindow, modifierFlags: down.modifierFlags,
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: 0
+        ) else { return }
+        super.mouseUp(with: up)
+    }
+
     /// A program that took the mouse, like Claude Code, gets the wheel at
     /// the last place Ghostty heard the mouse was, and nothing while that
     /// is off the terminal. Ghostty hears it from moves and clicks only: a

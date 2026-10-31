@@ -88,20 +88,21 @@ final class GitPanelModel {
 }
 
 /// The Changes panel, on the right of the window: the staged and unstaged
-/// changes in the shown session's repository, with GitFork's lists over the
-/// picked file's diff. It stages, unstages and discards files or single
-/// lines, resolves conflicts, commits and stashes. The rest of git is in a
-/// git tab of its own (`openGit`).
+/// files in the shown session's repository, with GitFork's lists. It stages,
+/// unstages and discards files, resolves conflicts and commits. A file's
+/// button, or a double-click on it, shows its diff in the repository's git
+/// tab, which has the rest of git.
 struct GitPanel: View {
     let model: GitPanelModel
     @ObservedObject var store: RepositoryStore
     let look: Look
-    /// Opens the repository's git tab.
-    let openGit: () -> Void
+    /// Opens the repository's git tab, showing the diff of a change if one
+    /// is given.
+    let openGit: (ChangeEntryID?) -> Void
     @State private var showingStashSheet = false
     @State private var stashScope = StashScope.all
 
-    init(model: GitPanelModel, look: Look, openGit: @escaping () -> Void) {
+    init(model: GitPanelModel, look: Look, openGit: @escaping (ChangeEntryID?) -> Void) {
         self.model = model
         store = model.store
         self.look = look
@@ -139,20 +140,10 @@ struct GitPanel: View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(look.divider).frame(height: 1)
-            VSplitView {
-                GitChangesView(showingStashSheet: $showingStashSheet, stashScope: $stashScope)
-                    .frame(minHeight: 140, idealHeight: 300)
-                DetailView()
-                    .frame(minHeight: 160)
-            }
+            GitChangesView(showingStashSheet: $showingStashSheet, stashScope: $stashScope, showsStash: false)
+                .environment(\.openChange) { openGit($0) }
         }
         .modifier(GitDialogs(store: store, showingStashSheet: $showingStashSheet, stashScope: stashScope))
-        // GitFork's views pick what they show from the store's section; the
-        // panel always shows the changes.
-        .onChange(of: store.selectedSection) { _, _ in keepChanges() }
-        .onChange(of: store.repositoryURL) { _, _ in keepChanges() }
-        .onChange(of: store.changes) { _, _ in pickFirstChange() }
-        .onAppear { keepChanges() }
     }
 
     /// The repository, where HEAD is, and the way to the rest of git.
@@ -171,8 +162,8 @@ struct GitPanel: View {
                 .foregroundStyle(look.secondary)
                 .lineLimit(1)
                 .help(store.repositoryURL.map { tilde($0.path) } ?? "")
-            ToolbarIconButton("Open Git", systemImage: "arrow.up.left.and.arrow.down.right", help: "Open the repository's history, branches and the rest in a git tab (⌥⌘G)") {
-                openGit()
+            ToolbarIconButton("Open Git", systemImage: "arrow.up.left.and.arrow.down.right", help: "Open the repository's diffs, history, branches and the rest in a git tab (⌥⌘G). A double-click on a file opens its diff there.") {
+                openGit(nil)
             }
             ToolbarIconButton("Refresh", systemImage: "arrow.clockwise", help: "Read the changes again. They are read again by themselves when files change.") {
                 store.refresh()
@@ -182,19 +173,5 @@ struct GitPanel: View {
         .padding(.leading, 10)
         .padding(.trailing, 6)
         .frame(height: 36)
-    }
-
-    private func keepChanges() {
-        if store.repositoryURL != nil, store.selectedSection != .changes { store.selectChanges() }
-        pickFirstChange()
-    }
-
-    /// Files show up by themselves as the agent works: with none picked,
-    /// the first one's diff shows.
-    private func pickFirstChange() {
-        guard store.selectedSection == .changes, store.selectedChange == nil,
-              let first = store.changeEntries.first
-        else { return }
-        store.selectChangeEntry(first.id)
     }
 }

@@ -69,8 +69,8 @@ struct SidebarView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 HStack(spacing: 2) {
-                    ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
-                        PopUpButton(look: look, help: "New \(agent.displayName) session. Pick a folder, or a worktree of a repo.", menu: { startMenu(agent) }) {
+                    ForEach([Agent.claude, .codex, .shell, .git], id: \.self) { agent in
+                        PopUpButton(look: look, help: startHelp(agent), menu: { startMenu(agent) }) {
                             agent.icon
                                 .foregroundStyle(look.color(for: agent))
                             Text(agent.displayName)
@@ -157,12 +157,19 @@ struct SidebarView: View {
 
     /// Where to start a new session: a recent folder, or in a git repo one
     /// of its worktrees.
+    private func startHelp(_ agent: Agent) -> String {
+        agent == .git
+            ? "Open a repo's git in a tab of its own. Pick a repo, or a worktree of it."
+            : "New \(agent.displayName) session. Pick a folder, or a worktree of a repo."
+    }
+
     private func startMenu(_ agent: Agent) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let repos = recentRepos(actions.recentFolders())
+        // Git only opens in a repo.
+        let repos = recentRepos(actions.recentFolders()).filter { agent != .git || !$0.worktrees.isEmpty }
         if !repos.isEmpty {
-            menu.addItem(.sectionHeader(title: "Start \(agent.displayName) In"))
+            menu.addItem(.sectionHeader(title: agent == .git ? "Open Git For" : "Start \(agent.displayName) In"))
             for repo in repos {
                 let item = MenuAction(repo.name, detail: repo.parent) { actions.start(agent, repo.dir, repo.dir) }
                 item.toolTip = tilde(repo.dir)
@@ -176,9 +183,11 @@ struct SidebarView: View {
         menu.addItem(MenuAction("Open Folder…") {
             if let dir = actions.chooseFolder(agent) { actions.start(agent, dir, dir) }
         })
-        menu.addItem(MenuAction("Create Folder…") {
-            if let dir = actions.createFolder(agent) { actions.start(agent, dir, dir) }
-        })
+        if agent != .git {
+            menu.addItem(MenuAction("Create Folder…") {
+                if let dir = actions.createFolder(agent) { actions.start(agent, dir, dir) }
+            })
+        }
         if !repos.isEmpty {
             menu.addItem(MenuAction("Clear Recent Folders", actions.clearRecentFolders))
         }

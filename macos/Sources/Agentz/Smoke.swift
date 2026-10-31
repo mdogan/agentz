@@ -476,6 +476,15 @@ final class SmokeTest {
         move(second.terminal!.view, to: NSPoint(x: 300, y: firstView.bounds.height - 10))
         _ = await wait(0.3) { false }
         check("the pane left behind has no click stuck either", second.terminal!.view.selectionMenuPoint(at: .zero) == nil)
+        // A mouse-up that another window got, e.g. another app's that came
+        // to the front in the middle of a drag, ends the click here too.
+        press(firstView, at: NSPoint(x: 40, y: firstView.bounds.height - 10))
+        let held = firstView.isLeftButtonDown
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: firstView.window)
+        move(firstView, to: NSPoint(x: 300, y: firstView.bounds.height - 10))
+        _ = await wait(0.3) { false }
+        check("a mouse-up lost to another window ends the click too",
+              held && !firstView.isLeftButtonDown && firstView.selectionMenuPoint(at: .zero) == nil)
         click(second.terminal!.view, at: NSPoint(x: 40, y: firstView.bounds.height - 10))
         _ = await wait(0.5) { false }
         check("a click focuses the first pane again", ws.panes.focused == 1 && firstView.window?.firstResponder === second.terminal!.view)
@@ -982,6 +991,20 @@ final class SmokeTest {
         }, "\(store.changes.map(\.path))")
         snapshot("git-changes")
 
+        // A file's button in the panel, or a double-click on it.
+        if let b = store.changeEntries.first(where: { $0.change.path == "b.txt" }) {
+            ws.openGit(repo, showing: b.id)
+            check("a file opens its diff in the git tab", await wait(8) {
+                ws.currentTab?.git.map {
+                    $0.store.selectedSection == .changes && $0.store.selectedChange?.path == "b.txt" && !$0.store.diff.isEmpty
+                } ?? false
+            }, "\(ws.currentTab?.key.description ?? "none")")
+            snapshot("git-tab-change")
+            if let key = ws.currentTab?.key, key.agent == .git { ws.close(key) }
+            ws.open(shell.key)
+        }
+        check("back on the shell, the panel shows again", await wait(3) { ws.current == shell.key && git.isShown })
+
         if let a = store.changes.first(where: { $0.path == "a.txt" }) { store.stage(a) }
         check("a file can be staged", await wait(5) {
             store.changes.contains { $0.path == "a.txt" && $0.isStaged && !$0.isUnstaged }
@@ -1001,14 +1024,6 @@ final class SmokeTest {
 
         store.createBranch(named: "feature")
         check("a new branch is checked out", await wait(5) { store.branch == "feature" }, store.branch)
-
-        write("c.txt", "wip\n")
-        _ = await wait(6) { !store.changes.isEmpty }
-        store.stash(message: "wip")
-        check("a stash takes the changes away", await wait(6) {
-            store.changes.isEmpty && store.stashes.count == 1
-        }, "\(store.changes.count) changes, \(store.stashes.count) stashes")
-        snapshot("git-history")
 
         shell.terminal!.run("cd \(shellQuote(tmp))")
         check("it follows the shell out of the repository", await wait(5) {
@@ -1044,12 +1059,20 @@ final class SmokeTest {
         let before = ws.quitCounts()
         let app = NSApp.delegate as! AppDelegate
         let item = NSMenuItem(title: "", action: #selector(AppDelegate.openGit(_:)), keyEquivalent: "")
+        let changes = NSMenuItem(title: "", action: #selector(AppDelegate.toggleGit(_:)), keyEquivalent: "")
+        window.setGitShown(true)
+        check("the Changes panel shows over the shell", window.isGitShown && app.validateMenuItem(changes))
         check("Open Git works from a shell in a repository", app.validateMenuItem(item))
         app.openGit(nil)
         guard let tab = ws.tabs.first(where: { $0.key == key }), let git = tab.git else {
             return check("Open Git opens a git tab for the shell's worktree", false, "\(ws.tabs.map(\.key))")
         }
         check("Open Git opens a git tab for the shell's worktree", ws.current == key && tab.terminal == nil)
+        check("the Changes panel hides over it, and can't be shown", await wait(3) {
+            !self.window.isGitShown && self.window.gitPanelWidth == 0
+        } && !app.validateMenuItem(changes), "width \(window.gitPanelWidth)")
+        app.toggleGit(nil)
+        check("not even with ⇧⌘C", !window.isGitShown)
         check("it reads the repository, and its row is named after the branch", await wait(8) {
             git.store.branch == "main" && ws.rows.contains { $0.key == key && $0.title == "main" }
         }, "\(git.store.branch) \(ws.rows.map(\.title))")
@@ -1058,11 +1081,18 @@ final class SmokeTest {
         snapshot("git-tab")
         ws.openGit(repo + "/.")
         check("one git tab per worktree", ws.tabs.filter { $0.key.agent == .git }.count == 1 && ws.current == key)
+        FileManager.default.createFile(atPath: repo + "/wip.txt", contents: Data("wip\n".utf8))
+        check("it sees new files", await wait(6) { !git.store.changes.isEmpty })
+        git.store.stash(message: "wip")
+        check("a stash takes the changes away", await wait(6) {
+            git.store.changes.isEmpty && git.store.stashes.count == 1
+        }, "\(git.store.changes.count) changes, \(git.store.stashes.count) stashes")
         check("quitting stops nothing in it", ws.quitCounts() == before)
 
         ws.openInSplit(shell.key, .right)
         check("it shares a split with the shell", ws.panes.split == .right && ws.panes.keys.contains(key)
             && ws.panes.keys.contains(shell.key) && !git.paneView.isHidden && !shell.terminal!.view.isHidden)
+        check("the Changes panel stays hidden while the split shows it", !window.isGitShown)
         if let i = ws.panes.keys.firstIndex(of: key) {
             ws.focusPane(1 - i)
             click(git.paneView, at: NSPoint(x: git.paneView.bounds.midX, y: git.paneView.bounds.midY))
@@ -1073,9 +1103,12 @@ final class SmokeTest {
         ws.unsplit()
         ws.close(key)
         check("closing it removes it", !ws.tabs.contains { $0.key == key } && !git.isRunning)
+        check("and the Changes panel is back", await wait(3) { self.window.isGitShown && self.window.gitPanelWidth > 0 })
         _ = ws.restore(SavedState(tabs: [SavedTab(agent: .git, id: nil, cwd: root, title: "main", pinned: false)], project: ws.projectDir))
         check("a saved git tab comes back", ws.tabs.contains { $0.key == key && $0.git != nil })
+        check("and hides the Changes panel again", ws.current != key || !window.isGitShown)
         ws.close(key)
+        window.setGitShown(false)
 
         check("outside a repository there is none", !ws.openGit(tmp) && !ws.tabs.contains { $0.key == SessionKey(.git, tmp) })
         ws.close(shell.key)
@@ -1191,6 +1224,17 @@ private func move(_ view: NSView, to point: NSPoint) {
         eventNumber: 0, clickCount: 0, pressure: 0
     ) else { return }
     view.mouseMoved(with: event)
+}
+
+/// The left button going down at `point` in `view`, and not coming up.
+@MainActor
+private func press(_ view: NSView, at point: NSPoint) {
+    guard let window = view.window, let event = NSEvent.mouseEvent(
+        with: .leftMouseDown, location: view.convert(point, to: nil), modifierFlags: [],
+        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+        eventNumber: 0, clickCount: 1, pressure: 1
+    ) else { return }
+    NSApp.sendEvent(event)
 }
 
 @MainActor

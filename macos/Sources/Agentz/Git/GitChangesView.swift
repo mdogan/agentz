@@ -5,6 +5,9 @@ struct GitChangesView: View {
     @EnvironmentObject private var store: RepositoryStore
     @Binding var showingStashSheet: Bool
     @Binding var stashScope: StashScope
+    /// With the menu that stashes changes. The Changes panel leaves it to
+    /// the git tab.
+    var showsStash = true
     @State private var showingCommitSheet = false
 
     var body: some View {
@@ -20,46 +23,9 @@ struct GitChangesView: View {
 
                 Spacer()
 
-                Menu {
-                    Button {
-                        showStashSheet(for: .staged)
-                    } label: {
-                        Label("Staged Changes", systemImage: "checkmark.circle")
-                    }
-                    .disabled(
-                        store.stagedChanges.isEmpty
-                            || hasPartiallyStagedFiles
-                    )
-
-                    Button {
-                        showStashSheet(for: .unstaged)
-                    } label: {
-                        Label("Unstaged Changes", systemImage: "pencil.circle")
-                    }
-                    .disabled(store.unstagedChanges.isEmpty)
-
-                    Divider()
-
-                    Button {
-                        showStashSheet(for: .all)
-                    } label: {
-                        Label("All Changes", systemImage: "tray.full")
-                    }
-                } label: {
-                    Label("Stash Changes", systemImage: "archivebox")
+                if showsStash {
+                    stashMenu
                 }
-                .menuStyle(.borderedButton)
-                .controlSize(.regular)
-                .help(
-                    store.conflictedChanges.isEmpty
-                        ? "Choose which changes to save to a stash"
-                        : "Resolve all conflicts before stashing changes"
-                )
-                .disabled(
-                    store.changes.isEmpty
-                        || store.isLoading
-                        || !store.conflictedChanges.isEmpty
-                )
 
                 Button {
                     showingCommitSheet = true
@@ -91,6 +57,49 @@ struct GitChangesView: View {
             CommitSheet(isPresented: $showingCommitSheet)
                 .lookWindowStyle()
         }
+    }
+
+    private var stashMenu: some View {
+        Menu {
+            Button {
+                showStashSheet(for: .staged)
+            } label: {
+                Label("Staged Changes", systemImage: "checkmark.circle")
+            }
+            .disabled(
+                store.stagedChanges.isEmpty
+                    || hasPartiallyStagedFiles
+            )
+
+            Button {
+                showStashSheet(for: .unstaged)
+            } label: {
+                Label("Unstaged Changes", systemImage: "pencil.circle")
+            }
+            .disabled(store.unstagedChanges.isEmpty)
+
+            Divider()
+
+            Button {
+                showStashSheet(for: .all)
+            } label: {
+                Label("All Changes", systemImage: "tray.full")
+            }
+        } label: {
+            Label("Stash Changes", systemImage: "archivebox")
+        }
+        .menuStyle(.borderedButton)
+        .controlSize(.regular)
+        .help(
+            store.conflictedChanges.isEmpty
+                ? "Choose which changes to save to a stash"
+                : "Resolve all conflicts before stashing changes"
+        )
+        .disabled(
+            store.changes.isEmpty
+                || store.isLoading
+                || !store.conflictedChanges.isEmpty
+        )
     }
 
     private var changeCountLabel: String {
@@ -499,6 +508,7 @@ private struct EmptyChangeRow: View {
 
 private struct ChangeRow: View {
     @EnvironmentObject private var store: RepositoryStore
+    @Environment(\.openChange) private var openChange
     let entry: ChangeEntry
     let requestDiscard: ([ChangeEntry]) -> Void
     let requestConflictResolution: ([ChangeEntry], ConflictResolutionSide) -> Void
@@ -563,7 +573,20 @@ private struct ChangeRow: View {
                     .fixedSize()
                     .help("Resolve this conflict")
                     .disabled(store.isLoading)
-                } else {
+                }
+                if let openChange {
+                    Button {
+                        openChange(entry.id)
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.body.weight(.medium))
+                            .frame(width: 20, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(GitForkHoverButtonStyle(.icon))
+                    .help("Show its diff in the git tab (or double-click the file)")
+                }
+                if !change.isConflicted {
                     Button {
                         staged ? store.unstage(change) : store.stage(change)
                     } label: {
@@ -601,6 +624,10 @@ private struct ChangeRow: View {
     /// toggles one row, a plain click replaces the selection.
     private func handleClick() {
         let modifiers = NSEvent.modifierFlags
+        if let openChange, NSApp.currentEvent?.clickCount == 2, modifiers.isDisjoint(with: [.shift, .command]) {
+            openChange(entry.id)
+            return
+        }
         if modifiers.contains(.shift) {
             store.extendSelection(to: entry)
         } else if modifiers.contains(.command) {
@@ -885,5 +912,18 @@ private struct CommitSheet: View {
                 : "Create an OpenPGP-signed commit using Git's configured key"
         }
         return store.amend ? "Replace the latest commit" : "Commit the staged changes"
+    }
+}
+
+private struct OpenChangeKey: EnvironmentKey {
+    static var defaultValue: ((ChangeEntryID) -> Void)? { nil }
+}
+
+extension EnvironmentValues {
+    /// What a double-click on a changed file does: the Changes panel opens
+    /// the file in the git tab. Nil does nothing more than a click.
+    var openChange: ((ChangeEntryID) -> Void)? {
+        get { self[OpenChangeKey.self] }
+        set { self[OpenChangeKey.self] = newValue }
     }
 }
