@@ -1026,10 +1026,12 @@ struct FolderApp: Identifiable {
     let title: String
     let url: URL
 
+    static let zed = "dev.zed.Zed"
+
     /// Finder, and Zed and GitFork when they are installed. Looked up once.
     static let installed: [FolderApp] = [
         ("com.apple.finder", "Open in Finder"),
-        ("dev.zed.Zed", "Open in Zed"),
+        (zed, "Open in Zed"),
         ("io.dogan.gitfork", "Open in GitFork"),
     ].compactMap { id, title in
         NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { FolderApp(id: id, title: title, url: $0) }

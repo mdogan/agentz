@@ -9,6 +9,9 @@ import SwiftUI
 @MainActor
 @Observable
 final class Look {
+    /// The one the app uses. Made at its first use, once the app runs.
+    static let shared = Look()
+
     private(set) var colors: TerminalColors
     /// Every Ghostty theme on disk, for the Theme menu.
     @ObservationIgnored private(set) var themes: [GhosttyTheme] = []
@@ -72,6 +75,7 @@ final class Look {
     var green: Color { ansi(2, isDark ? RGB(0.47, 0.78, 0.55) : RGB(0.1, 0.53, 0.25)) }
     var yellow: Color { ansi(3, isDark ? RGB(0.9, 0.75, 0.24) : RGB(0.65, 0.41, 0)) }
     var red: Color { ansi(1, isDark ? RGB(0.94, 0.4, 0.4) : RGB(0.75, 0.15, 0.15)) }
+    var magenta: Color { ansi(5, isDark ? RGB(0.73, 0.52, 0.93) : RGB(0.48, 0.24, 0.62)) }
 
     func color(for agent: Agent) -> Color {
         switch agent {

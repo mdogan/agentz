@@ -2,7 +2,8 @@ import AgentzCore
 import AppKit
 import SwiftUI
 
-/// The window: sessions on the left, the shown terminal on the right.
+/// The window: sessions on the left, the shown terminal in the middle,
+/// and the git panel on the right while it is shown.
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     let workspace: Workspace
@@ -12,6 +13,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let split = NSSplitViewController()
     private let sidebar: NSHostingController<SidebarView>
     private let sidebarItem: NSSplitViewItem
+    /// The git panel's state: the shown session's repository.
+    let git: GitPanelModel
+    /// The git panel's place in the split; collapsed while hidden.
+    private let gitItem: NSSplitViewItem
+    private var gitObservation: NSKeyValueObservation?
     /// The list over the terminal, in auto-hide mode.
     let overlay = SidebarOverlay()
     /// The buttons at the right end of the title bar. Their width changes
@@ -30,6 +36,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         pane = PaneViewController(workspace: workspace, look: look)
         sidebar = NSHostingController(rootView: SidebarView(workspace: workspace, look: look, focus: focus, actions: actions))
         sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        let git = GitPanelModel()
+        self.git = git
+        // Opening a worktree in the panel starts a session there.
+        git.store.startSession = { [weak workspace] agent, folder in
+            workspace?.newSession(agent, cwd: folder.path)
+        }
+        let gitView = NSHostingController(rootView: GitPanel(model: git, look: look))
+        // The width it has when first shown; later, the one it had.
+        gitView.view.frame.size.width = Self.gitWidth
+        gitItem = NSSplitViewItem(inspectorWithViewController: gitView)
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -53,7 +69,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             split.addSplitViewItem(sidebarItem)
         }
         split.addSplitViewItem(NSSplitViewItem(viewController: pane))
+        gitItem.minimumThickness = Self.gitWidths.lowerBound
+        gitItem.maximumThickness = Self.gitWidths.upperBound
+        gitItem.canCollapse = true
+        split.addSplitViewItem(gitItem)
         if !autoHide { split.splitView.autosaveName = Self.splitName }
+        // After the split's saved layout, which may say otherwise.
+        let gitShown = SmokeTest.logPath == nil && UserDefaults.standard.bool(forKey: Self.gitShownKey)
+        gitItem.isCollapsed = !gitShown
         window.contentViewController = split
         window.setContentSize(NSSize(width: 1200, height: 760))
         window.center()
@@ -61,7 +84,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
 
         // The split buttons, at the right end of the title bar.
-        let buttons = NSHostingView(rootView: SplitButtons(workspace: workspace, look: look))
+        let buttons = NSHostingView(rootView: SplitButtons(workspace: workspace, look: look, git: git) { [weak self] in
+            self?.toggleGit()
+        })
         let titlebarHeight = window.frame.height - window.contentLayoutRect.height
         buttons.frame.size = NSSize(width: buttons.fittingSize.width, height: titlebarHeight)
         titleButtons = buttons
@@ -71,7 +96,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.addTitlebarAccessoryViewController(accessory)
 
         workspace.onLayout = { [weak self] in self?.layout() }
-        workspace.onTick = { [weak self] in self?.updateTitle() }
+        workspace.onTick = { [weak self] in
+            self?.updateTitle()
+            self?.followGit()
+        }
         workspace.focusTerminal = { [weak self] in self?.focusTerminal() }
         workspace.isUserPresent = { [weak window] in
             NSApp.isActive && window?.isKeyWindow == true && userIdleTime() < Workspace.awayAfter
@@ -81,6 +109,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         // Dragging a session out of the list, to drop it on a pane.
         pane.onSessionDrag = { [weak self] in self?.overlay.hide() }
+        // Shown or hidden by a toggle, or by dragging its edge.
+        gitObservation = gitItem.observe(\.isCollapsed) { [weak self] item, _ in
+            MainActor.assumeIsolated { self?.gitShownChanged(!item.isCollapsed) }
+        }
+        gitShownChanged(gitShown)
+        // Nothing is read for the panel while the window can't be seen.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let window = self.window else { return }
+                git.setWindowVisible(window.occlusionState.contains(.visible))
+            }
+        }
         layout()
         restyle()
     }
@@ -103,6 +145,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private func layout() {
         pane.sync()
         updateTitle()
+        followGit()
     }
 
     private func updateTitle() {
@@ -181,6 +224,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    // MARK: - Git
+
+    private static let gitWidth: CGFloat = 460
+    private static let gitWidths: ClosedRange<CGFloat> = 340 ... 1000
+    private static let gitShownKey = "gitPanelShown"
+
+    var isGitShown: Bool { !gitItem.isCollapsed }
+
+    func toggleGit() {
+        setGitShown(!isGitShown)
+    }
+
+    func setGitShown(_ shown: Bool) {
+        gitItem.animator().isCollapsed = !shown
+        gitShownChanged(shown)
+    }
+
+    private func gitShownChanged(_ shown: Bool) {
+        if SmokeTest.logPath == nil { UserDefaults.standard.set(shown, forKey: Self.gitShownKey) }
+        if shown { git.follow(workspace.gitFolder) }
+        git.isShown = shown
+    }
+
+    /// The panel shows the repository of the session on screen, or of the
+    /// one picked in the list.
+    private func followGit() {
+        if git.isShown { git.follow(workspace.gitFolder) }
+    }
+
     // MARK: - Auto-hide
 
     private static let listWidths: ClosedRange<CGFloat> = 220 ... 520
@@ -250,12 +322,15 @@ private func userIdleTime() -> TimeInterval {
     return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: any)
 }
 
-/// The title bar's split buttons. Each does what its View menu item does:
-/// splits the pane that way, turns the split, or unsplits it. The one for
-/// the current split is filled in.
+/// The title bar's buttons. The split buttons each do what their View
+/// menu item does: split the pane that way, turn the split, or unsplit it.
+/// The one for the current split is filled in. The last one shows or hides
+/// the git panel.
 private struct SplitButtons: View {
     let workspace: Workspace
     let look: Look
+    let git: GitPanelModel
+    let toggleGit: () -> Void
 
     var body: some View {
         HStack(spacing: 2) {
@@ -265,6 +340,7 @@ private struct SplitButtons: View {
             }
             SplitButton(workspace: workspace, look: look, direction: .right)
             SplitButton(workspace: workspace, look: look, direction: .down)
+            GitButton(git: git, look: look, toggle: toggleGit)
         }
         .padding(.horizontal, 8)
         .frame(maxHeight: .infinity)
@@ -299,6 +375,29 @@ private struct AttentionButton: View {
         .onHover { hovered = $0 }
         .help(help)
         .accessibilityLabel(help)
+    }
+}
+
+private struct GitButton: View {
+    let git: GitPanelModel
+    let look: Look
+    let toggle: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        let on = git.isShown
+        Button(action: toggle) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 12, weight: on ? .semibold : .regular))
+                .foregroundStyle(on ? look.accent : look.secondary)
+                .frame(width: 26, height: 22)
+                .background(hovered ? look.selection : .clear, in: RoundedRectangle(cornerRadius: 5))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(on ? "Hide Git (⌥⌘G)" : "Show Git (⌥⌘G)")
+        .accessibilityLabel(on ? "Hide Git" : "Show Git")
     }
 }
 

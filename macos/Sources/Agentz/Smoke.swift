@@ -541,6 +541,7 @@ final class SmokeTest {
         await wheelWithoutClick(tmp)
         await find(tmp)
         await quickTerminal(tmp)
+        await gitPanel(tmp)
         finish(nil)
     }
 
@@ -929,11 +930,101 @@ final class SmokeTest {
     /// `AGENTZ_SMOKE_SNAPSHOT=<file.png>` saves how the window looks. The
     /// app draws it itself, so no screen recording permission is needed;
     /// Metal terminals come out blank.
-    private func snapshot() {
-        guard let path = ProcessInfo.processInfo.environment["AGENTZ_SMOKE_SNAPSHOT"],
+    /// The git panel follows the shown session's repository, reads it again
+    /// by itself when files change, and stages, commits, branches and
+    /// stashes there.
+    private func gitPanel(_ tmp: String) async {
+        let ws = workspace
+        let git = window.git
+        let store = git.store
+        let repo = tmp + "/git"
+        try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+        func run(_ args: String...) {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", repo] + args
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+        }
+        func write(_ name: String, _ text: String) {
+            FileManager.default.createFile(atPath: repo + "/" + name, contents: Data(text.utf8))
+        }
+        run("init", "-q", "-b", "main")
+        run("config", "user.email", "t@t")
+        run("config", "user.name", "t")
+        run("config", "commit.gpgsign", "false")
+        write("a.txt", "one\n")
+        run("add", ".")
+        run("commit", "-q", "-m", "first")
+
+        let app = NSApp.delegate as! AppDelegate
+        let item = NSMenuItem(title: "", action: #selector(AppDelegate.toggleGit(_:)), keyEquivalent: "")
+        window.setGitShown(false)
+        ws.newSession(.shell, cwd: repo)
+        guard let shell = ws.currentTab else { return check("start a shell for the git panel", false) }
+        _ = await wait(5) { shell.terminal.pid != nil }
+        check("the git panel starts hidden here", !git.isShown && app.validateMenuItem(item) && item.state == .off)
+        app.toggleGit(nil)
+        _ = app.validateMenuItem(item)
+        check("⌥⌘G shows it", window.isGitShown && git.isShown && item.state == .on)
+        check("it shows the session's repository", await wait(8) {
+            git.place == .repository && store.repositoryURL.map { realPath($0.path) == realPath(repo) } == true
+                && store.branch == "main" && store.changes.isEmpty
+        }, "\(git.place) \(String(describing: store.repositoryURL)) \(store.branch)")
+
+        write("a.txt", "one\ntwo\n")
+        write("b.txt", "new\n")
+        check("changed files show without asking", await wait(6) {
+            Set(store.changes.map(\.path)) == ["a.txt", "b.txt"]
+        }, "\(store.changes.map(\.path))")
+        snapshot("git-changes")
+
+        if let a = store.changes.first(where: { $0.path == "a.txt" }) { store.stage(a) }
+        check("a file can be staged", await wait(5) {
+            store.changes.contains { $0.path == "a.txt" && $0.isStaged && !$0.isUnstaged }
+        }, "\(store.changes)")
+        if let a = store.changes.first(where: { $0.path == "a.txt" }) { store.unstage(a) }
+        check("and unstaged", await wait(5) {
+            store.changes.contains { $0.path == "a.txt" && !$0.isStaged && $0.isUnstaged }
+        }, "\(store.changes)")
+
+        store.stageAll()
+        _ = await wait(5) { store.changes.allSatisfy { $0.isStaged && !$0.isUnstaged } }
+        store.commitMessage = "second"
+        store.createCommit()
+        check("a commit empties the changes, and shows in the history", await wait(6) {
+            store.changes.isEmpty && store.commits.first?.subject == "second"
+        }, "\(store.changes.count) \(store.commits.first?.subject ?? "none")")
+
+        store.createBranch(named: "feature")
+        check("a new branch is checked out", await wait(5) { store.branch == "feature" }, store.branch)
+
+        write("c.txt", "wip\n")
+        _ = await wait(6) { !store.changes.isEmpty }
+        store.stash(message: "wip")
+        check("a stash takes the changes away", await wait(6) {
+            store.changes.isEmpty && store.stashes.count == 1
+        }, "\(store.changes.count) changes, \(store.stashes.count) stashes")
+        snapshot("git-history")
+
+        shell.terminal.run("cd \(shellQuote(tmp))")
+        check("it follows the shell out of the repository", await wait(5) {
+            git.place == .notARepo(folder: tmp) || git.place == .notARepo(folder: realPath(tmp) ?? tmp)
+        }, "\(git.place)")
+        app.toggleGit(nil)
+        _ = app.validateMenuItem(item)
+        check("⌥⌘G hides it again", !window.isGitShown && !git.isShown && item.state == .off)
+        ws.close(shell.key)
+    }
+
+    private func snapshot(_ name: String? = nil) {
+        guard var path = ProcessInfo.processInfo.environment["AGENTZ_SMOKE_SNAPSHOT"],
               let view = NSApp.windows.first(where: { $0.isVisible })?.contentView?.superview,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)
         else { return }
+        if let name { path = (path as NSString).deletingPathExtension + "-\(name).png" }
         view.cacheDisplay(in: view.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
     }

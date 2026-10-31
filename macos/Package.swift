@@ -31,5 +31,7 @@ let package = Package(
             swiftSettings: swift5
         ),
         .testTarget(name: "AgentzCoreTests", dependencies: ["AgentzCore"], swiftSettings: swift5),
+        // The git panel's engine, moved over from GitFork with its tests.
+        .testTarget(name: "GitTests", dependencies: ["agentz"], swiftSettings: swift5),
     ]
 )

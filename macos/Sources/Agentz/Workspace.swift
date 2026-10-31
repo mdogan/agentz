@@ -1086,9 +1086,22 @@ final class Workspace {
     /// The folder of the session in the focused pane: where a shell is now,
     /// or where an agent started. Without one, where the project is.
     var shownFolder: String {
-        currentTab.map { r in
-            r.key.agent == .shell ? r.terminal.pid.flatMap(workingDirectory) ?? r.cwd : r.cwd
-        } ?? root
+        currentTab.map(folder(of:)) ?? root
+    }
+
+    /// The folder whose repository the git panel shows: the shown
+    /// session's, or with none shown, the one picked in the list. Nil with
+    /// neither.
+    var gitFolder: String? {
+        if let r = currentTab { return folder(of: r) }
+        guard let key = selection else { return nil }
+        return rows.first { $0.key == key }?.cwd
+    }
+
+    /// Where the tab works now: a shell's current folder, else where its
+    /// agent started.
+    private func folder(of r: Tab) -> String {
+        r.key.agent == .shell ? r.terminal.pid.flatMap(workingDirectory) ?? r.cwd : r.cwd
     }
 
     /// False, with a status line, if the folder is gone.

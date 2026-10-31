@@ -36,6 +36,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         ShellEnvironment.load()
         _ = GhosttyApp.controller
         NSApp.mainMenu = buildMenu()
+        // The git panel's commands, kept for the Git Command Log window.
+        if SmokeTest.logPath == nil {
+            GitCommandLog.shared.startPersisting(to: GitCommandLogFile(url: GitCommandLogFile.defaultURL))
+        }
 
         var saved: SavedState?
         var problem: String?
@@ -64,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
         let workspace = Workspace(projectDir: isDirectory(dir) ? dir : NSHomeDirectory())
         self.workspace = workspace
-        let look = Look()
+        let look = Look.shared
         self.look = look
         let quick = QuickTerminal(settings: GhosttyApp.quickTerminal, look: look)
         quickTerminal = quick
@@ -487,6 +491,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     @objc func unsplit(_: Any?) { workspace?.unsplit() }
     @objc func focusOtherPane(_: Any?) { workspace?.focusOtherPane() }
     @objc func toggleQuickTerminal(_: Any?) { quickTerminal?.toggle() }
+    @objc func toggleGit(_: Any?) { windowController?.toggleGit() }
+
+    // MARK: - Git
+
+    /// The git panel's store, while the panel shows a repository.
+    private var gitStore: RepositoryStore? { windowController?.git.shownStore }
+
+    @objc func showGitChanges(_: Any?) { showGit(.changes) }
+    @objc func showGitHistory(_: Any?) { showGit(.history) }
+    @objc func showGitBranches(_: Any?) { showGit(.branches) }
+
+    private func showGit(_ tab: GitPanel.Tab) {
+        guard let controller = windowController else { return }
+        controller.git.tab = tab
+        controller.setGitShown(true)
+    }
+
+    @objc func switchBranch(_: Any?) { gitStore?.showBranchPicker() }
+    @objc func newBranch(_: Any?) {
+        if gitStore != nil { windowController?.git.showingBranchSheet = true }
+    }
+    @objc func pathHistory(_: Any?) { gitStore?.showPathHistoryPicker() }
+    @objc func openCommit(_: Any?) { gitStore?.showCommitHashPicker() }
+    @objc func gitFetch(_: Any?) { gitStore?.fetch() }
+    @objc func gitPull(_: Any?) { gitStore?.pull() }
+    @objc func gitPush(_: Any?) { gitStore?.requestPushConfirmation() }
+    @objc func gitRefresh(_: Any?) { gitStore?.refresh() }
+
+    @objc func gitCommandLog(_: Any?) {
+        GitCommandLog.shared.requestFocus(on: gitStore?.repositoryURL)
+        GitWindows.openCommandLog()
+    }
 
     @objc func showShortcuts(_: Any?) {
         guard let menu = NSApp.mainMenu else { return }
@@ -549,7 +585,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         #selector(toggleAllSessions(_:)), #selector(selectRange(_:)), #selector(focusList(_:)), #selector(focusFilter(_:)),
         #selector(focusTerminal(_:)), #selector(nextSession(_:)), #selector(previousSession(_:)), #selector(nextAttention(_:)),
         #selector(toggleSessionList(_:)), #selector(toggleAutoHide(_:)), #selector(splitRight(_:)), #selector(splitDown(_:)),
-        #selector(unsplit(_:)), #selector(focusOtherPane(_:)),
+        #selector(unsplit(_:)), #selector(focusOtherPane(_:)), #selector(toggleGit(_:)),
+        #selector(showGitChanges(_:)), #selector(showGitHistory(_:)), #selector(showGitBranches(_:)),
+        #selector(switchBranch(_:)), #selector(newBranch(_:)), #selector(pathHistory(_:)), #selector(openCommit(_:)),
+        #selector(gitFetch(_:)), #selector(gitPull(_:)), #selector(gitPush(_:)), #selector(gitRefresh(_:)),
     ]
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -587,6 +626,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return !workspace.attentionKeys.isEmpty
         case #selector(toggleAutoHide(_:)):
             item.state = windowController?.autoHide == true ? .on : .off
+        case #selector(toggleGit(_:)):
+            item.state = windowController?.isGitShown == true ? .on : .off
+        case #selector(showGitChanges(_:)), #selector(showGitHistory(_:)), #selector(showGitBranches(_:)):
+            let tab: GitPanel.Tab = switch item.action {
+            case #selector(showGitChanges(_:)): .changes
+            case #selector(showGitHistory(_:)): .history
+            default: .branches
+            }
+            item.state = windowController.map { $0.isGitShown && $0.git.tab == tab } == true ? .on : .off
+            return windowController != nil
+        case #selector(switchBranch(_:)), #selector(newBranch(_:)), #selector(pathHistory(_:)),
+             #selector(openCommit(_:)), #selector(gitRefresh(_:)):
+            return gitStore != nil
+        case #selector(gitFetch(_:)), #selector(gitPull(_:)), #selector(gitPush(_:)):
+            return gitStore.map { !$0.isLoading } ?? false
         case #selector(toggleQuickTerminal(_:)):
             item.state = quickTerminal?.isShown == true ? .on : .off
         default:
@@ -654,6 +708,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let sidebar = add(view, "Toggle Session List", #selector(toggleSessionList(_:)), "s")
         sidebar.keyEquivalentModifierMask = [.command, .control]
         add(view, "Auto-Hide Session List", #selector(toggleAutoHide(_:)))
+        add(view, "Git Panel", #selector(toggleGit(_:)), "g").keyEquivalentModifierMask = [.command, .option]
         view.addItem(.separator())
         add(view, "Split Right", #selector(splitRight(_:)), "d")
         add(view, "Split Down", #selector(splitDown(_:)), "D")
@@ -668,6 +723,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
         view.addItem(.separator())
         submenu(view, "Theme").delegate = self
+
+        // The git panel's, for the shown session's repository. GitFork's
+        // keys, where agentz has no other use for them.
+        let git = submenu(main, "Git")
+        add(git, "Changes", #selector(showGitChanges(_:)), "p")
+        add(git, "History", #selector(showGitHistory(_:)))
+        add(git, "Branches", #selector(showGitBranches(_:)))
+        git.addItem(.separator())
+        add(git, "Switch Branch…", #selector(switchBranch(_:)), "b")
+        add(git, "New Branch…", #selector(newBranch(_:)))
+        add(git, "File or Folder History…", #selector(pathHistory(_:)))
+        add(git, "Open Commit…", #selector(openCommit(_:)))
+        git.addItem(.separator())
+        add(git, "Fetch All", #selector(gitFetch(_:)))
+        add(git, "Pull", #selector(gitPull(_:)))
+        add(git, "Push…", #selector(gitPush(_:)))
+        git.addItem(.separator())
+        add(git, "Refresh", #selector(gitRefresh(_:)), "r")
+        add(git, "Git Command Log", #selector(gitCommandLog(_:)), "L")
 
         let window = submenu(main, "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
