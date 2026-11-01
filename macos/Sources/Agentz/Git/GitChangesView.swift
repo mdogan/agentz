@@ -239,11 +239,12 @@ private struct ChangeList: View {
     private func treeRows(_ entries: [ChangeEntry], section: String) -> some View {
         ForEach(ChangeTree.rows(entries, section: section, collapsed: collapsedFolders)) { row in
             switch row {
-            case let .folder(id, name, depth, count, isCollapsed):
+            case let .folder(id, name, path, depth, folderEntries, isCollapsed):
                 ChangeFolderRow(
                     name: name,
+                    path: path,
                     depth: depth,
-                    count: count,
+                    entries: folderEntries,
                     isCollapsed: isCollapsed
                 ) {
                     if isCollapsed {
@@ -483,15 +484,23 @@ private struct ChangeSectionHeader: View {
     }
 }
 
-/// A folder line in the change tree. Click to fold or unfold it.
+/// A folder line in the change tree. Click to fold or unfold it. Its + or −
+/// stages or unstages every changed file below it, also while it is folded.
 private struct ChangeFolderRow: View {
+    @EnvironmentObject private var store: RepositoryStore
     let name: String
+    /// The full path. `name` can leave out folders the tree does not draw.
+    let path: String
     let depth: Int
-    let count: Int
+    let entries: [ChangeEntry]
     let isCollapsed: Bool
     let toggle: () -> Void
 
+    @State private var hovered = false
+
     var body: some View {
+        let stageable = entries.unstagedSide
+        let unstageable = entries.stagedSide
         Button(action: toggle) {
             HStack(spacing: 5) {
                 Image(systemName: "chevron.right")
@@ -508,17 +517,61 @@ private struct ChangeFolderRow: View {
                     .lineLimit(1)
                     .truncationMode(.head)
                     .layoutPriority(1)
-                Text("\(count)")
+                Text("\(entries.count)")
                     .font(.system(size: 11))
                     .monospacedDigit()
                     .foregroundStyle(Look.shared.faint)
-                Spacer()
+                Spacer(minLength: 4)
+                HStack(spacing: 0) {
+                    if !stageable.isEmpty {
+                        Button {
+                            store.stage(stageable)
+                        } label: {
+                            ChangeRow.rowIcon("plus")
+                        }
+                        .buttonStyle(GitForkHoverButtonStyle(.icon))
+                        .help("Stage \(ChangeActionTitle.fileCount(stageable.count)) in \(path)")
+                        .disabled(store.isLoading)
+                    }
+                    if !unstageable.isEmpty {
+                        Button {
+                            store.unstage(unstageable)
+                        } label: {
+                            ChangeRow.rowIcon("minus")
+                        }
+                        .buttonStyle(GitForkHoverButtonStyle(.icon))
+                        .help("Unstage \(ChangeActionTitle.fileCount(unstageable.count)) in \(path)")
+                        .disabled(store.isLoading)
+                    }
+                }
+                // It keeps its room while hidden, so the name does not jump.
+                .opacity(hovered ? 1 : 0)
+                .allowsHitTesting(hovered)
             }
             .contentShape(Rectangle())
         }
+        .onHover { hovered = $0 }
         .buttonStyle(GitForkHoverButtonStyle(.compactRow(isSelected: false)))
         .padding(.leading, CGFloat(depth) * ChangeRow.indentStep)
-        .help(isCollapsed ? "Show the files in \(name)" : "Hide the files in \(name)")
+        .help(isCollapsed ? "Show the files in \(path)" : "Hide the files in \(path)")
+        .contextMenu {
+            if !stageable.isEmpty {
+                Button {
+                    store.stage(stageable)
+                } label: {
+                    Label(ChangeActionTitle.stage(stageable.count), systemImage: "plus")
+                }
+                .disabled(store.isLoading)
+            }
+            if !unstageable.isEmpty {
+                Button {
+                    store.unstage(unstageable)
+                } label: {
+                    Label(ChangeActionTitle.unstage(unstageable.count), systemImage: "minus")
+                }
+                .disabled(store.isLoading)
+            }
+        }
         .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
@@ -593,7 +646,7 @@ private struct ChangeRow: View {
                                 Label("Mark Resolved", systemImage: "checkmark.circle")
                             }
                         } label: {
-                            rowIcon("checkmark.shield")
+                            Self.rowIcon("checkmark.shield")
                         }
                         .menuStyle(.button)
                         .buttonStyle(GitForkHoverButtonStyle(.icon))
@@ -606,7 +659,7 @@ private struct ChangeRow: View {
                         Button {
                             openChange(entry.id)
                         } label: {
-                            rowIcon("arrow.up.left.and.arrow.down.right")
+                            Self.rowIcon("arrow.up.left.and.arrow.down.right")
                         }
                         .buttonStyle(GitForkHoverButtonStyle(.icon))
                         .help("Show its diff in the git tab (or double-click the file)")
@@ -615,7 +668,7 @@ private struct ChangeRow: View {
                         Button {
                             staged ? store.unstage(change) : store.stage(change)
                         } label: {
-                            rowIcon(staged ? "minus" : "plus")
+                            Self.rowIcon(staged ? "minus" : "plus")
                         }
                         .buttonStyle(GitForkHoverButtonStyle(.icon))
                         .help(staged ? "Unstage (⌫)" : "Stage (↩)")
@@ -649,7 +702,7 @@ private struct ChangeRow: View {
         .listRowBackground(SystemSelectionHighlightRemover())
     }
 
-    private func rowIcon(_ name: String) -> some View {
+    static func rowIcon(_ name: String) -> some View {
         Image(systemName: name)
             .font(.system(size: 11, weight: .medium))
             .foregroundStyle(Look.shared.secondary)

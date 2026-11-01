@@ -13,8 +13,8 @@ struct ChangeTreeTests {
     private func describe(_ rows: [ChangeTreeRow]) -> [String] {
         rows.map {
             switch $0 {
-            case let .folder(_, name, depth, count, _):
-                String(repeating: " ", count: depth) + name + "/ (\(count))"
+            case let .folder(_, name, _, depth, entries, _):
+                String(repeating: " ", count: depth) + name + "/ (\(entries.count))"
             case let .file(_, name, depth):
                 String(repeating: " ", count: depth) + name
             }
@@ -46,9 +46,70 @@ struct ChangeTreeTests {
         #expect(describe(rows) == ["a/ (2)", " b/ (1)", "  deep.swift", " top.swift"])
     }
 
+    @Test func rootThatOnlyWrapsFoldersIsNotDrawn() {
+        let rows = ChangeTree.rows(
+            [entry("crates/exec/src/a.rs"), entry("crates/exec/tests/b.rs"), entry("crates/explain/src/c.rs")],
+            section: "s"
+        )
+        #expect(describe(rows) == [
+            "exec/ (2)", " src/ (1)", "  a.rs", " tests/ (1)", "  b.rs",
+            "explain/src/ (1)", " c.rs",
+        ])
+    }
+
+    @Test func rootOfSeveralPartsIsNotDrawn() {
+        let rows = ChangeTree.rows([entry("x/y/a/1.rs"), entry("x/y/b/2.rs")], section: "s")
+        #expect(describe(rows) == ["a/ (1)", " 1.rs", "b/ (1)", " 2.rs"])
+    }
+
+    @Test func folderStaysWhenAFileIsOutsideIt() {
+        let rows = ChangeTree.rows(
+            [entry("crates/a/x.rs"), entry("crates/b/y.rs"), entry("README.md")],
+            section: "s"
+        )
+        #expect(describe(rows) == ["crates/ (2)", " a/ (1)", "  x.rs", " b/ (1)", "  y.rs", "README.md"])
+    }
+
+    @Test func folderKeepsFullPathAndIDWhenRootIsHidden() {
+        let hidden = ChangeTree.rows([entry("crates/a/x.rs"), entry("crates/b/y.rs")], section: "s")
+        let shown = ChangeTree.rows(
+            [entry("crates/a/x.rs"), entry("crates/b/y.rs"), entry("README.md")],
+            section: "s"
+        )
+        guard case let .folder(id, name, path, _, _, _) = hidden[0] else {
+            Issue.record("expected a folder first")
+            return
+        }
+        #expect(name == "a")
+        #expect(path == "crates/a")
+        #expect(shown.contains { $0.id == hidden[0].id })
+        // Folded with the root hidden, it is still folded with the root shown.
+        let folded = ChangeTree.rows(
+            [entry("crates/a/x.rs"), entry("crates/b/y.rs"), entry("README.md")],
+            section: "s",
+            collapsed: [id]
+        )
+        #expect(describe(folded) == ["crates/ (2)", " a/ (1)", " b/ (1)", "  y.rs", "README.md"])
+    }
+
+    @Test func folderListsEveryFileBelowItEvenWhenCollapsed() {
+        let entries = [entry("src/a/one.rs"), entry("src/a/b/two.rs"), entry("src/c/three.rs")]
+        let open = ChangeTree.rows(entries, section: "s")
+        guard case let .folder(id, _, _, _, _, _) = open[0] else {
+            Issue.record("expected a folder first")
+            return
+        }
+        guard case let .folder(_, name, _, _, below, _) = ChangeTree.rows(entries, section: "s", collapsed: [id])[0] else {
+            Issue.record("expected a folder first")
+            return
+        }
+        #expect(name == "a")
+        #expect(Set(below.map(\.change.path)) == ["src/a/one.rs", "src/a/b/two.rs"])
+    }
+
     @Test func collapsedFolderHidesItsFiles() {
         let all = ChangeTree.rows([entry("src/a.swift"), entry("main.swift")], section: "s")
-        guard case let .folder(id, _, _, _, _) = all[0] else {
+        guard case let .folder(id, _, _, _, _, _) = all[0] else {
             Issue.record("expected a folder first")
             return
         }

@@ -3,13 +3,14 @@ import Foundation
 /// One visible line of a change section drawn as a folder tree.
 enum ChangeTreeRow: Identifiable, Equatable, Sendable {
     /// A folder. `name` can hold several path parts ("src/app") when a folder
-    /// only contains another folder. `count` is every changed file below it.
-    case folder(id: String, name: String, depth: Int, count: Int, isCollapsed: Bool)
+    /// only contains another folder. `path` is its full path in the repository.
+    /// `entries` is every changed file below it, also those of collapsed folders.
+    case folder(id: String, name: String, path: String, depth: Int, entries: [ChangeEntry], isCollapsed: Bool)
     case file(ChangeEntry, name: String, depth: Int)
 
     var id: String {
         switch self {
-        case let .folder(id, _, _, _, _): "dir|" + id
+        case let .folder(id, _, _, _, _, _): "dir|" + id
         case let .file(entry, _, _): "file|\(entry.staged)|" + entry.change.path
         }
     }
@@ -17,6 +18,11 @@ enum ChangeTreeRow: Identifiable, Equatable, Sendable {
 
 /// Builds the folder tree for one section of the change list. Folders come
 /// before files, each sorted by name, so the tree reads like a file browser.
+///
+/// A folder that wraps the whole section and holds no file of its own is not
+/// drawn: with only `crates/a/x.rs` and `crates/b/y.rs`, the tree starts at `a`
+/// and `b`. A folder that does hold a file stays, so that file does not look
+/// like it sits at the top of the repository.
 enum ChangeTree {
     /// Rows to draw. Files under a collapsed folder are left out.
     /// `section` keeps the same folder in "Staged" and "Unstaged" apart.
@@ -25,9 +31,20 @@ enum ChangeTree {
         section: String,
         collapsed: Set<String> = []
     ) -> [ChangeTreeRow] {
-        let items = entries.map { Item(entry: $0, parts: components(of: $0.change.path)) }
+        var items = entries.map { Item(entry: $0, parts: components(of: $0.change.path)) }
+        let root = hiddenRoot(of: items)
+        for index in items.indices {
+            items[index].parts.removeFirst(root.count)
+        }
         var rows: [ChangeTreeRow] = []
-        emit(items, depth: 0, parent: section, collapsed: collapsed, into: &rows)
+        emit(
+            items,
+            depth: 0,
+            parent: root.joined(separator: "/"),
+            section: section,
+            collapsed: collapsed,
+            into: &rows
+        )
         return rows
     }
 
@@ -49,10 +66,21 @@ enum ChangeTree {
         return parts.isEmpty ? [path] : parts
     }
 
+    /// The folders every file sits below, when no file sits directly in them.
+    private static func hiddenRoot(of items: [Item]) -> [String] {
+        guard let first = items.first else { return [] }
+        var shared = Array(first.parts.dropLast())
+        for item in items.dropFirst() {
+            shared = zip(shared, item.parts.dropLast()).prefix { $0 == $1 }.map(\.0)
+        }
+        return items.allSatisfy { $0.parts.count - 1 > shared.count } ? shared : []
+    }
+
     private static func emit(
         _ items: [Item],
         depth: Int,
         parent: String,
+        section: String,
         collapsed: Set<String>,
         into rows: inout [ChangeTreeRow]
     ) {
@@ -81,17 +109,28 @@ enum ChangeTree {
                     return item
                 }
             }
-            let id = parent + "/" + name
+            let path = parent.isEmpty ? name : parent + "/" + name
+            // From the full path, so a folder stays folded when a new file
+            // makes the hidden root show again.
+            let id = section + "/" + path
             let isCollapsed = collapsed.contains(id)
             rows.append(.folder(
                 id: id,
                 name: name,
+                path: path,
                 depth: depth,
-                count: group.count,
+                entries: group.map(\.entry),
                 isCollapsed: isCollapsed
             ))
             if !isCollapsed {
-                emit(group, depth: depth + 1, parent: id, collapsed: collapsed, into: &rows)
+                emit(
+                    group,
+                    depth: depth + 1,
+                    parent: path,
+                    section: section,
+                    collapsed: collapsed,
+                    into: &rows
+                )
             }
         }
 
