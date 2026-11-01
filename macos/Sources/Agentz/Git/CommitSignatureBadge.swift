@@ -14,15 +14,11 @@ struct CommitSignatureBadge: View {
             } icon: {
                 Image(systemName: symbolName)
             }
-            .font(.caption2.weight(.semibold))
+            .font(.system(size: 10.5, weight: .medium))
             .foregroundStyle(color)
-            .padding(.horizontal, compact ? 4 : 6)
-            .padding(.vertical, 3)
-            .background(color.opacity(0.13), in: Capsule())
-            .overlay(
-                Capsule()
-                    .strokeBorder(color.opacity(0.24), lineWidth: 1)
-            )
+            .padding(.horizontal, compact ? 0 : 4)
+            .padding(.vertical, compact ? 0 : 1)
+            .background(compact ? .clear : color.opacity(0.13), in: RoundedRectangle(cornerRadius: 4))
             .help(signature.details)
             .accessibilityLabel(signature.details)
         }
@@ -35,9 +31,9 @@ struct CommitSignatureBadge: View {
         case .bad, .revokedKey:
             GitForkTheme.red
         case .unknownValidity, .expiredSignature, .expiredKey, .cannotCheck:
-            .orange
+            GitForkTheme.orange
         case .none:
-            .secondary
+            Look.shared.secondary
         }
     }
 

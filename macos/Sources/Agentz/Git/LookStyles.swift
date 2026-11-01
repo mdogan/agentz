@@ -74,15 +74,15 @@ extension View {
     }
 }
 
-/// A `List` row's background in the theme: a soft accent fill when selected,
-/// like the sidebar rows. It also turns off the system selection highlight,
+/// A `List` row's background in the theme: gray when selected, like the
+/// session list's rows. It also turns off the system selection highlight,
 /// whose blue and white text ignore the theme and hide the row's own colors.
 struct LookListRowBackground: View {
     let isSelected: Bool
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .fill(isSelected ? Look.shared.accent.opacity(0.20) : .clear)
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(isSelected ? Look.shared.selection : .clear)
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
             .background(SystemSelectionHighlightRemover())
@@ -105,14 +105,29 @@ struct SystemSelectionHighlightRemover: NSViewRepresentable {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             hideSelection()
+            // A row may join its table only after it is in the window.
+            DispatchQueue.main.async { [weak self] in self?.hideSelection() }
         }
 
+        override func viewDidMoveToSuperview() {
+            super.viewDidMoveToSuperview()
+            hideSelection()
+        }
+
+        /// Each row view keeps the style the table had when it was made, so
+        /// rows made before the table's style changed get it too.
         func hideSelection() {
             var view = superview
             while let current = view {
+                if let row = current as? NSTableRowView, row.selectionHighlightStyle != .none {
+                    row.selectionHighlightStyle = .none
+                }
                 if let table = current as? NSTableView {
                     if table.selectionHighlightStyle != .none {
                         table.selectionHighlightStyle = .none
+                        table.enumerateAvailableRowViews { row, _ in
+                            row.selectionHighlightStyle = .none
+                        }
                     }
                     return
                 }
@@ -135,5 +150,54 @@ struct HostingWindowReader: NSViewRepresentable {
 
     func updateNSView(_ view: NSView, context: Context) {
         DispatchQueue.main.async { onChange(view.window) }
+    }
+}
+
+/// The one main action of a view, such as Commit: a small accent button,
+/// like the "need you" pill in the title bar.
+struct GitPrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        GitPrimaryButton(configuration: configuration)
+    }
+
+    private struct GitPrimaryButton: View {
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovered = false
+        let configuration: Configuration
+
+        var body: some View {
+            let look = Look.shared
+            configuration.label
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .foregroundStyle(look.background)
+                .padding(.horizontal, 9)
+                .frame(height: 22)
+                .background(
+                    look.accent.opacity(configuration.isPressed ? 0.75 : hovered ? 0.88 : 1),
+                    in: RoundedRectangle(cornerRadius: 5)
+                )
+                .opacity(isEnabled ? 1 : 0.4)
+                .contentShape(Rectangle())
+                .onHover { hovered = $0 }
+        }
+    }
+}
+
+/// What an empty list or pane says, in the session list's quiet style.
+struct GitPlaceholder: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 12))
+            .multilineTextAlignment(.center)
+            .foregroundStyle(Look.shared.secondary)
+            .padding()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

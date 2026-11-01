@@ -26,18 +26,19 @@ struct ToolbarIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .medium))
-                .frame(width: 21, height: 19)
+                .font(.system(size: 13))
+                .foregroundStyle(Look.shared.secondary)
+                .frame(width: 20, height: 20)
                 .overlay(alignment: .bottomTrailing) {
                     if let badge {
                         Image(systemName: badge)
-                            .font(.system(size: 8, weight: .bold))
+                            .font(.system(size: 7, weight: .bold))
                             .foregroundStyle(GitForkTheme.accent)
-                            .offset(x: 2, y: 2)
+                            .offset(x: 1, y: 1)
                     }
                 }
         }
-        .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
+        .buttonStyle(GitForkHoverButtonStyle(.icon))
         .instantHelp(help)
         .accessibilityLabel(title)
     }
@@ -46,10 +47,10 @@ struct ToolbarIconButton: View {
 /// Separates action clusters inside the single toolbar group.
 struct ToolbarSeparator: View {
     var body: some View {
-        Capsule()
-            .fill(.quaternary)
-            .frame(width: 1, height: 15)
-            .padding(.horizontal, 3)
+        Rectangle()
+            .fill(Look.shared.divider)
+            .frame(width: 1, height: 14)
+            .padding(.horizontal, 4)
             .accessibilityHidden(true)
     }
 }
@@ -58,8 +59,6 @@ struct ToolbarSeparator: View {
 /// distance from its upstream. A detached HEAD reads as a state with the commit
 /// it sits on, not as a branch with a sentence for a name.
 struct BranchToolbarBadge: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     let branch: String
     let ahead: Int
     let behind: Int
@@ -71,26 +70,25 @@ struct BranchToolbarBadge: View {
     }
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 5) {
             Image(systemName: head.isDetached ? "circle.dashed" : "arrow.triangle.branch")
-                .font(.system(size: 11.5, weight: .bold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(tint)
 
             switch head {
             case let .branch(name):
                 branchName(name)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .font(.system(size: 12.5, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(maxWidth: 260, alignment: .leading)
             case let .detached(hash):
                 Text("Detached")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(Look.shared.secondary)
                     .lineLimit(1)
                 chip(color: tint) {
                     Text(hash)
-                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
                 }
             }
 
@@ -100,6 +98,9 @@ struct BranchToolbarBadge: View {
             if behind > 0 {
                 trackingChip(count: behind, systemImage: "arrow.down", color: GitForkTheme.blue)
             }
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(Look.shared.secondary)
         }
         .fixedSize(horizontal: false, vertical: true)
         .instantHelp(helpText)
@@ -117,7 +118,7 @@ struct BranchToolbarBadge: View {
 
         let leaf = name.index(after: slash)
         return Text(String(name[...slash]))
-            .foregroundColor(.secondary)
+            .foregroundColor(Look.shared.secondary)
             + Text(String(name[leaf...]))
     }
 
@@ -127,18 +128,18 @@ struct BranchToolbarBadge: View {
         color: Color
     ) -> some View {
         chip(color: color) {
-            HStack(spacing: 2) {
+            HStack(spacing: 1) {
                 Image(systemName: systemImage)
                     .font(.system(size: 8, weight: .bold))
                 Text("\(count)")
-                    .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                    .font(.system(size: 10.5, weight: .semibold))
                     .monospacedDigit()
             }
         }
     }
 
     /// A chip states a short fact — a hash, a count — so it keeps its ideal
-    /// width instead of wrapping to a second line when the toolbar is tight.
+    /// width instead of wrapping to a second line when the bar is tight.
     private func chip<Content: View>(
         color: Color,
         @ViewBuilder content: () -> Content
@@ -147,10 +148,9 @@ struct BranchToolbarBadge: View {
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: true)
             .foregroundStyle(color)
-            .padding(.horizontal, 5)
-            .padding(.vertical, 2.5)
-            .background(color.opacity(colorScheme == .dark ? 0.20 : 0.12), in: Capsule())
-            .overlay(Capsule().strokeBorder(color.opacity(0.22), lineWidth: 0.5))
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1.5)
+            .background(color.opacity(0.13), in: RoundedRectangle(cornerRadius: 4))
             .layoutPriority(1)
     }
 
@@ -191,14 +191,11 @@ struct BranchSheet: View {
     @State private var name = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(.title)
-                    .foregroundStyle(GitForkTheme.accent)
                 VStack(alignment: .leading) {
                     Text("Create New Branch")
-                        .font(.title2.weight(.semibold))
+                        .font(.headline)
                     Text("The branch starts at the current HEAD.")
                         .foregroundStyle(.secondary)
                 }
@@ -217,7 +214,7 @@ struct BranchSheet: View {
                 Button {
                     create()
                 } label: {
-                    Label("Create & Checkout", systemImage: "arrow.triangle.branch")
+                    Text("Create & Checkout")
                 }
                 .buttonStyle(.borderedProminent)
                 .help("Create the branch at HEAD and check it out")
@@ -227,7 +224,7 @@ struct BranchSheet: View {
                 )
             }
         }
-        .padding(24)
+        .padding(20)
         .frame(width: 440)
     }
 
@@ -251,14 +248,11 @@ struct RenameBranchSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Image(systemName: "pencil")
-                    .font(.title)
-                    .foregroundStyle(GitForkTheme.accent)
                 VStack(alignment: .leading) {
                     Text("Rename Branch")
-                        .font(.title2.weight(.semibold))
+                        .font(.headline)
                     Text(renameDescription)
                         .foregroundStyle(.secondary)
                 }
@@ -277,14 +271,14 @@ struct RenameBranchSheet: View {
                 Button {
                     rename()
                 } label: {
-                    Label("Rename", systemImage: "pencil")
+                    Text("Rename")
                 }
                 .buttonStyle(.borderedProminent)
                 .help("Rename the branch and keep its commits and upstream")
                 .disabled(!canRename)
             }
         }
-        .padding(24)
+        .padding(20)
         .frame(width: 440)
     }
 
@@ -318,14 +312,11 @@ struct MoveBranchToPrefixSheet: View {
     @State private var prefix = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Image(systemName: "folder")
-                    .font(.title)
-                    .foregroundStyle(GitForkTheme.accent)
                 VStack(alignment: .leading) {
                     Text("Move to New Prefix")
-                        .font(.title2.weight(.semibold))
+                        .font(.headline)
                     Text("“\(reference.name)” keeps its commits.")
                         .foregroundStyle(.secondary)
                 }
@@ -337,7 +328,7 @@ struct MoveBranchToPrefixSheet: View {
                 .lookField(isFocused: isFieldFocused)
 
             Text(statusMessage)
-                .font(.callout)
+                .font(.system(size: 12))
                 .foregroundStyle(conflict == nil ? Color.secondary : Color.red)
                 .textSelection(.enabled)
 
@@ -349,14 +340,14 @@ struct MoveBranchToPrefixSheet: View {
                 Button {
                     moveBranch()
                 } label: {
-                    Label("Move", systemImage: "folder")
+                    Text("Move")
                 }
                 .buttonStyle(.borderedProminent)
                 .help("Rename the branch under the new prefix")
                 .disabled(!canMove)
             }
         }
-        .padding(24)
+        .padding(20)
         .frame(width: 440)
     }
 
@@ -399,16 +390,16 @@ struct StashSheet: View {
     @State private var message = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Label("Stash \(scope.title)", systemImage: "archivebox")
-                .font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Stash \(scope.title)")
+                .font(.headline)
 
             TextField("Message (optional)", text: $message)
                 .focused($isFieldFocused)
                 .lookField(isFocused: isFieldFocused)
 
             Text(scope.description)
-                .font(.callout)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
 
             HStack {
@@ -425,7 +416,7 @@ struct StashSheet: View {
                 .disabled(store.isLoading)
             }
         }
-        .padding(24)
+        .padding(20)
         .frame(width: 440)
     }
 }

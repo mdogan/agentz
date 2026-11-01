@@ -1,3 +1,4 @@
+import AgentzCore
 import SwiftUI
 
 struct HistoryView: View {
@@ -14,41 +15,29 @@ struct HistoryView: View {
                     connectingThrough: store.commits
                 ))
             : nil
+        let look = Look.shared
+        let remoteBranches = Set(store.references.filter { $0.kind == .remoteBranch }.map(\.name))
         VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(historyTitle)
-                        .font(.headline)
-                    Text(historySubtitle(commitCount: commits.count))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            HistoryHeader(commitCount: commits.count)
 
-            Divider()
+            Rectangle().fill(look.divider).frame(height: 1)
 
             if commits.isEmpty {
-                ContentUnavailableView(
-                    emptyTitle,
-                    systemImage: emptySystemImage,
-                    description: Text(emptyDescription)
-                )
+                GitPlaceholder(emptyDescription)
             } else {
                 ScrollViewReader { proxy in
                     List(selection: commitSelection) {
                         ForEach(Array(commits.enumerated()), id: \.element.id) { index, commit in
                             CommitRow(
                                 commit: commit,
+                                remoteBranches: remoteBranches,
                                 graphRow: graph?.rows[index],
                                 graphColumnCount: graph?.columnCount ?? 0,
                                 showsGraph: showsGraph
                             )
                             .tag(commit)
                             .listRowInsets(
-                                EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 10)
+                                EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12)
                             )
                             .listRowSeparator(.hidden)
                             .listRowBackground(
@@ -60,10 +49,10 @@ struct HistoryView: View {
                             HStack {
                                 Spacer()
                                 ProgressView()
-                                    .controlSize(.small)
+                                    .controlSize(.mini)
                                 Text("Loading more commits…")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(look.secondary)
                                 Spacer()
                             }
                             .padding(.vertical, 10)
@@ -73,8 +62,8 @@ struct HistoryView: View {
                             }
                         }
                     }
-                    .listStyle(.inset)
-                    .lookListBackground(Look.shared.background)
+                    .listStyle(.plain)
+                    .lookListBackground(look.sidebar)
                     .onChange(of: store.commitReveal) { _, reveal in
                         guard let reveal else { return }
                         withAnimation(.easeOut(duration: 0.12)) {
@@ -82,14 +71,6 @@ struct HistoryView: View {
                         }
                     }
                 }
-            }
-        }
-        .toolbar {
-            ToolbarItem {
-                TextField("Search commits", text: $store.searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 220)
-                    .help("Filter the loaded commit history")
             }
         }
     }
@@ -101,56 +82,9 @@ struct HistoryView: View {
         )
     }
 
-    private var historyTitle: String {
-        switch store.historyScope {
-        case let .path(path, _):
-            return path
-        case let .commit(hash):
-            return "Commit \(String(hash.prefix(8)))"
-        case .lostAndDangling:
-            return "Unreachable Commits"
-        case .all, .revision:
-            return store.selectedReference?.name ?? "All Commits"
-        }
-    }
-
-    /// The count line under the title. A path history also names the reference
-    /// it is limited to, because the path alone does not say which branch the
-    /// listed commits come from.
-    private func historySubtitle(commitCount: Int) -> String {
-        let count = "\(commitCount) commits"
-        guard case .path = store.historyScope else { return count }
-        return "\(count) on \(store.pathHistoryReferenceName)"
-    }
-
-    private var emptyTitle: String {
-        if !store.searchText.isEmpty {
-            return "No Matching Commits"
-        }
-        switch store.historyScope {
-        case .path:
-            return "No Path History"
-        case .lostAndDangling:
-            return "No Unreachable Commits"
-        case .all, .revision, .commit:
-            return "No Commits"
-        }
-    }
-
-    private var emptySystemImage: String {
-        switch store.historyScope {
-        case .path:
-            return "doc.text.magnifyingglass"
-        case .lostAndDangling:
-            return "lifepreserver"
-        case .all, .revision, .commit:
-            return "clock"
-        }
-    }
-
     private var emptyDescription: String {
         if !store.searchText.isEmpty {
-            return "No commits match your search."
+            return "No commits match “\(store.searchText)”."
         }
         switch store.historyScope {
         case let .path(path, _):
@@ -176,11 +110,14 @@ struct HistoryView: View {
 
 private struct CommitRow: View {
     let commit: GitCommit
+    /// The names of the remote branches, such as `origin/main`.
+    let remoteBranches: Set<String>
     let graphRow: CommitGraphRow?
     let graphColumnCount: Int
     let showsGraph: Bool
 
     var body: some View {
+        let look = Look.shared
         HStack(spacing: 8) {
             if showsGraph {
                 Color.clear
@@ -188,53 +125,50 @@ private struct CommitRow: View {
                     .accessibilityHidden(true)
             }
 
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
                     Text(commit.subject)
-                        .font(.callout.weight(.medium))
+                        .font(.system(size: 12.5))
                         .lineLimit(1)
+                        .layoutPriority(1)
 
                     CommitSignatureBadge(signature: commit.signature, compact: true)
 
-                    ForEach(commit.decorations.prefix(2), id: \.self) { decoration in
-                        HStack(spacing: 3) {
-                            Image(systemName: labelIcon(decoration))
-                                .font(.system(size: 8, weight: .bold))
-                            Text(cleanDecoration(decoration))
-                        }
-                        .font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .foregroundStyle(labelColor(decoration))
-                        .background(labelColor(decoration).opacity(0.14), in: Capsule())
-                        .overlay(
-                            Capsule().strokeBorder(labelColor(decoration).opacity(0.22), lineWidth: 0.5)
-                        )
-                        .lineLimit(1)
+                    ForEach(labels.prefix(2), id: \.self) { decoration in
+                        Text(shortened(cleanDecoration(decoration)))
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(labelColor(decoration))
+                            .lineLimit(1)
+                            .fixedSize()
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(labelColor(decoration).opacity(0.13), in: RoundedRectangle(cornerRadius: 4))
+                            .help(decoration)
                     }
                 }
 
-                HStack(spacing: 7) {
-                    IdentityAvatar(name: commit.authorName, initials: commit.initials)
+                HStack(spacing: 4) {
+                    IdentityAvatar(name: commit.authorName, initials: commit.initials, size: 13)
                     Text(commit.authorName)
                         .lineLimit(1)
-                    Text("·")
-                    Text(commit.date, format: .relative(presentation: .named))
+                    Text("· \(age(now: Date(), commit.date))")
+                        .lineLimit(1)
+                        .fixedSize()
                     if commit.parents.count > 1 {
-                        Label(
-                            "\(commit.parents.count) parents",
-                            systemImage: "arrow.triangle.merge"
-                        )
-                        .foregroundStyle(GitForkTheme.purple)
+                        Image(systemName: "arrow.triangle.merge")
+                            .foregroundStyle(GitForkTheme.purple)
+                            .help("A merge of \(commit.parents.count) parents")
                     }
-                    Spacer()
+                    Spacer(minLength: 6)
                     Text(commit.shortHash)
-                        .font(.caption.monospaced())
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(look.faint)
+                        .fixedSize()
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 11))
+                .foregroundStyle(look.secondary)
             }
-            .padding(.vertical, 7)
+            .padding(.vertical, 5)
         }
         .overlay(alignment: .leading) {
             if showsGraph, let graphRow {
@@ -254,8 +188,8 @@ private struct CommitRow: View {
 
     private var graphWidth: CGFloat {
         min(
-            max(28, CGFloat(graphColumnCount - 1) * 14 + 14),
-            140
+            max(14, CGFloat(graphColumnCount - 1) * 12 + 14),
+            120
         )
     }
 
@@ -268,6 +202,24 @@ private struct CommitRow: View {
             .joined(separator: ", ")
         let label = commit.parents.count == 1 ? "Parent" : "Parents"
         return "\(label): \(hashes)"
+    }
+
+    /// The commit's branches and tags, without a remote branch when the
+    /// local branch of the same name is here too: `origin/main` and `main`
+    /// show as `main`.
+    private var labels: [String] {
+        let names = Set(commit.decorations.map(cleanDecoration))
+        return commit.decorations.filter { decoration in
+            guard remoteBranches.contains(decoration),
+                  let slash = decoration.firstIndex(of: "/") else { return true }
+            return !names.contains(String(decoration[decoration.index(after: slash)...]))
+        }
+    }
+
+    /// A long branch name, cut in the middle, so the subject keeps room.
+    private func shortened(_ name: String) -> String {
+        guard name.count > 18 else { return name }
+        return name.prefix(8) + "…" + name.suffix(8)
     }
 
     private func cleanDecoration(_ value: String) -> String {
@@ -283,12 +235,6 @@ private struct CommitRow: View {
         return GitForkTheme.green
     }
 
-    private func labelIcon(_ value: String) -> String {
-        if value.contains("tag:") { return "tag.fill" }
-        if value.contains("HEAD") { return "smallcircle.filled.circle" }
-        if value.contains("/") { return "cloud" }
-        return "arrow.triangle.branch"
-    }
 }
 
 private struct CommitGraph: View {
@@ -329,7 +275,7 @@ private struct CommitGraph: View {
                     path,
                     with: .color(color(segment.color).opacity(0.82)),
                     style: StrokeStyle(
-                        lineWidth: 2,
+                        lineWidth: 1.5,
                         lineCap: .round,
                         lineJoin: .round
                     )
@@ -342,17 +288,17 @@ private struct CommitGraph: View {
             )
             let node = Path(
                 ellipseIn: CGRect(
-                    x: nodePoint.x - 5,
-                    y: nodePoint.y - 5,
-                    width: 10,
-                    height: 10
+                    x: nodePoint.x - 4,
+                    y: nodePoint.y - 4,
+                    width: 8,
+                    height: 8
                 )
             )
             context.fill(node, with: .color(color(row.nodeColor)))
             context.stroke(
                 node,
-                with: .color(.white.opacity(0.72)),
-                lineWidth: 1
+                with: .color(Look.shared.sidebar),
+                lineWidth: 1.5
             )
         }
     }
@@ -383,5 +329,90 @@ private struct CommitGraph: View {
 
     private func color(_ index: Int) -> Color {
         colors[index % colors.count]
+    }
+}
+
+/// The top of the history: a search over the loaded commits, and which
+/// commits these are when they are not all of them.
+private struct HistoryHeader: View {
+    @EnvironmentObject private var store: RepositoryStore
+    let commitCount: Int
+    @FocusState private var searchFocused: Bool
+
+    var body: some View {
+        let look = Look.shared
+        HStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(look.secondary)
+                TextField(placeholder, text: $store.searchText)
+                    .textFieldStyle(.plain)
+                    .focused($searchFocused)
+                    .onExitCommand { store.searchText = "" }
+                if !store.searchText.isEmpty {
+                    Button { store.searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(look.secondary)
+                    .help("Clear the search")
+                }
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
+            .help("Find commits by message, author, hash or branch, among those loaded")
+
+            if let scope {
+                Button {
+                    store.selectReference(nil)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: scope.icon)
+                            .font(.system(size: 10))
+                        Text(scope.title)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(look.secondary)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .frame(maxWidth: 170)
+                }
+                .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
+                .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 5))
+                .fixedSize()
+                .help("Showing \(scope.help). Click to show all commits again.")
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 34)
+    }
+
+    private var placeholder: String {
+        scope == nil ? "Search \(commitCount) commit\(commitCount == 1 ? "" : "s")" : "Search"
+    }
+
+    /// Which commits show, when not all of them.
+    private var scope: (title: String, icon: String, help: String)? {
+        if let stash = store.selectedStash {
+            return (stash.displayName, "archivebox", "the stash \(stash.displayName)")
+        }
+        switch store.historyScope {
+        case .all:
+            return nil
+        case .revision:
+            let name = store.selectedReference?.name ?? "branch"
+            return (name, "arrow.triangle.branch", "the commits of \(name)")
+        case let .commit(hash):
+            let short = String(hash.prefix(8))
+            return (short, "number", "commit \(short) and the ones before it")
+        case let .path(path, _):
+            return (baseName(path), "doc", "the commits on \(store.pathHistoryReferenceName) that change \(path)")
+        case .lostAndDangling:
+            return ("Unreachable", "lifepreserver", "the commits no branch, tag or stash leads to")
+        }
     }
 }

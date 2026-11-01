@@ -87,9 +87,9 @@ final class GitSession: PaneContent {
     }
 }
 
-/// GitFork's window in a pane: the branches, worktrees, stashes and tags
-/// on the left, the history or the changes in the middle, and the picked
-/// commit or file on the right, under a bar with the repository's actions.
+/// A repository's git in a pane: a bar with where HEAD is, the tabs and
+/// the repository's actions; under it the changes, the history or the
+/// branches on the left, and the picked file or commit on the right.
 struct GitSessionView: View {
     @ObservedObject var store: RepositoryStore
     let look: Look
@@ -97,29 +97,33 @@ struct GitSessionView: View {
     @State private var stashScope = StashScope.all
 
     var body: some View {
-        // In a pane narrower than its three columns, e.g. in a small window,
-        // they start at its left edge and the pane cuts off the right of
-        // the last one. Centered, the pane cut off both ends.
+        // In a pane narrower than its columns, e.g. in a small window, they
+        // start at its left edge and the pane cuts off the right of the
+        // last one. Centered, the pane cut off both ends.
         VStack(alignment: .leading, spacing: 0) {
             GitSessionBar()
             Rectangle().fill(look.divider).frame(height: 1)
             HSplitView {
-                GitSidebarView(showsSections: true)
-                    .frame(minWidth: 190, idealWidth: 230, maxWidth: 320)
                 Group {
-                    switch store.selectedSection {
-                    case .history:
-                        HistoryView()
-                    case .changes:
-                        GitChangesView(showingStashSheet: $showingStashSheet, stashScope: $stashScope)
+                    if store.showsReferences {
+                        GitSidebarView()
+                    } else {
+                        switch store.selectedSection {
+                        case .history:
+                            HistoryView()
+                        case .changes:
+                            GitChangesView(showingStashSheet: $showingStashSheet, stashScope: $stashScope)
+                        }
                     }
                 }
-                .frame(minWidth: 300, idealWidth: 430, maxWidth: 640)
+                .frame(minWidth: 300, idealWidth: 360, maxWidth: 600)
+                .background(look.sidebar)
                 DetailView()
                     .frame(minWidth: 320, maxWidth: .infinity)
             }
         }
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .font(.system(size: 12))
         .foregroundStyle(look.text)
         .background(look.background)
         .tint(look.accent)
@@ -128,21 +132,42 @@ struct GitSessionView: View {
     }
 }
 
-/// GitFork's toolbar as a bar on top of the pane: the outside tools, the
-/// remote, then the branch; where HEAD is in the middle; the repository on
-/// the right.
+/// The bar on top of a git tab: where HEAD is, the tabs, the repository's
+/// actions and the repository.
 private struct GitSessionBar: View {
     @EnvironmentObject private var store: RepositoryStore
 
     var body: some View {
-        HStack(spacing: 4) {
-            ToolbarIconButton("Open in Zed", systemImage: "chevron.left.forwardslash.chevron.right", help: "Open the repository in Zed") {
-                store.openZedEditor()
+        HStack(spacing: 2) {
+            Button {
+                store.showBranchPicker()
+            } label: {
+                BranchToolbarBadge(branch: store.branch, ahead: store.ahead, behind: store.behind)
             }
-            ToolbarIconButton("Show in Finder", systemImage: "folder", help: "Show the repository in Finder") {
-                store.openInFinder()
+            .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
+            .help("Switch to another branch (⌘B)")
+            .padding(.trailing, 10)
+            GitTabButton(title: "Changes", count: store.changes.count, isSelected: !store.showsReferences && store.selectedSection == .changes,
+                         help: "The staged and unstaged changes (⌘P)") {
+                if store.selectedSection == .changes {
+                    store.showsReferences = false
+                } else {
+                    store.selectChanges()
+                }
             }
-            ToolbarSeparator()
+            GitTabButton(title: "History", count: nil, isSelected: !store.showsReferences && store.selectedSection == .history,
+                         help: "The commits, of all branches or of the one picked under Branches") {
+                if store.selectedSection == .history {
+                    store.showsReferences = false
+                } else {
+                    store.selectReference(nil)
+                }
+            }
+            GitTabButton(title: "Branches", count: nil, isSelected: store.showsReferences,
+                         help: "The branches, remotes, tags, stashes and worktrees") {
+                store.showsReferences = true
+            }
+            Spacer(minLength: 12)
             ToolbarIconButton("Fetch", systemImage: "arrow.down.circle", help: "Fetch all remotes") {
                 store.fetch()
             }
@@ -167,29 +192,72 @@ private struct GitSessionBar: View {
                 store.refresh()
             }
             .disabled(store.isLoading)
-            Spacer(minLength: 12)
-            Button {
-                store.showBranchPicker()
-            } label: {
-                BranchToolbarBadge(branch: store.branch, ahead: store.ahead, behind: store.behind)
+            ToolbarSeparator()
+            ToolbarIconButton("Open in Zed", systemImage: "chevron.left.forwardslash.chevron.right", help: "Open the repository in Zed") {
+                store.openZedEditor()
             }
-            .buttonStyle(.plain)
-            .help("Switch to another branch (⌘B)")
-            Spacer(minLength: 12)
-            VStack(alignment: .trailing, spacing: 0) {
-                Text(store.repositoryName)
-                    .font(.system(size: 12, weight: .semibold))
-                if let root = store.repositoryURL, root != store.mainWorktreeURL {
-                    Text(baseName(root.path))
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
+            ToolbarIconButton("Show in Finder", systemImage: "folder", help: "Show the repository in Finder") {
+                store.openInFinder()
+            }
+            repository
+                .padding(.leading, 8)
+        }
+        .padding(.leading, 6)
+        .padding(.trailing, 10)
+        .frame(height: 36)
+    }
+
+    /// The repository, and the worktree when it is not the main one.
+    private var repository: some View {
+        let look = Look.shared
+        return HStack(spacing: 3) {
+            Text(store.repositoryName)
+            if let root = store.repositoryURL, root != store.mainWorktreeURL {
+                Text("·").foregroundStyle(look.faint)
+                Text(baseName(root.path))
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(look.secondary)
+        .lineLimit(1)
+        .help(store.repositoryURL.map { tilde($0.path) } ?? "")
+    }
+}
+
+/// A tab in the git tab's bar: what its left column shows.
+private struct GitTabButton: View {
+    let title: String
+    let count: Int?
+    let isSelected: Bool
+    let help: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        let look = Look.shared
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(title)
+                    .foregroundStyle(isSelected ? look.text : look.secondary)
+                if let count, count > 0 {
+                    Text("\(count)")
+                        .monospacedDigit()
+                        .foregroundStyle(isSelected ? look.secondary : look.faint)
                 }
             }
-            .lineLimit(1)
-            .help(store.repositoryURL.map { tilde($0.path) } ?? "")
+            .font(.system(size: 12, weight: .medium))
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(
+                isSelected ? look.selection : hovered ? look.hover : .clear,
+                in: RoundedRectangle(cornerRadius: 5)
+            )
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 10)
-        .frame(height: 38)
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .help(help)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -199,17 +267,19 @@ struct GitDialogs: ViewModifier {
     @ObservedObject var store: RepositoryStore
     @Binding var showingStashSheet: Bool
     let stashScope: StashScope
+    /// It can show a branch's commits: the git tab can, the Changes panel can't.
+    var showsHistory = true
 
     func body(content: Content) -> some View {
         content
             .overlay(alignment: .bottom) {
                 if let label = store.operationLabel {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text(label).font(.callout.weight(.medium))
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.mini)
+                        Text(label).font(.system(size: 11, weight: .medium))
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
                     .background(.regularMaterial, in: Capsule())
                     .shadow(radius: 6, y: 2)
                     .padding(.bottom, 14)
@@ -228,7 +298,7 @@ struct GitDialogs: ViewModifier {
                     .lookWindowStyle()
             }
             .sheet(isPresented: $store.isShowingBranchPicker) {
-                BranchPickerSheet()
+                BranchPickerSheet(showsCommits: showsHistory)
                     .environmentObject(store)
                     .lookWindowStyle()
             }
@@ -241,6 +311,25 @@ struct GitDialogs: ViewModifier {
                 CommitHashPickerSheet()
                     .environmentObject(store)
                     .lookWindowStyle()
+            }
+            .alert(
+                "Switch to \(store.pendingCheckout?.reference.name ?? "the Branch")?",
+                isPresented: Binding(
+                    get: { store.pendingCheckout != nil },
+                    set: { if !$0 { store.cancelCheckout() } }
+                )
+            ) {
+                Button("Cancel", role: .cancel) { store.cancelCheckout() }
+                switch store.pendingCheckout?.reason {
+                case .agentsWorking:
+                    Button("Switch Anyway", role: .destructive) { store.checkoutDespiteAgents() }
+                case .overwrites:
+                    Button("Stash and Switch") { store.stashAndCheckout() }
+                case nil:
+                    EmptyView()
+                }
+            } message: {
+                Text(checkoutMessage)
             }
             .alert("Push \(store.pendingPushPlan?.branchName ?? store.branch)?", isPresented: $store.isConfirmingPush) {
                 Button("Cancel", role: .cancel) { store.cancelPushConfirmation() }
@@ -259,6 +348,29 @@ struct GitDialogs: ViewModifier {
             } message: {
                 Text(store.errorMessage ?? "")
             }
+    }
+
+    private var checkoutMessage: String {
+        switch store.pendingCheckout?.reason {
+        case let .agentsWorking(agents):
+            let who = agents.count == 1
+                ? "\(agents[0]) is working in this worktree."
+                : "\(agents.formatted(.list(type: .and))) are working in this worktree."
+            return "\(who)\n\nSwitching changes the files during that work. Agents aren't told, "
+                + "so they may go on as if nothing changed, and their work may end up on the wrong branch."
+        case let .overwrites(files):
+            return overwriteMessage(files)
+        case nil:
+            return ""
+        }
+    }
+
+    private func overwriteMessage(_ files: [String]) -> String {
+        var names = files.prefix(3).map { ($0 as NSString).lastPathComponent }
+        if files.count > names.count { names.append("\(files.count - names.count) more") }
+        return "Switching would overwrite your changes to \(names.formatted(.list(type: .and))).\n\n"
+            + "Stash and Switch puts all your changes away first, untracked files too. "
+            + "To get them back, apply the stash under Branches in the git tab."
     }
 
     private var pushMessage: String {

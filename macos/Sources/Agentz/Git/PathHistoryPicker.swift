@@ -102,18 +102,15 @@ struct PathHistoryPickerSheet: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.title2)
-                        .foregroundStyle(GitForkTheme.accent)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("File or Directory History")
-                            .font(.title2.weight(.semibold))
+                            .font(.headline)
                         Text(
                             "Choose a tracked path or type a repository-relative "
                                 + "path. Commits come from \(store.pathHistoryReferenceName)."
                         )
-                        .font(.callout)
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                     }
                 }
@@ -147,7 +144,7 @@ struct PathHistoryPickerSheet: View {
                     VStack(spacing: 10) {
                         ProgressView()
                         Text("Loading repository paths…")
-                            .font(.callout)
+                            .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
                 } else if items.isEmpty {
@@ -216,7 +213,7 @@ struct PathHistoryPickerSheet: View {
                     Text("↩ Open")
                     Text("esc Close")
                 }
-                .font(.caption)
+                .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
 
                 Button("Cancel", role: .cancel) {
@@ -291,7 +288,7 @@ private struct RepositoryPathPickerRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: item.kind == .directory ? "folder.fill" : "doc")
-                .font(.title3)
+                .font(.system(size: 13))
                 .foregroundStyle(
                     item.kind == .directory
                         ? GitForkTheme.accent
@@ -300,7 +297,7 @@ private struct RepositoryPathPickerRow: View {
                 .frame(width: 24)
 
             Text(item.path)
-                .font(.body.monospaced())
+                .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -308,12 +305,12 @@ private struct RepositoryPathPickerRow: View {
             Spacer()
 
             Text(item.kind == .directory ? "Folder" : "File")
-                .font(.caption)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
             if isSelected {
                 Image(systemName: "return")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(GitForkTheme.accent)
             }
         }

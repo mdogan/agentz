@@ -56,8 +56,8 @@ enum GitForkTheme {
     }
 }
 
-/// A colorful, deterministic avatar built from a person's initials. The fill
-/// color is derived from `name`, so each author is visually recognizable.
+/// A round, flat avatar with a person's initials. The fill color comes
+/// from `name`, so each author keeps a color of their own.
 struct IdentityAvatar: View {
     let name: String
     let initials: String
@@ -67,18 +67,14 @@ struct IdentityAvatar: View {
 
     var body: some View {
         Circle()
-            .fill(color.gradient)
+            .fill(color.opacity(0.85))
             .frame(width: size, height: size)
             .overlay {
                 Text(initials)
-                    .font(.system(size: max(7, size * 0.42), weight: .bold))
+                    .font(.system(size: max(7, size * 0.42), weight: .semibold))
                     .foregroundStyle(.white)
                     .minimumScaleFactor(0.6)
             }
-            .overlay {
-                Circle().strokeBorder(.white.opacity(0.22), lineWidth: 0.5)
-            }
-            .shadow(color: color.opacity(0.35), radius: size * 0.08, y: 0.5)
     }
 }
 
@@ -90,6 +86,8 @@ enum GitForkHoverButtonVariant {
     case compactRow(isSelected: Bool)
 }
 
+/// The app's look for the git views' buttons and rows: a faint gray on
+/// hover and a stronger gray when picked, as in the session list.
 struct GitForkHoverButtonStyle: ButtonStyle {
     let variant: GitForkHoverButtonVariant
 
@@ -106,10 +104,9 @@ struct GitForkHoverButtonStyle: ButtonStyle {
     }
 }
 
-/// The hover and pressed appearance behind `GitForkHoverButtonStyle`, also used
-/// directly by rows that cannot be a `Button`, such as draggable sidebar rows.
+/// The hover and pressed look behind `GitForkHoverButtonStyle`, also used
+/// directly by rows that cannot be a `Button`, such as draggable rows.
 struct GitForkHoverButtonBody<Label: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovering = false
 
@@ -130,17 +127,10 @@ struct GitForkHoverButtonBody<Label: View>: View {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(backgroundColor)
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(borderColor, lineWidth: 1)
-            )
-            .opacity(isEnabled ? 1 : 0.45)
-            .scaleEffect(isPressed && isEnabled ? 0.97 : 1)
+            .opacity(isEnabled ? 1 : 0.4)
             .onHover { hovering in
                 isHovering = hovering
             }
-            .animation(.easeOut(duration: 0.12), value: isHovering)
-            .animation(.easeOut(duration: 0.08), value: isPressed)
     }
 
     private var expandsHorizontally: Bool {
@@ -152,68 +142,41 @@ struct GitForkHoverButtonBody<Label: View>: View {
 
     private var horizontalPadding: CGFloat {
         switch variant {
-        case .toolbarAction: 7
-        case .icon: 5
-        case .text: 6
-        case .row: 7
-        case .compactRow: 5
+        case .toolbarAction: 6
+        case .icon: 3
+        case .text: 5
+        case .row: 8
+        case .compactRow: 6
         }
     }
 
     private var verticalPadding: CGFloat {
         switch variant {
-        case .toolbarAction: 5
-        case .icon: 4
-        case .text: 3
+        case .toolbarAction: 3
+        case .icon: 1
+        case .text: 2
         case .row: 5
-        case .compactRow: 2
+        case .compactRow: 3
         }
     }
 
     private var cornerRadius: CGFloat {
         switch variant {
-        case .row: 7
-        case .compactRow: 6
-        default: 6
+        case .row, .compactRow: 6
+        default: 5
         }
     }
 
     private var backgroundColor: Color {
-        if isPressed && isEnabled {
-            return GitForkTheme.accent.opacity(0.32)
-        }
-
+        let look = Look.shared
         switch variant {
         case let .row(isSelected), let .compactRow(isSelected):
-            if isSelected {
-                return GitForkTheme.accent.opacity(isHovering ? 0.30 : 0.20)
-            }
-            return isHovering ? neutralHoverColor : .clear
-
-        case .toolbarAction, .icon:
-            return isHovering && isEnabled
-                ? GitForkTheme.accent.opacity(0.20)
-                : .clear
-
-        case .text:
-            return isHovering && isEnabled
-                ? GitForkTheme.accent.opacity(0.18)
-                : .clear
-        }
-    }
-
-    private var borderColor: Color {
-        guard isHovering && isEnabled else { return .clear }
-        switch variant {
-        case .row, .compactRow:
-            return GitForkTheme.accent.opacity(0.40)
+            if isSelected || isPressed && isEnabled { return look.selection }
+            return isHovering ? look.hover : .clear
         case .toolbarAction, .icon, .text:
-            return GitForkTheme.accent.opacity(0.55)
+            if isPressed && isEnabled { return look.selection.opacity(1.6) }
+            return isHovering && isEnabled ? look.selection : .clear
         }
-    }
-
-    private var neutralHoverColor: Color {
-        Look.shared.text.opacity(colorScheme == .dark ? 0.10 : 0.065)
     }
 }
 

@@ -11,17 +11,15 @@ struct GitChangesView: View {
     @State private var showingCommitSheet = false
 
     var body: some View {
+        let look = Look.shared
         VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Working Tree")
-                        .font(.headline)
-                    Text(changeCountLabel)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
+            HStack(spacing: 4) {
+                Text(changeCountLabel)
+                    .font(.system(size: 11))
+                    .foregroundStyle(look.secondary)
+                    .lineLimit(1)
 
-                Spacer()
+                Spacer(minLength: 4)
 
                 if showsStash {
                     stashMenu
@@ -30,25 +28,22 @@ struct GitChangesView: View {
                 Button {
                     showingCommitSheet = true
                 } label: {
-                    Label(
-                        "Commit",
-                        systemImage: store.signCommit ? "checkmark.seal.fill" : "checkmark.circle"
-                    )
+                    Text(store.signCommit ? "Sign & Commit…" : "Commit…")
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
+                .buttonStyle(GitPrimaryButtonStyle())
                 .keyboardShortcut(.return, modifiers: .command)
                 .help(
                     store.conflictedChanges.isEmpty
-                        ? "Write a commit message for the staged changes"
+                        ? "Write a commit message for the staged changes (⌘↩)"
                         : "Resolve all conflicts before committing"
                 )
                 .disabled(store.isLoading || !store.conflictedChanges.isEmpty)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.leading, 14)
+            .padding(.trailing, 8)
+            .frame(height: 34)
 
-            Divider()
+            Rectangle().fill(look.divider).frame(height: 1)
 
             ChangeList()
                 .frame(maxHeight: .infinity)
@@ -86,13 +81,18 @@ struct GitChangesView: View {
                 Label("All Changes", systemImage: "tray.full")
             }
         } label: {
-            Label("Stash Changes", systemImage: "archivebox")
+            Image(systemName: "archivebox")
+                .font(.system(size: 13))
+                .foregroundStyle(Look.shared.secondary)
+                .frame(width: 20, height: 20)
         }
-        .menuStyle(.borderedButton)
-        .controlSize(.regular)
+        .menuStyle(.button)
+        .buttonStyle(GitForkHoverButtonStyle(.icon))
+        .menuIndicator(.hidden)
+        .fixedSize()
         .help(
             store.conflictedChanges.isEmpty
-                ? "Choose which changes to save to a stash"
+                ? "Stash changes: put them away and take them out of the working tree"
                 : "Resolve all conflicts before stashing changes"
         )
         .disabled(
@@ -104,7 +104,7 @@ struct GitChangesView: View {
 
     private var changeCountLabel: String {
         let count = store.changes.count
-        return "\(count) changed file\(count == 1 ? "" : "s")"
+        return count == 0 ? "No changes" : "\(count) changed file\(count == 1 ? "" : "s")"
     }
 
     private var hasPartiallyStagedFiles: Bool {
@@ -141,60 +141,42 @@ private struct ChangeList: View {
             }
 
             List(selection: primarySelection) {
-                if !store.changes.isEmpty {
-                    Section {
-                        if stagedEntries.isEmpty {
-                            EmptyChangeRow(title: "No staged changes")
-                        } else {
-                            treeRows(stagedEntries, section: "staged")
-                        }
-                    } header: {
-                        ChangeSectionHeader(
-                            title: "Staged Changes",
-                            count: stagedEntries.count,
-                            systemImage: "checkmark.circle.fill",
-                            tint: GitForkTheme.green,
-                            actionTitle: "Unstage All",
-                            action: store.unstageAll
-                        )
-                    }
+                if !stagedEntries.isEmpty {
+                    ChangeSectionHeader(
+                        title: "Staged",
+                        count: stagedEntries.count,
+                        tint: nil,
+                        actionTitle: "Unstage All",
+                        action: store.unstageAll
+                    )
+                    treeRows(stagedEntries, section: "staged")
+                }
 
-                    if !conflictEntries.isEmpty {
-                        Section {
-                            treeRows(conflictEntries, section: "conflicts")
-                        } header: {
-                            ChangeSectionHeader(
-                                title: "Conflicts",
-                                count: conflictEntries.count,
-                                systemImage: "exclamationmark.triangle.fill",
-                                tint: .orange,
-                                actionTitle: nil,
-                                action: nil
-                            )
-                        }
-                    }
+                if !conflictEntries.isEmpty {
+                    ChangeSectionHeader(
+                        title: "Conflicts",
+                        count: conflictEntries.count,
+                        tint: GitForkTheme.orange,
+                        actionTitle: nil,
+                        action: nil
+                    )
+                    treeRows(conflictEntries, section: "conflicts")
+                }
 
-                    Section {
-                        if unstagedEntries.isEmpty {
-                            EmptyChangeRow(title: "No unstaged changes")
-                        } else {
-                            treeRows(unstagedEntries, section: "unstaged")
-                        }
-                    } header: {
-                        ChangeSectionHeader(
-                            title: "Unstaged Changes",
-                            count: unstagedEntries.count,
-                            systemImage: "pencil.circle.fill",
-                            tint: GitForkTheme.accent,
-                            actionTitle: "Stage All",
-                            action: store.stageAll
-                        )
-                    }
+                if !unstagedEntries.isEmpty {
+                    ChangeSectionHeader(
+                        title: "Unstaged",
+                        count: unstagedEntries.count,
+                        tint: nil,
+                        actionTitle: "Stage All",
+                        action: store.stageAll
+                    )
+                    treeRows(unstagedEntries, section: "unstaged")
                 }
             }
-            .listStyle(.inset)
-            .lookListBackground(Look.shared.background)
-            .environment(\.defaultMinListRowHeight, 30)
+            .listStyle(.plain)
+            .lookListBackground(Look.shared.sidebar)
+            .environment(\.defaultMinListRowHeight, 22)
             .focused($isListFocused)
             .onKeyPress(characters: ChangeSelectionKey.returnCharacters) { _ in
                 performKeyboardAction(for: .returnKey)
@@ -207,11 +189,7 @@ private struct ChangeList: View {
             }
             .overlay {
                 if store.changes.isEmpty {
-                    ContentUnavailableView(
-                        "Working Tree Clean",
-                        systemImage: "checkmark.circle",
-                        description: Text("There are no staged or unstaged changes.")
-                    )
+                    GitPlaceholder("Nothing to commit. The working tree is clean.")
                 }
             }
         }
@@ -366,12 +344,10 @@ private struct SelectionActionBar: View {
     let requestConflictResolution: ([ChangeEntry], ConflictResolutionSide) -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "checklist")
-                .font(.caption)
-                .foregroundStyle(GitForkTheme.accent)
+        HStack(spacing: 4) {
             Text("\(entries.count) selected")
-                .font(.caption.weight(.medium))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Look.shared.secondary)
 
             Spacer()
 
@@ -400,6 +376,7 @@ private struct SelectionActionBar: View {
                     Label("Resolve", systemImage: "checkmark.shield")
                 }
                 .menuStyle(.borderlessButton)
+                .font(.system(size: 11.5))
                 .fixedSize()
                 .help("Resolve the selected conflicts")
                 .disabled(store.isLoading)
@@ -412,7 +389,7 @@ private struct SelectionActionBar: View {
                     Label("Stage", systemImage: "plus")
                 }
                 .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
-                .font(.callout)
+                .font(.system(size: 11.5))
                 .help("Stage \(ChangeActionTitle.fileCount(entries.unstagedSide.count))")
                 .disabled(store.isLoading)
             }
@@ -424,7 +401,7 @@ private struct SelectionActionBar: View {
                     Label("Unstage", systemImage: "minus")
                 }
                 .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
-                .font(.callout)
+                .font(.system(size: 11.5))
                 .help("Unstage \(ChangeActionTitle.fileCount(entries.stagedSide.count))")
                 .disabled(store.isLoading)
             }
@@ -436,7 +413,7 @@ private struct SelectionActionBar: View {
                     Label("Discard…", systemImage: "trash")
                 }
                 .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
-                .font(.callout)
+                .font(.system(size: 11.5))
                 .foregroundStyle(GitForkTheme.red)
                 .help(
                     "Permanently discard the working-tree changes in "
@@ -450,70 +427,59 @@ private struct SelectionActionBar: View {
                 store.clearChangeSelection()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.caption2)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Look.shared.secondary)
+                    .frame(width: 18, height: 18)
             }
             .buttonStyle(GitForkHoverButtonStyle(.icon))
             .help("Clear the selection")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(GitForkTheme.accent.opacity(0.08))
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
+        .padding(.vertical, 4)
+        .background(Look.shared.hover)
     }
 }
 
+/// A section's name and count, with what it can do for all its files.
 private struct ChangeSectionHeader: View {
     let title: String
     let count: Int
-    let systemImage: String
-    let tint: Color
+    /// The title's color, when it is not the usual gray.
+    let tint: Color?
     let actionTitle: String?
     let action: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: systemImage)
-                .font(.body)
-                .foregroundStyle(tint)
+        let look = Look.shared
+        HStack(spacing: 5) {
             Text(title)
-                .font(.body.weight(.semibold))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(tint ?? look.secondary)
             Text("\(count)")
-                .font(.callout.monospacedDigit().weight(.semibold))
-                .foregroundStyle(tint)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 2)
-                .background(tint.opacity(0.13), in: Capsule())
+                .font(.system(size: 11))
+                .monospacedDigit()
+                .foregroundStyle(look.faint)
             Spacer()
             if let actionTitle, let action {
                 Button(actionTitle, action: action)
-                    .font(.callout.weight(.semibold))
-                    .textCase(nil)
+                    .font(.system(size: 11, weight: .medium))
                     .buttonStyle(GitForkHoverButtonStyle(.text))
-                    .foregroundStyle(tint)
+                    .foregroundStyle(look.accent)
                     .help(actionTitle)
                     .disabled(count == 0)
             }
         }
         .textCase(nil)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
-        .overlay {
-            RoundedRectangle(cornerRadius: 9)
-                .strokeBorder(tint.opacity(0.18))
-        }
-    }
-}
-
-private struct EmptyChangeRow: View {
-    let title: String
-
-    var body: some View {
-        Label(title, systemImage: "tray")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.vertical, 3)
-            .listRowInsets(EdgeInsets(top: 1, leading: 7, bottom: 1, trailing: 7))
-            .listRowBackground(Color.clear)
+        .padding(.leading, 8)
+        .padding(.trailing, 2)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
+        // A row, not a section header: those float over the list on a
+        // background of their own.
+        .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
     }
 }
 
@@ -527,22 +493,25 @@ private struct ChangeFolderRow: View {
 
     var body: some View {
         Button(action: toggle) {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Look.shared.faint)
                     .rotationEffect(.degrees(isCollapsed ? 0 : 90))
                     .frame(width: 12)
-                Image(systemName: isCollapsed ? "folder" : "folder.fill")
-                    .foregroundStyle(.secondary)
+                Image(systemName: "folder")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Look.shared.secondary)
                 Text(name)
-                    .font(.body)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Look.shared.secondary)
                     .lineLimit(1)
                     .truncationMode(.head)
                     .layoutPriority(1)
                 Text("\(count)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11))
+                    .monospacedDigit()
+                    .foregroundStyle(Look.shared.faint)
                 Spacer()
             }
             .contentShape(Rectangle())
@@ -550,7 +519,8 @@ private struct ChangeFolderRow: View {
         .buttonStyle(GitForkHoverButtonStyle(.compactRow(isSelected: false)))
         .padding(.leading, CGFloat(depth) * ChangeRow.indentStep)
         .help(isCollapsed ? "Show the files in \(name)" : "Hide the files in \(name)")
-        .listRowInsets(EdgeInsets(top: 1, leading: 7, bottom: 1, trailing: 7))
+        .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
+        .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
     }
 }
@@ -558,7 +528,7 @@ private struct ChangeFolderRow: View {
 private struct ChangeRow: View {
     @EnvironmentObject private var store: RepositoryStore
     @Environment(\.openChange) private var openChange
-    static let indentStep: CGFloat = 14
+    static let indentStep: CGFloat = 12
     let entry: ChangeEntry
     /// The file name shown in the tree. The full path stays in the tooltip.
     let displayName: String
@@ -566,6 +536,8 @@ private struct ChangeRow: View {
     let requestDiscard: ([ChangeEntry]) -> Void
     let requestConflictResolution: ([ChangeEntry], ConflictResolutionSide) -> Void
     let focusList: () -> Void
+
+    @State private var hovered = false
 
     private var change: WorkingChange { entry.change }
     private var staged: Bool { entry.staged }
@@ -579,82 +551,84 @@ private struct ChangeRow: View {
 
     var body: some View {
         let statusSymbol = change.statusSymbol(staged: staged)
+        let deleted = statusSymbol == "D"
+        let look = Look.shared
         Button(action: handleClick) {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 Text(statusSymbol)
-                    .font(.callout.monospaced().weight(.bold))
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Color.statusColor(statusSymbol))
-                    .frame(width: 22, height: 22)
-                    .background(Color.statusColor(statusSymbol).opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+                    .frame(width: 12)
 
                 Text(displayName)
-                    .font(.body)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(deleted ? look.secondary : look.text)
+                    .strikethrough(deleted, color: look.faint)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .layoutPriority(1)
 
-                Spacer()
+                Spacer(minLength: 4)
 
-                if change.isConflicted {
-                    Menu {
-                        Button(role: .destructive) {
-                            requestConflictResolution(actionTargets, .ours)
+                HStack(spacing: 0) {
+                    if change.isConflicted {
+                        Menu {
+                            Button(role: .destructive) {
+                                requestConflictResolution(actionTargets, .ours)
+                            } label: {
+                                Label("Use Ours…", systemImage: "arrow.left")
+                            }
+
+                            Button(role: .destructive) {
+                                requestConflictResolution(actionTargets, .theirs)
+                            } label: {
+                                Label("Use Theirs…", systemImage: "arrow.right")
+                            }
+
+                            Divider()
+
+                            Button {
+                                store.markConflictsResolved(actionTargets)
+                            } label: {
+                                Label("Mark Resolved", systemImage: "checkmark.circle")
+                            }
                         } label: {
-                            Label("Use Ours…", systemImage: "arrow.left")
+                            rowIcon("checkmark.shield")
                         }
-
-                        Button(role: .destructive) {
-                            requestConflictResolution(actionTargets, .theirs)
-                        } label: {
-                            Label("Use Theirs…", systemImage: "arrow.right")
-                        }
-
-                        Divider()
-
+                        .menuStyle(.button)
+                        .buttonStyle(GitForkHoverButtonStyle(.icon))
+                        .menuIndicator(.hidden)
+                        .fixedSize()
+                        .help("Resolve this conflict")
+                        .disabled(store.isLoading)
+                    }
+                    if let openChange {
                         Button {
-                            store.markConflictsResolved(actionTargets)
+                            openChange(entry.id)
                         } label: {
-                            Label("Mark Resolved", systemImage: "checkmark.circle")
+                            rowIcon("arrow.up.left.and.arrow.down.right")
                         }
-                    } label: {
-                        Image(systemName: "checkmark.shield")
-                            .font(.body.weight(.medium))
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
+                        .buttonStyle(GitForkHoverButtonStyle(.icon))
+                        .help("Show its diff in the git tab (or double-click the file)")
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("Resolve this conflict")
-                    .disabled(store.isLoading)
-                }
-                if let openChange {
-                    Button {
-                        openChange(entry.id)
-                    } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.body.weight(.medium))
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
+                    if !change.isConflicted {
+                        Button {
+                            staged ? store.unstage(change) : store.stage(change)
+                        } label: {
+                            rowIcon(staged ? "minus" : "plus")
+                        }
+                        .buttonStyle(GitForkHoverButtonStyle(.icon))
+                        .help(staged ? "Unstage (⌫)" : "Stage (↩)")
+                        .disabled(store.isLoading)
                     }
-                    .buttonStyle(GitForkHoverButtonStyle(.icon))
-                    .help("Show its diff in the git tab (or double-click the file)")
                 }
-                if !change.isConflicted {
-                    Button {
-                        staged ? store.unstage(change) : store.stage(change)
-                    } label: {
-                        Image(systemName: staged ? "minus" : "plus")
-                            .font(.body.weight(.medium))
-                            .frame(width: 20, height: 20)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(GitForkHoverButtonStyle(.icon))
-                    .help(staged ? "Unstage" : "Stage")
-                    .disabled(store.isLoading)
-                }
+                // They keep their room while hidden, so the name does not jump.
+                .opacity(hovered ? 1 : 0)
+                .allowsHitTesting(hovered)
             }
             .contentShape(Rectangle())
         }
+        .onHover { hovered = $0 }
         .buttonStyle(GitForkHoverButtonStyle(.compactRow(isSelected: isSelected)))
         .help(
             "View \(change.isConflicted ? "conflict" : staged ? "staged" : "working tree") diff for \(change.path)"
@@ -670,8 +644,17 @@ private struct ChangeRow: View {
             )
         }
         .padding(.leading, CGFloat(depth) * Self.indentStep)
-        .listRowInsets(EdgeInsets(top: 1, leading: 7, bottom: 1, trailing: 7))
+        .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
+        .listRowSeparator(.hidden)
         .listRowBackground(SystemSelectionHighlightRemover())
+    }
+
+    private func rowIcon(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Look.shared.secondary)
+            .frame(width: 18, height: 18)
+            .contentShape(Rectangle())
     }
 
     /// Standard macOS list behavior: Shift extends from the anchor, Command
@@ -844,47 +827,38 @@ private struct CommitSheet: View {
     @FocusState private var isMessageFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top) {
-                Image(systemName: store.signCommit ? "checkmark.seal" : "checkmark.circle")
-                    .font(.title)
-                    .foregroundStyle(store.signCommit ? GitForkTheme.green : GitForkTheme.accent)
-                VStack(alignment: .leading) {
-                    Text("Commit Changes")
-                        .font(.title2.weight(.semibold))
-                    Text(stagedSummary)
-                        .foregroundStyle(.secondary)
-                }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Commit")
+                    .font(.headline)
+                Text(stagedSummary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Look.shared.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
 
                 Spacer()
 
-                VStack(alignment: .leading, spacing: 5) {
-                    Toggle(isOn: $store.signCommit) {
-                        Label("Sign", systemImage: "checkmark.seal")
-                    }
+                Toggle("Sign", isOn: $store.signCommit)
                     .toggleStyle(.checkbox)
-                    .font(.caption)
-                    .foregroundStyle(store.signCommit ? GitForkTheme.green : .primary)
                     .help("Sign commits with the configured OpenPGP key")
 
-                    Toggle("Amend", isOn: $store.amend)
-                        .toggleStyle(.checkbox)
-                        .font(.caption)
-                        .help("Replace the latest commit")
-                        .disabled(store.isLoading)
-                }
+                Toggle("Amend", isOn: $store.amend)
+                    .toggleStyle(.checkbox)
+                    .help("Replace the latest commit")
+                    .disabled(store.isLoading)
             }
 
             TextEditor(text: $store.commitMessage)
-                .font(.body)
+                .font(.system(size: 12.5))
                 .scrollContentBackground(.hidden)
                 .focused($isMessageFocused)
                 .frame(minHeight: 170)
                 .padding(7)
-                .background(Look.shared.sidebar, in: RoundedRectangle(cornerRadius: 7))
+                .background(Look.shared.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(.separator.opacity(0.7))
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Look.shared.divider)
                 )
                 .overlay(alignment: .topLeading) {
                     if store.commitMessage.isEmpty {
@@ -911,10 +885,7 @@ private struct CommitSheet: View {
                         commit()
                     }
                 } label: {
-                    Label(
-                        commitButtonTitle,
-                        systemImage: store.signCommit ? "checkmark.seal.fill" : "checkmark.circle"
-                    )
+                    Text(commitButtonTitle)
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: .command)
@@ -926,7 +897,7 @@ private struct CommitSheet: View {
                 )
             }
         }
-        .padding(24)
+        .padding(20)
         .frame(width: 540)
         .onAppear { isMessageFocused = true }
         .alert("Amend the Latest Commit?", isPresented: $isConfirmingAmend) {

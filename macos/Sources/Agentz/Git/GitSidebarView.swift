@@ -1,17 +1,17 @@
 import AgentzCore
+import AppKit
 import SwiftUI
 
+/// The git tab's Branches tab: the local and remote branches, tags,
+/// stashes and worktrees, and the unreachable commits. Picking one shows
+/// its history; right-click one for what it can do.
 struct GitSidebarView: View {
     @EnvironmentObject private var store: RepositoryStore
-    /// With rows for the changes and the whole history, as in GitFork's
-    /// window. The git tab has them; a list that has its own way there
-    /// leaves them out.
-    var showsSections = false
-    @State private var branchesExpanded = true
-    @State private var remotesExpanded = false
-    @State private var tagsExpanded = false
-    @State private var stashesExpanded = false
-    @State private var worktreesExpanded = false
+    @AppStorage("gitBranchesExpanded") private var branchesExpanded = true
+    @AppStorage("gitRemotesExpanded") private var remotesExpanded = false
+    @AppStorage("gitTagsExpanded") private var tagsExpanded = false
+    @AppStorage("gitStashesExpanded") private var stashesExpanded = true
+    @AppStorage("gitWorktreesExpanded") private var worktreesExpanded = true
 
     private var primaryBranch: GitReference? {
         GitReference.primaryLocalBranch(in: store.references)
@@ -34,128 +34,93 @@ struct GitSidebarView: View {
     }
 
     var body: some View {
-        List {
-            Section {
-                if showsSections {
-                    SidebarRow(
-                        title: WorkspaceSection.changes.rawValue,
-                        icon: WorkspaceSection.changes.icon,
-                        isSelected: store.selectedSection == .changes,
-                        size: .regular
-                    ) {
-                        store.selectChanges()
-                    } badge: {
-                        if !store.changes.isEmpty {
-                            Text("\(store.changes.count)")
-                        }
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 1) {
+                let locals = references(of: .localBranch)
+                SidebarSectionHeader(title: "Branches", count: locals.count, isExpanded: $branchesExpanded)
+                    .modifier(BranchDropTarget(prefix: ""))
+                if branchesExpanded {
+                    if let primaryBranch {
+                        ReferenceSidebarRow(
+                            reference: primaryBranch,
+                            title: primaryBranch.name,
+                            icon: primaryBranch.kind.icon
+                        )
                     }
-
-                    SidebarRow(
-                        title: WorkspaceSection.history.rawValue,
-                        icon: WorkspaceSection.history.icon,
-                        isSelected: store.selectedSection == .history
-                            && store.selectedReference == nil
-                            && store.selectedStash == nil
-                            && store.historyScope == .all,
-                        size: .regular
-                    ) {
-                        store.selectReference(nil)
-                    } badge: {
-                        EmptyView()
+                    if let currentBranch {
+                        ReferenceSidebarRow(
+                            reference: currentBranch,
+                            title: currentBranch.name,
+                            icon: currentBranch.kind.icon
+                        )
+                    }
+                    ReferenceTreeRows(references: remainingLocalBranches)
+                    if locals.isEmpty {
+                        EmptySidebarRow(title: "No branches")
                     }
                 }
 
+                let remotes = references(of: .remoteBranch)
+                SidebarSectionHeader(title: "Remotes", count: remotes.count, isExpanded: $remotesExpanded)
+                if remotesExpanded {
+                    if remotes.isEmpty {
+                        EmptySidebarRow(title: "No remotes")
+                    } else {
+                        ReferenceTreeRows(references: remotes)
+                    }
+                }
+
+                let tags = references(of: .tag)
+                SidebarSectionHeader(title: "Tags", count: tags.count, isExpanded: $tagsExpanded)
+                if tagsExpanded {
+                    if tags.isEmpty {
+                        EmptySidebarRow(title: "No tags")
+                    } else {
+                        ReferenceTreeRows(references: tags)
+                    }
+                }
+
+                SidebarSectionHeader(title: "Stashes", count: store.stashes.count, isExpanded: $stashesExpanded)
+                if stashesExpanded {
+                    if store.stashes.isEmpty {
+                        EmptySidebarRow(title: "No stashes")
+                    } else {
+                        ForEach(store.stashes) { stash in
+                            StashSidebarRow(stash: stash)
+                        }
+                    }
+                }
+
+                SidebarSectionHeader(title: "Worktrees", count: store.worktrees.count, isExpanded: $worktreesExpanded)
+                if worktreesExpanded {
+                    if store.worktrees.isEmpty {
+                        EmptySidebarRow(title: "No worktrees")
+                    } else {
+                        ForEach(store.worktrees) { worktree in
+                            WorktreeSidebarRow(worktree: worktree)
+                        }
+                    }
+                }
+
+                Rectangle()
+                    .fill(Look.shared.divider)
+                    .frame(height: 1)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 8)
                 SidebarRow(
                     title: "Unreachable Commits",
                     icon: "lifepreserver",
-                    isSelected: store.selectedSection == .history
-                        && store.selectedStash == nil
-                        && store.historyScope == .lostAndDangling,
-                    indent: showsSections ? 29 : 0
+                    isSelected: false
                 ) {
                     store.selectLostAndDanglingCommits()
                 } badge: {
                     EmptyView()
                 }
+                .help("Commits no branch, tag or stash leads to, e.g. after a reset or a dropped stash")
             }
-
-            Section(isExpanded: $branchesExpanded) {
-                if let primaryBranch {
-                    ReferenceSidebarRow(
-                        reference: primaryBranch,
-                        title: primaryBranch.name,
-                        icon: primaryBranch.isCurrent
-                            ? "checkmark.circle.fill"
-                            : primaryBranch.kind.icon
-                    )
-                    .fontWeight(.bold)
-                }
-
-                if let currentBranch {
-                    ReferenceSidebarRow(
-                        reference: currentBranch,
-                        title: currentBranch.name,
-                        icon: "checkmark.circle.fill"
-                    )
-                    .fontWeight(.semibold)
-                }
-
-                ReferenceTreeRows(references: remainingLocalBranches)
-
-                if primaryBranch == nil && currentBranch == nil && remainingLocalBranches.isEmpty {
-                    EmptySidebarRow(title: "No Branches")
-                }
-            } header: {
-                SidebarSectionHeader(title: "Branches", isExpanded: $branchesExpanded)
-                    .modifier(BranchDropTarget(prefix: ""))
-            }
-
-            Section(isExpanded: $remotesExpanded) {
-                if references(of: .remoteBranch).isEmpty {
-                    EmptySidebarRow(title: "No Remotes")
-                } else {
-                    ReferenceTreeRows(references: references(of: .remoteBranch))
-                }
-            } header: {
-                SidebarSectionHeader(title: "Remotes", isExpanded: $remotesExpanded)
-            }
-
-            Section(isExpanded: $tagsExpanded) {
-                if references(of: .tag).isEmpty {
-                    EmptySidebarRow(title: "No Tags")
-                } else {
-                    ReferenceTreeRows(references: references(of: .tag))
-                }
-            } header: {
-                SidebarSectionHeader(title: "Tags", isExpanded: $tagsExpanded)
-            }
-
-            Section(isExpanded: $stashesExpanded) {
-                if store.stashes.isEmpty {
-                    EmptySidebarRow(title: "No Stashes")
-                } else {
-                    ForEach(store.stashes) { stash in
-                        StashSidebarRow(stash: stash)
-                    }
-                }
-            } header: {
-                SidebarSectionHeader(title: "Stashes", isExpanded: $stashesExpanded)
-            }
-
-            Section(isExpanded: $worktreesExpanded) {
-                if store.worktrees.isEmpty {
-                    EmptySidebarRow(title: "No Worktrees")
-                } else {
-                    ForEach(store.worktrees) { worktree in
-                        WorktreeSidebarRow(worktree: worktree)
-                    }
-                }
-            } header: {
-                SidebarSectionHeader(title: "Worktrees", isExpanded: $worktreesExpanded)
-            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
         }
-        .listStyle(.sidebar)
-        .lookListBackground(Look.shared.sidebar)
         .confirmationDialog(
             branchMoveTitle,
             isPresented: branchMoveBinding,
@@ -220,11 +185,10 @@ private struct WorktreeSidebarRow: View {
     var body: some View {
         SidebarRow(
             title: worktree.displayName,
-            icon: worktree.isCurrent
-                ? "checkmark.circle.fill"
-                : "rectangle.stack",
+            icon: "rectangle.stack",
             isSelected: false,
-            isEnabled: !worktree.isPrunable
+            isEnabled: !worktree.isPrunable,
+            isProminent: worktree.isCurrent
         ) {
             open(.claude)
         } badge: {
@@ -465,22 +429,43 @@ private struct StashSidebarRow: View {
     }
 }
 
+/// A section's title, its count and a chevron. Click it to fold or
+/// unfold the section.
 private struct SidebarSectionHeader: View {
     let title: String
+    let count: Int
     @Binding var isExpanded: Bool
+    @State private var hovered = false
 
     var body: some View {
+        let look = Look.shared
         Button {
             isExpanded.toggle()
         } label: {
-            Text(title)
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(look.secondary)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 11))
+                        .monospacedDigit()
+                        .foregroundStyle(look.faint)
+                }
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(hovered ? look.secondary : look.faint)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+            }
+            .padding(.horizontal, 6)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(isExpanded ? "Collapse \(title)" : "Expand \(title)")
+        .onHover { hovered = $0 }
+        .help(isExpanded ? "Hide the \(title.lowercased())" : "Show the \(title.lowercased())")
     }
 }
 
@@ -554,25 +539,24 @@ private struct ReferenceFolderRow: View {
 
     var body: some View {
         Button(action: toggle) {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Look.shared.faint)
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                    .animation(.easeOut(duration: 0.15), value: isExpanded)
                     .frame(width: 16)
                 Text(node.name)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Look.shared.secondary)
                     .lineLimit(1)
                 Spacer()
             }
-            .font(.body)
-            .foregroundStyle(.secondary)
             .padding(.leading, indent)
             .contentShape(Rectangle())
         }
         .buttonStyle(GitForkHoverButtonStyle(.compactRow(isSelected: false)))
         .help(isExpanded ? "Collapse \(node.path)" : "Expand \(node.path)")
         .modifier(BranchDropTarget(prefix: node.kind == .localBranch ? node.path : nil))
-        .listRowBackground(Color.clear)
     }
 }
 
@@ -630,21 +614,13 @@ private struct ReferenceSidebarRow: View {
             isSelected: store.selectedReference == reference,
             isProminent: reference.isCurrent,
             indent: indent,
-            dragPayload: reference.kind == .localBranch ? reference.name : nil
+            dragPayload: reference.kind == .localBranch ? reference.name : nil,
+            doubleClick: reference.kind == .tag || reference.isCurrent ? nil : { store.checkout(reference) }
         ) {
             store.selectReference(reference)
         } badge: {
             if reference.isCurrent {
-                Text("CURRENT")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(GitForkTheme.green)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(GitForkTheme.green.opacity(0.13), in: Capsule())
-                    .overlay {
-                        Capsule()
-                            .strokeBorder(GitForkTheme.green.opacity(0.35), lineWidth: 1)
-                    }
+                Text("current")
             }
         }
         .help(reference.name)
@@ -865,15 +841,11 @@ private struct EmptySidebarRow: View {
 
     var body: some View {
         Text(title)
-            .font(.callout)
-            .foregroundStyle(.tertiary)
-            .padding(.leading, 26)
+            .font(.system(size: 11))
+            .foregroundStyle(Look.shared.faint)
+            .padding(.leading, 28)
+            .padding(.vertical, 3)
     }
-}
-
-private enum SidebarRowSize {
-    case regular
-    case compact
 }
 
 private struct SidebarRow<Badge: View>: View {
@@ -882,13 +854,15 @@ private struct SidebarRow<Badge: View>: View {
     let isSelected: Bool
     let isEnabled: Bool
     let isProminent: Bool
-    let size: SidebarRowSize
     let indent: CGFloat
     /// Makes the row draggable, carrying this string, such as a local branch
     /// name dropped on a `BranchDropTarget`.
     let dragPayload: String?
+    /// What a double-click does, if anything.
+    let doubleClick: (() -> Void)?
     let action: () -> Void
     @ViewBuilder let badge: () -> Badge
+    @State private var waitingForSecondClick: Task<Void, Never>?
 
     init(
         title: String,
@@ -896,9 +870,9 @@ private struct SidebarRow<Badge: View>: View {
         isSelected: Bool,
         isEnabled: Bool = true,
         isProminent: Bool = false,
-        size: SidebarRowSize = .compact,
         indent: CGFloat = 0,
         dragPayload: String? = nil,
+        doubleClick: (() -> Void)? = nil,
         action: @escaping () -> Void,
         @ViewBuilder badge: @escaping () -> Badge
     ) {
@@ -907,9 +881,9 @@ private struct SidebarRow<Badge: View>: View {
         self.isSelected = isSelected
         self.isEnabled = isEnabled
         self.isProminent = isProminent
-        self.size = size
         self.indent = indent
         self.dragPayload = dragPayload
+        self.doubleClick = doubleClick
         self.action = action
         self.badge = badge
     }
@@ -917,28 +891,30 @@ private struct SidebarRow<Badge: View>: View {
     var body: some View {
         clickableRow
             .disabled(!isEnabled)
-            .background {
-                if isProminent && !isSelected {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(GitForkTheme.green.opacity(0.10))
-                }
+            .help(doubleClick == nil ? "Show \(title)" : "Show the commits of \(title). Double-click to switch to it.")
+            .onDisappear {
+                waitingForSecondClick?.cancel()
+                waitingForSecondClick = nil
             }
-            .overlay {
-                if isProminent && !isSelected {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .strokeBorder(GitForkTheme.green.opacity(0.32), lineWidth: 1)
-                }
-            }
-            .overlay(alignment: .leading) {
-                if isProminent {
-                    Capsule()
-                        .fill(GitForkTheme.green)
-                        .frame(width: 3)
-                        .padding(.vertical, 4)
-                }
-            }
-            .help("Show \(title)")
-            .listRowBackground(Color.clear)
+    }
+
+    /// A click leaves this list, so a second click would land somewhere
+    /// else. A row with a double-click therefore waits a moment before it
+    /// does what a click does.
+    private func click() {
+        guard let doubleClick else { return action() }
+        if let waiting = waitingForSecondClick {
+            waiting.cancel()
+            waitingForSecondClick = nil
+            doubleClick()
+            return
+        }
+        waitingForSecondClick = Task {
+            try? await Task.sleep(for: .seconds(min(NSEvent.doubleClickInterval, 0.3)))
+            guard !Task.isCancelled else { return }
+            waitingForSecondClick = nil
+            action()
+        }
     }
 
     /// A `Button` tracks the mouse from press to release and never lets a drag
@@ -949,7 +925,7 @@ private struct SidebarRow<Badge: View>: View {
     private var clickableRow: some View {
         if let dragPayload {
             GitForkHoverButtonBody(label: label, isPressed: false, variant: variant)
-                .onTapGesture(perform: action)
+                .onTapGesture(perform: click)
                 .draggable(dragPayload) {
                     Label(dragPayload, systemImage: icon)
                         .padding(.horizontal, 8)
@@ -960,7 +936,7 @@ private struct SidebarRow<Badge: View>: View {
                 .accessibilityAddTraits(.isButton)
                 .accessibilityAction { action() }
         } else {
-            Button(action: action) {
+            Button(action: click) {
                 label
             }
             .buttonStyle(GitForkHoverButtonStyle(variant))
@@ -968,28 +944,26 @@ private struct SidebarRow<Badge: View>: View {
     }
 
     private var variant: GitForkHoverButtonVariant {
-        size == .regular
-            ? .row(isSelected: isSelected)
-            : .compactRow(isSelected: isSelected)
+        .compactRow(isSelected: isSelected)
     }
 
     private var label: some View {
-        HStack(spacing: size == .regular ? 9 : 7) {
+        let look = Look.shared
+        return HStack(spacing: 7) {
             Image(systemName: icon)
-                .frame(width: size == .regular ? 20 : 16)
-                .foregroundStyle(
-                    isProminent
-                        ? GitForkTheme.green
-                        : isSelected ? GitForkTheme.accent : .secondary
-                )
+                .font(.system(size: 12))
+                .frame(width: 16)
+                .foregroundStyle(isProminent ? look.accent : look.secondary)
             Text(title)
+                .font(.system(size: 12.5, weight: isProminent ? .semibold : .regular))
                 .lineLimit(1)
-            Spacer()
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
             badge()
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .font(.system(size: 11))
+                .monospacedDigit()
+                .foregroundStyle(look.secondary)
         }
-        .font(size == .regular ? .title3 : .body)
         .padding(.leading, indent)
         .contentShape(Rectangle())
     }

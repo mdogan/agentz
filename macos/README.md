@@ -62,18 +62,24 @@ You can also drag a session from the list onto the terminal. With one pane, it g
 
 **View › Changes Panel** (⇧⌘C), or the ± button at the right end of the title bar, shows the Changes panel on the right: the staged and unstaged changes in the repository of the shown session, or with no session shown, of the one picked in the list. It follows the sessions; there is no other way to pick a repository.
 
-- At its top: the branch (click it to switch to another), the repository, a button that opens its git tab (see below), and refresh.
-- The staged and unstaged files. Stage or unstage a file with its + or − button, several with ↩ and ⌫, or all of them; right-click to discard. A file in a merge conflict can be resolved with ours or theirs, or marked resolved.
+- At its top: the branch (click it to switch to another; see below), the repository, a button that opens its git tab (see below), and refresh.
+- The staged and unstaged files, as a folder tree. Hover over a file for its buttons: + or − stages or unstages it. ↩ and ⌫ do the same for the selected files, and **Stage All** and **Unstage All** for all of them; right-click to discard. A file in a merge conflict can be resolved with ours or theirs, or marked resolved.
 - To see a file's diff, click the button next to its + or −, or double-click the file: the repository's git tab opens with that diff, where you can also stage single hunks or lines. Space opens the diff side by side in a window of its own.
 - **Commit** (⌘↩) commits the staged files, also as an amend or signed.
 - It reads the repository again by itself when files in it or in its git folder change, at most once a second, and only while the panel is shown and the window can be seen. Its own reads write nothing in `.git`.
 
 **Git › Open Git** (⌥⌘G) opens a git tab for the shown session's repository: GitFork's git client, moved into agentz, in a pane like a terminal. Right-click a session and pick **Open Git Here** for its repository, or use **Git** at the top of the list. A git tab is a session like the others: it has a row in the list, named after its branch, comes back on the next launch, and closes with ⌘W. Unlike the others, it always shows on its own, never in a split: ⌘D and ⇧⌘D do nothing while it shows, and opening it from a split hides the split, which waits as it is. There is one per worktree; opening it again shows the one there is. While a git tab is on screen, the Changes panel stays hidden, since the git tab has the changes itself; it comes back after.
 
-- At its top: open the repository in Zed or Finder, fetch, pull, push, new branch and refresh; where HEAD is (click it to switch to another branch); and the repository.
-- On the left: the changes, all commits, unreachable commits, and the local and remote branches, tags, stashes and worktrees. Right-click one for what it can do: switch to a branch, rename, delete (also on the remote), push, or move it into a folder; apply or drop a stash; delete or prune a worktree, or start a session or a git tab in it.
-- In the middle: the history, with its graph and a search, or the changes, as in the Changes panel, with stashing. On the right: the picked commit's files and diffs, or the picked file's diff, to stage, unstage or discard a hunk, or select lines and stage, unstage or discard just those. A file in a merge conflict shows its conflicts, to resolve by hand.
+- At its top: where HEAD is (click it to switch to another branch); the tabs **Changes**, **History** and **Branches**, which pick what the left side shows; fetch, pull, push, new branch and refresh; open the repository in Zed or Finder; and the repository.
+- **Changes**: the changes, as in the Changes panel, with stashing. **History**: the commits, with their graph and a search. **Branches**: the local and remote branches, tags, stashes and worktrees, and the unreachable commits. Click a branch, tag or stash there to see its commits in History; the branch's name then shows next to the search, and a click on it shows all commits again. Double-click a branch to switch to it. Right-click one for what it can do: switch to a branch, rename, delete (also on the remote), push, or move it into a folder; apply or drop a stash; delete or prune a worktree, or start a session or a git tab in it.
+- On the right: the picked commit's files and diffs, or the picked file's diff, to stage, unstage or discard a hunk, or select lines and stage, unstage or discard just those. A file in a merge conflict shows its conflicts, to resolve by hand.
 - It reads the repository again when files change, like the Changes panel, while it is in a pane on screen. It has its own view of the repository: what it shows does not change the Changes panel.
+
+**Git › Switch Branch…** (⌘B), or a click on the branch at the top of the Changes panel or the git tab, picks a branch to switch to: type to narrow the list, ↑ ↓ to pick, ↩ or a double-click to switch. In a git tab, ⌘↩ shows the picked branch's commits instead. Switching to a remote branch switches to the local branch of that name, and makes it first if there is none.
+
+Uncommitted changes come along to the other branch, as with `git switch`, as long as that branch does not change the same files. If it does, agentz asks first: **Stash and Switch** puts all your changes in a stash, untracked files too, and switches. The stash stays until you apply or drop it, under Branches in the git tab.
+
+While an agent works in that worktree, here or in another app, agentz asks before it switches: the agent's files would change under it, and it would not be told. An agent that waits for you does not count, and neither do other worktrees of the repo.
 
 The **Git** menu works on the git tab in the focused pane, or else on the Changes panel's repository, with GitFork's keys where agentz has no other use for them. **Git › Git Command Log** (⇧⌘L) lists every git command they ran and how each went.
 

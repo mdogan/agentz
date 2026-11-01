@@ -5,13 +5,6 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     case history = "All Commits"
 
     var id: String { rawValue }
-
-    var icon: String {
-        switch self {
-        case .changes: "square.and.pencil"
-        case .history: "clock.arrow.circlepath"
-        }
-    }
 }
 
 enum CommitHistoryScope: Equatable, Sendable {
@@ -652,6 +645,32 @@ struct UnmergedBranchDeletionError: LocalizedError, Sendable {
     var errorDescription: String? {
         message
     }
+}
+
+/// Raised when `git switch` refuses because the other branch's files would
+/// overwrite uncommitted changes or untracked files. Stashing them makes the
+/// switch possible, so the UI asks about that instead of showing an error.
+struct CheckoutOverwriteError: LocalizedError, Sendable {
+    let files: [String]
+    let message: String
+
+    var errorDescription: String? {
+        message
+    }
+}
+
+/// A switch that waits for the user to say what to do.
+struct PendingCheckout: Equatable, Sendable {
+    enum Reason: Equatable, Sendable {
+        /// Agents are working in the worktree, so its files would change
+        /// under them. These describe them, for the user to read.
+        case agentsWorking([String])
+        /// Git refused: it would overwrite these changed files.
+        case overwrites([String])
+    }
+
+    let reference: GitReference
+    let reason: Reason
 }
 
 /// Raised when `git worktree remove` refuses because the worktree holds

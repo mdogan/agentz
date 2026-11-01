@@ -1009,6 +1009,25 @@ struct GitClient: Sendable {
     }
 
     func checkout(at root: URL, reference: GitReference) async throws {
+        do {
+            try await switchTo(reference, at: root)
+        } catch let error as GitOperationError {
+            guard let files = Self.overwrittenFiles(in: error.message) else { throw error }
+            throw CheckoutOverwriteError(files: files, message: error.message)
+        }
+    }
+
+    /// The files `git switch` said it would overwrite, or nil when that is
+    /// not why it failed. They are the lines with a tab in front.
+    static func overwrittenFiles(in message: String) -> [String]? {
+        guard message.contains("would be overwritten by") else { return nil }
+        return message
+            .split(separator: "\n")
+            .filter { $0.hasPrefix("\t") }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    private func switchTo(_ reference: GitReference, at root: URL) async throws {
         if reference.kind == .remoteBranch {
             let localName = reference.name.split(separator: "/").dropFirst().joined(separator: "/")
             let localRef = "refs/heads/\(localName)"

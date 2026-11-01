@@ -1141,6 +1141,29 @@ final class Workspace {
         return rows.first { $0.key == key }?.cwd
     }
 
+    /// The agents working right now in the worktree at `root`, here or in
+    /// another app, e.g. `Claude “Fix the parser”`. An agent that waits for
+    /// the user does not count, and neither does a shell's own command. A
+    /// worktree inside `root` is a place of its own.
+    func agentsWorking(in root: String) -> [String] {
+        let root = realPath(root) ?? root
+        func isThere(_ folder: String) -> Bool {
+            let top = projectRoot(folder)
+            return (realPath(top) ?? top) == root
+        }
+        var agents = tabs.compactMap { r -> String? in
+            guard r.isBusy, r.key.agent != .git, r.key.agent != .shell || r.linked != nil,
+                  isThere(folder(of: r)) else { return nil }
+            let title = rows.first { r.shows($0.key) }?.title ?? r.title
+            return "\((r.linked ?? r.key).agent.displayName) “\(title)”"
+        }
+        for (key, running) in elsewhere where running.busy && !tabs.contains(where: { $0.shows(key) }) {
+            guard let session = sessions.first(where: { $0.key == key }), isThere(session.cwd) else { continue }
+            agents.append("\(key.agent.displayName) “\(session.title)” in \(running.appName)")
+        }
+        return agents.sorted()
+    }
+
     /// Where the tab works now: a shell's current folder, else where its
     /// agent started.
     private func folder(of r: Tab) -> String {
@@ -1457,6 +1480,9 @@ final class Workspace {
         // Opening another worktree there starts a session in it.
         session.store.startSession = { [weak self] agent, folder in
             if agent == .git { self?.openGit(folder.path) } else { self?.newSession(agent, cwd: folder.path) }
+        }
+        session.store.agentsWorking = { [weak self] root in
+            self?.agentsWorking(in: root.path) ?? []
         }
         let tab = Tab(key: key, content: session, cwd: root, title: "Git", resumed: false)
         makeRoom(alone: true)

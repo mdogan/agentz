@@ -42,6 +42,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         git.store.startSession = { [weak workspace] agent, folder in
             workspace?.newSession(agent, cwd: folder.path)
         }
+        git.store.agentsWorking = { [weak workspace] root in
+            workspace?.agentsWorking(in: root.path) ?? []
+        }
         let gitView = NSHostingController(rootView: GitPanel(model: git, look: look) { [weak workspace, weak git] change in
             if let root = git?.store.repositoryURL { workspace?.openGit(root.path, showing: change) }
         })

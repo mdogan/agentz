@@ -552,6 +552,7 @@ final class SmokeTest {
         await quickTerminal(tmp)
         await gitPanel(tmp)
         await gitTab(tmp)
+        await gitSwitchWithAgent(tmp)
         finish(nil)
     }
 
@@ -787,6 +788,8 @@ final class SmokeTest {
             ws.elsewhere[key]?.busy == true && ws.rows.contains { $0.key == key }
         }, "\(ws.elsewhere)")
         let row = ws.rows.first { $0.key == key }
+        let working = ws.agentsWorking(in: tmp)
+        check("it counts as an agent working in its folder", row.map { row in working.contains { $0.contains(row.title) } } ?? false, "\(working)")
         check("its row has the branch and the pull request", row?.branch == "fix/smoke" && row?.pr?.number == 7,
             "\(String(describing: row?.branch)) \(String(describing: row?.pr))")
 
@@ -1043,7 +1046,7 @@ final class SmokeTest {
         let repo = tmp + "/tab"
         try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
         for args in [["init", "-q", "-b", "main"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
-                     ["commit", "-q", "--allow-empty", "-m", "first"]] {
+                     ["commit", "-q", "--allow-empty", "-m", "first"], ["branch", "other"]] {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             p.arguments = ["-C", repo] + args
@@ -1081,6 +1084,33 @@ final class SmokeTest {
         snapshot("git-tab")
         ws.openGit(repo + "/.")
         check("one git tab per worktree", ws.tabs.filter { $0.key.agent == .git }.count == 1 && ws.current == key)
+
+        // In the Branches tab, a click on a branch shows its commits after
+        // a moment, and a double-click switches to it. The row of `other`,
+        // under the bar, the section's header and `main`:
+        git.store.showsReferences = true
+        _ = await wait(0.5) { false }
+        let other = NSPoint(x: 120, y: 37 + 6 + 29 + 23 + 11)
+        click(git.paneView, at: other)
+        check("a click on a branch waits for a second one", git.store.showsReferences)
+        check("then shows the branch's commits, without switching to it", await wait(3) {
+            !git.store.showsReferences && git.store.selectedReference?.name == "other" && git.store.operationLabel == nil
+        } && git.store.branch == "main", "\(git.store.selectedReference?.name ?? "none") on \(git.store.branch)")
+        git.store.selectReference(nil)
+        _ = await wait(3) { git.store.operationLabel == nil }
+        git.store.showsReferences = true
+        _ = await wait(0.5) { false }
+        click(git.paneView, at: other)
+        click(git.paneView, at: other)
+        check("a double-click switches to it", await wait(5) {
+            git.store.branch == "other" && git.store.operationLabel == nil
+        }, git.store.branch)
+        check("and the Branches tab stays", git.store.showsReferences)
+        if let main = git.store.references.first(where: { $0.name == "main" }) { git.store.checkout(main) }
+        _ = await wait(5) { git.store.branch == "main" && git.store.operationLabel == nil }
+        git.store.selectReference(nil)
+        _ = await wait(3) { git.store.operationLabel == nil }
+
         FileManager.default.createFile(atPath: repo + "/wip.txt", contents: Data("wip\n".utf8))
         check("it sees new files", await wait(6) { !git.store.changes.isEmpty })
         git.store.stash(message: "wip")
@@ -1148,6 +1178,75 @@ final class SmokeTest {
 
         check("outside a repository there is none", !ws.openGit(tmp) && !ws.tabs.contains { $0.key == SessionKey(.git, tmp) })
         ws.close(shell.key)
+    }
+
+    /// Switching a worktree's branch asks first while an agent works there.
+    private func gitSwitchWithAgent(_ tmp: String) async {
+        let ws = workspace
+        let repo = tmp + "/agents"
+        let nestedPath = repo + "/.claude/worktrees/nested"
+        try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+        for args in [["init", "-q", "-b", "main"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["commit", "-q", "--allow-empty", "-m", "first"], ["branch", "other"],
+                     ["worktree", "add", "-q", "-b", "nested", nestedPath]] {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = ["-C", repo] + args
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+        }
+        let root = realPath(repo) ?? repo
+        let tabsBefore = ws.tabs.map(\.key)
+        ws.openGit(repo)
+        guard let git = ws.currentTab?.git else { return check("a git tab to switch in", false) }
+        let store = git.store
+        _ = await wait(8) { store.branch == "main" && store.operationLabel == nil && !store.references.isEmpty }
+        ws.start(.claude, resume: nil, cwd: repo, title: "Busy here")
+        guard let here = ws.currentTab else { return check("an agent in the worktree", false) }
+        ws.start(.claude, resume: nil, cwd: nestedPath, title: "Busy nested")
+        guard let nested = ws.currentTab else { return check("an agent in a nested worktree", false) }
+        ws.newSession(.shell, cwd: repo)
+        guard let shell = ws.currentTab else { return check("a shell in the worktree", false) }
+        _ = await wait(5) { shell.terminal?.pid != nil }
+
+        check("agents that wait for the user don't count", ws.agentsWorking(in: root).isEmpty, "\(ws.agentsWorking(in: root))")
+        shell.turns.receive(.progress(true))
+        ws.tick()
+        check("a shell's own command doesn't count", ws.agentsWorking(in: root).isEmpty, "\(ws.agentsWorking(in: root))")
+        shell.linked = SessionKey(.claude, "agent-in-shell")
+        check("an agent inside a shell counts", ws.agentsWorking(in: root).first?.hasPrefix("Claude") == true, "\(ws.agentsWorking(in: root))")
+        shell.linked = nil
+        shell.turns.receive(.progress(false))
+        ws.tick()
+        nested.turns.receive(.progress(true))
+        ws.tick()
+        check("an agent in a worktree inside it doesn't count", ws.agentsWorking(in: root).isEmpty, "\(ws.agentsWorking(in: root))")
+        check("but counts for that worktree", ws.agentsWorking(in: realPath(nestedPath) ?? nestedPath) == ["Claude “Busy nested”"],
+              "\(ws.agentsWorking(in: nestedPath))")
+        here.turns.receive(.progress(true))
+        ws.tick()
+        let agents = ws.agentsWorking(in: root)
+        check("a working agent counts", agents == ["Claude “Busy here”"], "\(agents)")
+
+        guard let other = store.references.first(where: { $0.name == "other" }) else {
+            return check("a branch to switch to", false, "\(store.references.map(\.name))")
+        }
+        store.checkout(other)
+        check("switching asks first", store.pendingCheckout == PendingCheckout(reference: other, reason: .agentsWorking(agents)) && store.branch == "main",
+              "\(String(describing: store.pendingCheckout)) on \(store.branch)")
+        store.cancelCheckout()
+        here.turns.receive(.progress(false))
+        nested.turns.receive(.progress(false))
+        ws.tick()
+        store.checkout(other)
+        check("once it is done, it just switches", await wait(5) {
+            store.branch == "other" && store.operationLabel == nil
+        } && store.pendingCheckout == nil, "\(store.branch) \(String(describing: store.pendingCheckout))")
+        for r in ws.tabs where !tabsBefore.contains(r.key) {
+            ws.close(r.key)
+        }
     }
 
     private func snapshot(_ name: String? = nil) {

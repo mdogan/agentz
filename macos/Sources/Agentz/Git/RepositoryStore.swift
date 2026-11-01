@@ -27,6 +27,10 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var operationLabel: String?
     @Published var selectedSection: WorkspaceSection = .history
+    /// The git tab lists the branches, remotes, tags, stashes and worktrees
+    /// in place of the changes or the history. Picking one of them, or the
+    /// changes or a history, ends it.
+    @Published var showsReferences = false
     @Published private(set) var historyScope: CommitHistoryScope = .all
     @Published var selectedCommit: GitCommit?
     @Published private(set) var selectedChange: WorkingChange?
@@ -44,6 +48,9 @@ final class RepositoryStore: ObservableObject {
     }
     @Published var errorMessage: String?
     @Published private(set) var branchPendingForceDelete: GitReference?
+    /// A switch that waits for the user: agents work in the worktree, or
+    /// git refused because of uncommitted changes.
+    @Published private(set) var pendingCheckout: PendingCheckout?
     @Published private(set) var worktreePendingForceDelete: GitWorktree?
     @Published private(set) var pendingPushPlan: GitPushPlan?
     @Published private(set) var pendingBranchMove: GitBranchMove?
@@ -61,6 +68,9 @@ final class RepositoryStore: ObservableObject {
     /// Starts a session of the agent in a folder, e.g. in another
     /// worktree. The panel's host sets it.
     var startSession: ((Agent, URL) -> Void)?
+    /// The agents working in a worktree right now, to warn before its files
+    /// change under them. Described for the user to read.
+    var agentsWorking: ((URL) -> [String])?
 
     private let client = GitClient()
     private var loadGeneration = 0
@@ -219,6 +229,7 @@ final class RepositoryStore: ObservableObject {
 
             self.selectedStash = nil
             self.selectedSection = .history
+            self.showsReferences = false
             if let loaded = self.commits.first(where: { $0.hash == commit.hash }) {
                 if !self.filteredCommits.contains(loaded) {
                     self.searchText = ""
@@ -282,6 +293,7 @@ final class RepositoryStore: ObservableObject {
 
     func selectChanges() {
         cancelHistoryPagination()
+        showsReferences = false
         selectedSection = .changes
         historyScope = .all
         selectedReference = nil
@@ -475,6 +487,7 @@ final class RepositoryStore: ObservableObject {
     func selectReference(_ reference: GitReference?) {
         guard let root = repositoryURL else { return }
         cancelHistoryPagination()
+        showsReferences = false
         _ = startOperation("Loading \(reference?.name ?? "history")") {
             self.selectedStash = nil
             self.selectedReference = reference
@@ -487,6 +500,7 @@ final class RepositoryStore: ObservableObject {
     func selectLostAndDanglingCommits() {
         guard let root = repositoryURL else { return }
         cancelHistoryPagination()
+        showsReferences = false
         _ = startOperation("Loading unreachable commits") {
             self.selectedStash = nil
             self.selectedReference = nil
@@ -519,6 +533,7 @@ final class RepositoryStore: ObservableObject {
         }
         cancelHistoryPagination()
         let revision = pathHistoryRevision
+        showsReferences = false
         _ = startOperation("Loading history for \(path)") {
             self.selectedStash = nil
             self.selectedSection = .history
@@ -530,6 +545,7 @@ final class RepositoryStore: ObservableObject {
     func selectStash(_ stash: GitStash) {
         guard let root = repositoryURL else { return }
         cancelHistoryPagination()
+        showsReferences = false
         _ = startOperation("Loading \(stash.displayName)") {
             self.selectedStash = stash
             self.selectedReference = nil
@@ -813,12 +829,62 @@ final class RepositoryStore: ObservableObject {
         pendingPushPlan = nil
     }
 
+    /// Switches to `reference`. With agents working in the worktree,
+    /// `pendingCheckout` asks the user first. Changes git can carry along
+    /// come along; if it would have to overwrite them, it asks as well.
     func checkout(_ reference: GitReference) {
-        mutate("Checking out \(reference.name)") { root in
-            try await self.client.checkout(at: root, reference: reference)
+        guard !reference.isCurrent else { return }
+        if let root = repositoryURL, let agents = agentsWorking?(root), !agents.isEmpty {
+            pendingCheckout = PendingCheckout(reference: reference, reason: .agentsWorking(agents))
+            return
+        }
+        performCheckout(reference)
+    }
+
+    /// The user wants the switch even though agents work in the worktree.
+    func checkoutDespiteAgents() {
+        guard let pending = pendingCheckout, case .agentsWorking = pending.reason, !isLoading else { return }
+        pendingCheckout = nil
+        performCheckout(pending.reference)
+    }
+
+    private func performCheckout(_ reference: GitReference) {
+        mutate("Switching to \(reference.name)") { root in
+            do {
+                try await self.client.checkout(at: root, reference: reference)
+            } catch let error as CheckoutOverwriteError {
+                self.pendingCheckout = PendingCheckout(reference: reference, reason: .overwrites(error.files))
+                return
+            }
             self.selectedReference = nil
             self.historyScope = .all
         }
+    }
+
+    /// Puts all changes in a stash, untracked files too, then does the
+    /// switch git refused. The stash stays, to apply wherever the user wants.
+    func stashAndCheckout() {
+        guard let pending = pendingCheckout, case .overwrites = pending.reason, !isLoading else { return }
+        pendingCheckout = nil
+        let reference = pending.reference
+        let message = "Before switching to \(reference.name)"
+        mutate("Stashing and switching to \(reference.name)") { root in
+            try await self.client.stash(at: root, message: message, scope: .all)
+            do {
+                try await self.client.checkout(at: root, reference: reference)
+            } catch {
+                throw GitOperationError(
+                    command: "git switch \(reference.name)",
+                    message: "\(error.localizedDescription)\n\nYour changes are in the stash “\(message)”."
+                )
+            }
+            self.selectedReference = nil
+            self.historyScope = .all
+        }
+    }
+
+    func cancelCheckout() {
+        pendingCheckout = nil
     }
 
     func createBranch(named name: String) {
@@ -1470,6 +1536,7 @@ final class RepositoryStore: ObservableObject {
         commitMessage = ""
         amend = false
         branchPendingForceDelete = nil
+        pendingCheckout = nil
         worktreePendingForceDelete = nil
         pendingPushPlan = nil
         isConfirmingPush = false

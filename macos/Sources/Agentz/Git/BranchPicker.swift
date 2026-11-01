@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum BranchPickerSearch {
@@ -53,9 +54,14 @@ enum BranchPickerNavigation {
     }
 }
 
+/// Picks a branch to switch to. Where commits can be shown, it can also
+/// show the picked branch's commits instead.
 struct BranchPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: RepositoryStore
+    let showsCommits: Bool
+    /// It acted and closes: Return can reach both the field and the button.
+    @State private var isDone = false
     @FocusState private var isSearchFocused: Bool
     @State private var searchText = ""
     @State private var selectedBranch: GitReference?
@@ -68,23 +74,20 @@ struct BranchPickerSheet: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.title2)
-                        .foregroundStyle(GitForkTheme.accent)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Select Branch")
-                            .font(.title2.weight(.semibold))
-                        Text("Choose a local or remote branch to see its commits.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        Text("Switch Branch")
+                            .font(.headline)
+                        Text("Pick a local or remote branch to switch to.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Look.shared.secondary)
                     }
                 }
 
                 TextField("Search branches", text: $searchText)
                     .focused($isSearchFocused)
                     .onSubmit {
-                        showSelectedBranch()
+                        switchToSelectedBranch()
                     }
                     .onKeyPress(
                         keys: [.escape, .upArrow, .downArrow]
@@ -106,26 +109,23 @@ struct BranchPickerSheet: View {
 
             Group {
                 if branches.isEmpty {
-                    ContentUnavailableView(
+                    GitPlaceholder(
                         searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            ? "No Branches"
-                            : "No Matching Branches",
-                        systemImage: "arrow.triangle.branch",
-                        description: Text(
-                            searchText.isEmpty
-                                ? "This repository has no branches to choose from."
-                                : "No branch name contains “\(searchText)”."
-                        )
+                            ? "This repository has no branches to choose from."
+                            : "No branch name contains “\(searchText)”."
                     )
                 } else {
                     ScrollViewReader { proxy in
                         ScrollView {
-                            LazyVStack(spacing: 4) {
+                            LazyVStack(spacing: 2) {
                                 ForEach(branches) { branch in
                                     let isSelected = selectedBranch?.fullName == branch.fullName
 
                                     Button {
-                                        show(branch)
+                                        selectedBranch = branch
+                                        if NSApp.currentEvent?.clickCount == 2 {
+                                            switchToSelectedBranch()
+                                        }
                                     } label: {
                                         BranchPickerRow(
                                             branch: branch,
@@ -137,14 +137,14 @@ struct BranchPickerSheet: View {
                                             .row(isSelected: isSelected)
                                         )
                                     )
-                                    .help("Show commits on \(branch.name)")
+                                    .help("Double-click to switch to \(branch.name)")
                                     .accessibilityAddTraits(
                                         isSelected ? .isSelected : []
                                     )
                                     .id(branch.fullName)
                                 }
                             }
-                            .padding(12)
+                            .padding(8)
                         }
                         .onChange(of: selectedBranch) { _, branch in
                             guard let branch else { return }
@@ -162,12 +162,15 @@ struct BranchPickerSheet: View {
             HStack(spacing: 12) {
                 Spacer()
 
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     Text("↑↓ Navigate")
-                    Text("↩ Show Commits")
-                    Text("esc Close")
+                    if showsCommits {
+                        Text("⌘↩ Commits")
+                    }
                 }
-                .font(.caption)
+                .lineLimit(1)
+                .fixedSize()
+                .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
 
                 Button("Cancel", role: .cancel) {
@@ -175,15 +178,36 @@ struct BranchPickerSheet: View {
                 }
                 .keyboardShortcut(.cancelAction)
 
-                Button("Show Commits") {
-                    showSelectedBranch()
+                if showsCommits {
+                    Button("Show Commits") {
+                        showSelectedBranch()
+                    }
+                    .help("Show the commits of the picked branch, without switching to it (⌘↩)")
+                    .disabled(selectedBranch == nil)
+                    // A button with this key looks like the main one, so a
+                    // hidden one has it: Switch is the main one.
+                    .background {
+                        Button("", action: showSelectedBranch)
+                            .keyboardShortcut(.return, modifiers: .command)
+                            .disabled(selectedBranch == nil)
+                            .opacity(0)
+                    }
+                }
+
+                Button("Switch") {
+                    switchToSelectedBranch()
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(selectedBranch == nil)
+                .help(
+                    selectedBranch?.isCurrent == true
+                        ? "This is the current branch"
+                        : "Switch to the picked branch"
+                )
+                .disabled(selectedBranch == nil || selectedBranch?.isCurrent == true)
             }
             .padding(16)
         }
-        .frame(width: 620, height: 500)
+        .frame(width: 520, height: 420)
         .onAppear {
             reconcileSelection()
             isSearchFocused = true
@@ -213,13 +237,18 @@ struct BranchPickerSheet: View {
     }
 
     private func showSelectedBranch() {
-        guard let selectedBranch else { return }
-        show(selectedBranch)
+        guard let selectedBranch, !isDone else { return }
+        isDone = true
+        dismiss()
+        store.selectReference(selectedBranch)
     }
 
-    private func show(_ branch: GitReference) {
+    /// On the current branch there is nothing to do, so it only closes.
+    private func switchToSelectedBranch() {
+        guard let selectedBranch, !isDone else { return }
+        isDone = true
         dismiss()
-        store.selectReference(branch)
+        store.checkout(selectedBranch)
     }
 }
 
@@ -228,38 +257,35 @@ private struct BranchPickerRow: View {
     let isSelected: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: branch.isCurrent ? "checkmark.circle.fill" : branch.kind.icon)
-                .font(.title3)
-                .foregroundStyle(branch.isCurrent ? GitForkTheme.green : GitForkTheme.accent)
-                .frame(width: 24)
+        HStack(spacing: 7) {
+            Image(systemName: branch.kind.icon)
+                .font(.system(size: 12))
+                .foregroundStyle(branch.isCurrent ? GitForkTheme.accent : Look.shared.secondary)
+                .frame(width: 16)
 
             Text(branch.name)
-                .font(.body.weight(branch.isCurrent ? .semibold : .regular))
-                .foregroundStyle(.primary)
+                .font(.system(size: 12.5, weight: branch.isCurrent ? .semibold : .regular))
                 .lineLimit(1)
                 .truncationMode(.middle)
 
             Spacer()
 
             Text(branch.kind == .localBranch ? "Local" : "Remote")
-                .font(.caption.weight(.medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
 
             if branch.isCurrent {
                 Text("Current")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(GitForkTheme.green)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(GitForkTheme.accent)
             }
 
             if isSelected {
                 Image(systemName: "return")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(GitForkTheme.accent)
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 6)
         .contentShape(Rectangle())
     }
 }

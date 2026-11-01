@@ -143,7 +143,7 @@ struct GitPanel: View {
             GitChangesView(showingStashSheet: $showingStashSheet, stashScope: $stashScope, showsStash: false)
                 .environment(\.openChange) { openGit($0) }
         }
-        .modifier(GitDialogs(store: store, showingStashSheet: $showingStashSheet, stashScope: stashScope))
+        .modifier(GitDialogs(store: store, showingStashSheet: $showingStashSheet, stashScope: stashScope, showsHistory: false))
     }
 
     /// The repository, where HEAD is, and the way to the rest of git.

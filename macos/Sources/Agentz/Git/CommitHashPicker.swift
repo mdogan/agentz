@@ -116,21 +116,18 @@ struct CommitHashPickerSheet: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
-                    Image(systemName: "number.circle")
-                        .font(.title2)
-                        .foregroundStyle(GitForkTheme.accent)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Open Commit")
-                            .font(.title2.weight(.semibold))
+                            .font(.headline)
                         Text("Enter a short or full commit hash.")
-                            .font(.callout)
+                            .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 TextField("Commit hash", text: $searchText)
-                    .font(.body.monospaced())
+                    .font(.system(size: 12, design: .monospaced))
                     .focused($isSearchFocused)
                     .onSubmit {
                         openSelectedCommit()
@@ -214,7 +211,7 @@ struct CommitHashPickerSheet: View {
                     Text("↩ Open")
                     Text("esc Close")
                 }
-                .font(.caption)
+                .font(.system(size: 11))
                 .foregroundStyle(.tertiary)
 
                 Button("Cancel", role: .cancel) {
@@ -255,7 +252,7 @@ struct CommitHashPickerSheet: View {
             VStack(spacing: 10) {
                 ProgressView()
                 Text("Looking up \(typedHash ?? searchText)…")
-                    .font(.callout)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
         case let .found(commit):
@@ -276,7 +273,7 @@ struct CommitHashPickerSheet: View {
                         """,
                         systemImage: "info.circle"
                     )
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
                 }
@@ -354,12 +351,12 @@ private struct CommitHashPickerRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Text(commit.shortHash)
-                .font(.body.monospaced())
+                .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(GitForkTheme.accent)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(commit.subject)
-                    .font(.body)
+                    .font(.system(size: 12.5))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
 
@@ -368,7 +365,7 @@ private struct CommitHashPickerRow: View {
                     Text("·")
                     Text(commit.date, format: .relative(presentation: .named))
                 }
-                .font(.caption)
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             }
@@ -377,7 +374,7 @@ private struct CommitHashPickerRow: View {
 
             if isSelected {
                 Image(systemName: "return")
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(GitForkTheme.accent)
             }
         }

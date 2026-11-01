@@ -3159,6 +3159,202 @@ struct GitParserTests {
         #expect(searchPath.contains("/usr/local/bin"))
     }
 
+    @Test
+    func readsTheFilesGitWouldOverwriteFromItsMessage() {
+        let message = """
+        error: Your local changes to the following files would be overwritten by checkout:
+        \ta.txt
+        \tsub dir/b.txt
+        Please commit your changes or stash them before you switch branches.
+        error: The following untracked working tree files would be overwritten by checkout:
+        \tc.txt
+        Please move or remove them before you switch branches.
+        Aborting
+        """
+        #expect(GitClient.overwrittenFiles(in: message) == ["a.txt", "sub dir/b.txt", "c.txt"])
+        #expect(GitClient.overwrittenFiles(in: "fatal: 'x' is already used by worktree at '/y'") == nil)
+    }
+
+    /// A repository on `main`, with `feature` changing `a.txt` and adding
+    /// `c.txt`. `b.txt` is the same on both.
+    private func prepareBranches(named name: String) throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GitForkSwitchTests-\(name)-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try configureConflictRepository(at: root)
+        try "one\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "same\n".write(to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "."], at: root)
+        try runGit(["commit", "-m", "first"], at: root)
+        try runGit(["switch", "-c", "feature"], at: root)
+        try "two\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "new\n".write(to: root.appendingPathComponent("c.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "."], at: root)
+        try runGit(["commit", "-m", "second"], at: root)
+        try runGit(["switch", "main"], at: root)
+        return root
+    }
+
+    @MainActor
+    private func openedStore(_ root: URL) async throws -> RepositoryStore {
+        let store = RepositoryStore()
+        store.setMonitoringActive(false)
+        store.openRepository(root)
+        try await settle(store)
+        return store
+    }
+
+    @Test
+    @MainActor
+    func switchingCarriesChangesThatAreNotInTheWay() async throws {
+        let root = try prepareBranches(named: "carry")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "changed\n".write(to: root.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+
+        let store = try await openedStore(root)
+        let feature = try #require(store.references.first { $0.name == "feature" })
+        store.checkout(feature)
+        try await settle(store)
+
+        #expect(store.pendingCheckout == nil)
+        #expect(store.errorMessage == nil)
+        #expect(store.branch == "feature")
+        #expect(store.changes.map(\.path) == ["b.txt"])
+        #expect(store.stashes.isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func switchingAsksBeforeTouchingChangesInTheWayAndCanStashThem() async throws {
+        let root = try prepareBranches(named: "stash")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "local\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "untracked\n".write(to: root.appendingPathComponent("c.txt"), atomically: true, encoding: .utf8)
+
+        let store = try await openedStore(root)
+        let feature = try #require(store.references.first { $0.name == "feature" })
+        store.checkout(feature)
+        try await settle(store)
+
+        #expect(store.errorMessage == nil)
+        #expect(store.branch == "main")
+        #expect(store.pendingCheckout == PendingCheckout(reference: feature, reason: .overwrites(["a.txt", "c.txt"])))
+        #expect(try String(contentsOf: root.appendingPathComponent("a.txt"), encoding: .utf8) == "local\n")
+
+        store.stashAndCheckout()
+        try await settle(store)
+
+        #expect(store.errorMessage == nil)
+        #expect(store.pendingCheckout == nil)
+        #expect(store.branch == "feature")
+        #expect(store.changes.isEmpty)
+        #expect(store.stashes.map(\.displayName) == ["Before switching to feature"])
+        #expect(try String(contentsOf: root.appendingPathComponent("a.txt"), encoding: .utf8) == "two\n")
+    }
+
+    @Test
+    @MainActor
+    func cancellingASwitchLeavesEverythingAsItWas() async throws {
+        let root = try prepareBranches(named: "cancel")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "local\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+
+        let store = try await openedStore(root)
+        let feature = try #require(store.references.first { $0.name == "feature" })
+        store.checkout(feature)
+        try await settle(store)
+        #expect(store.pendingCheckout != nil)
+
+        store.cancelCheckout()
+        try await settle(store)
+
+        #expect(store.pendingCheckout == nil)
+        #expect(store.branch == "main")
+        #expect(store.stashes.isEmpty)
+        #expect(try String(contentsOf: root.appendingPathComponent("a.txt"), encoding: .utf8) == "local\n")
+    }
+
+    @Test
+    @MainActor
+    func switchingAsksFirstWhileAgentsWorkInTheWorktree() async throws {
+        let root = try prepareBranches(named: "agents")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try await openedStore(root)
+        var asked: [URL] = []
+        var agents = ["Claude “Fix it”"]
+        store.agentsWorking = {
+            asked.append($0)
+            return agents
+        }
+        let feature = try #require(store.references.first { $0.name == "feature" })
+
+        // It asks, and nothing happened yet.
+        store.checkout(feature)
+        #expect(!store.isLoading)
+        #expect(asked == [store.repositoryURL])
+        #expect(store.pendingCheckout == PendingCheckout(reference: feature, reason: .agentsWorking(agents)))
+        #expect(store.branch == "main")
+
+        // Stashing is for another question.
+        store.stashAndCheckout()
+        #expect(!store.isLoading)
+        #expect(store.pendingCheckout != nil)
+
+        // Cancel leaves it as it was.
+        store.cancelCheckout()
+        #expect(store.pendingCheckout == nil)
+        #expect(store.branch == "main")
+
+        // Switch Anyway switches.
+        store.checkout(feature)
+        store.checkoutDespiteAgents()
+        try await settle(store)
+        #expect(store.pendingCheckout == nil)
+        #expect(store.branch == "feature")
+
+        // Once the agent is done, there is nothing to ask.
+        agents = []
+        let main = try #require(store.references.first { $0.name == "main" })
+        store.checkout(main)
+        #expect(store.pendingCheckout == nil)
+        try await settle(store)
+        #expect(store.branch == "main")
+    }
+
+    @Test
+    @MainActor
+    func switchAnywayStillAsksAboutChangesInTheWay() async throws {
+        let root = try prepareBranches(named: "both")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "local\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+
+        let store = try await openedStore(root)
+        store.agentsWorking = { _ in ["Claude “Fix it”"] }
+        let feature = try #require(store.references.first { $0.name == "feature" })
+        store.checkout(feature)
+        store.checkoutDespiteAgents()
+        try await settle(store)
+
+        #expect(store.pendingCheckout == PendingCheckout(reference: feature, reason: .overwrites(["a.txt"])))
+        #expect(store.branch == "main")
+        #expect(try String(contentsOf: root.appendingPathComponent("a.txt"), encoding: .utf8) == "local\n")
+    }
+
+    @Test
+    @MainActor
+    func switchingToTheCurrentBranchDoesNothing() async throws {
+        let root = try prepareBranches(named: "current")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try await openedStore(root)
+        let main = try #require(store.references.first { $0.isCurrent })
+        store.checkout(main)
+
+        #expect(!store.isLoading)
+        #expect(store.branch == "main")
+    }
+
     private func runGit(_ arguments: [String], at root: URL) throws {
         _ = try runGitCommand(arguments, at: root)
     }

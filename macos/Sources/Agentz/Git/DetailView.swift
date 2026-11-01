@@ -1,3 +1,4 @@
+import AgentzCore
 import AppKit
 import SwiftUI
 
@@ -140,7 +141,7 @@ struct DetailView: View {
                     focus: { focusedFileID = $0?.id },
                     scrollToTop: { scrollToTopToken = UUID() }
                 )
-                Divider()
+                Rectangle().fill(Look.shared.divider).frame(height: 1)
                 DiffTextView(
                     text: store.diff,
                     parsedDiff: parsedDiff,
@@ -153,7 +154,7 @@ struct DetailView: View {
                     staged: store.selectedChangeIsStaged,
                     diffMode: $changeDiffMode
                 )
-                Divider()
+                Rectangle().fill(Look.shared.divider).frame(height: 1)
                 if change.isConflicted,
                    let conflictDocument = store.conflictDocument {
                     ConflictDocumentView(document: conflictDocument)
@@ -168,10 +169,10 @@ struct DetailView: View {
                     .id(changeDiffMode)
                 }
             } else {
-                ContentUnavailableView(
-                    "No Selection",
-                    systemImage: "doc.text.magnifyingglass",
-                    description: Text("Select a commit or changed file to inspect it.")
+                GitPlaceholder(
+                    store.selectedSection == .changes
+                        ? "Pick a changed file to see its diff."
+                        : "Pick a commit to see what it changed."
                 )
             }
         }
@@ -201,43 +202,41 @@ private struct CommitHeader: View {
     let scrollToTop: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let look = Look.shared
+        VStack(alignment: .leading, spacing: 8) {
             Text(commit.subject)
-                .font(.title2.weight(.semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .textSelection(.enabled)
 
-            HStack(spacing: 10) {
-                IdentityAvatar(name: commit.authorName, initials: commit.initials, size: 22)
+            HStack(spacing: 5) {
+                IdentityAvatar(name: commit.authorName, initials: commit.initials, size: 16)
                 Text(commit.authorName)
-                    .font(.callout.weight(.medium))
+                    .foregroundStyle(look.text)
                 Text("·")
-                    .foregroundStyle(.tertiary)
-                Label {
-                    Text(commit.date, format: .dateTime.year().month().day().hour().minute())
-                } icon: {
-                    Image(systemName: "calendar")
-                }
-                .foregroundStyle(.secondary)
+                    .foregroundStyle(look.faint)
+                Text(commit.date, format: .dateTime.year().month().day().hour().minute())
+                    .help(age(now: Date(), commit.date))
                 CommitSignatureBadge(signature: commit.signature)
             }
-            .font(.callout)
+            .font(.system(size: 11))
+            .foregroundStyle(look.secondary)
 
-            HStack(spacing: 6) {
-                CopyableValue(label: "COMMIT", value: commit.hash, display: commit.shortHash)
+            HStack(spacing: 4) {
+                CopyableValue(label: "commit", value: commit.hash, display: commit.shortHash)
                 ForEach(Array(commit.parents.enumerated()), id: \.element) { index, parent in
                     CopyableValue(
-                        label: commit.parents.count > 1 ? "PARENT \(index + 1)" : "PARENT",
+                        label: commit.parents.count > 1 ? "parent \(index + 1)" : "parent",
                         value: parent,
                         display: String(parent.prefix(8))
                     )
                 }
                 if commit.parents.count > 1 {
-                    Text("MERGE")
-                        .font(.caption2.weight(.bold))
+                    Text("merge")
+                        .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(GitForkTheme.purple)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(GitForkTheme.purple.opacity(0.12), in: Capsule())
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(GitForkTheme.purple.opacity(0.13), in: RoundedRectangle(cornerRadius: 4))
                 }
 
                 Spacer(minLength: 12)
@@ -249,10 +248,12 @@ private struct CommitHeader: View {
                     scrollToTop: scrollToTop
                 )
             }
+            .padding(.leading, -5)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(HeaderBackground())
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
     }
 }
 
@@ -333,19 +334,15 @@ private struct CommitFileChooser: View {
                 }
                 .disabled(store.repositoryURL == nil)
             } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: focusedFile == nil
-                        ? "list.bullet.rectangle"
-                        : "doc.text")
-                        .foregroundStyle(GitForkTheme.accent)
+                HStack(spacing: 5) {
                     Text(title)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Image(systemName: "chevron.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(Look.shared.secondary)
                 }
-                .font(.callout.weight(.medium))
+                .font(.system(size: 11.5, weight: .medium))
                 .frame(maxWidth: 320)
             }
             .menuStyle(.button)
@@ -363,8 +360,8 @@ private struct CommitFileChooser: View {
                 Button {
                     focus(nil)
                 } label: {
-                    Label("Show All", systemImage: "xmark.circle")
-                        .font(.callout)
+                    Text("Show All")
+                        .font(.system(size: 11.5))
                 }
                 .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
                 .help("Show every file in this commit again, from the top")
@@ -394,17 +391,10 @@ private struct CommitFileChooser: View {
     }
 }
 
-/// A soft, tinted bar used behind the commit and change detail headers.
+/// Behind the commit and change headers: the pane's own color.
 private struct HeaderBackground: View {
     var body: some View {
-        ZStack {
-            Rectangle().fill(Look.shared.sidebar)
-            LinearGradient(
-                colors: [GitForkTheme.accent.opacity(0.07), .clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
+        Rectangle().fill(Look.shared.background)
     }
 }
 
@@ -418,62 +408,31 @@ private struct ChangeHeader: View {
 
     var body: some View {
         let statusSymbol = change.statusSymbol(staged: staged)
-        HStack(spacing: 12) {
+        let look = Look.shared
+        HStack(spacing: 2) {
             Text(statusSymbol)
-                .font(.headline.monospaced())
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Color.statusColor(statusSymbol))
-                .frame(width: 32, height: 32)
-                .background(Color.statusColor(statusSymbol).opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+                .frame(width: 12)
+                .padding(.trailing, 4)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(change.path)
-                    .font(.headline)
-                    .textSelection(.enabled)
-                Text(changeDetailStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            Button {
-                diffMode = diffMode == .stageOrUnstage ? .plain : .stageOrUnstage
-            } label: {
-                switch diffMode {
-                case .stageOrUnstage:
-                    Label("Plain", systemImage: "doc.plaintext")
-                case .plain:
-                    Label("Stage/Unstage", systemImage: "checklist")
+            HStack(spacing: 6) {
+                Text(fileName)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                if !folder.isEmpty {
+                    Text(folder)
+                        .font(.system(size: 11))
+                        .foregroundStyle(look.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
                 }
             }
-            .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
-            .help(
-                diffMode == .stageOrUnstage
-                    ? "Show this change as a plain unified diff"
-                    : "Return to the diff with stage and unstage controls"
-            )
-            .disabled(store.diff.isEmpty || change.isConflicted)
+            .textSelection(.enabled)
+            .help("\(change.path)\n\(changeDetailStatus)")
 
-            Button {
-                if let repositoryURL = store.repositoryURL {
-                    GitWindows.openSideBySideDiff(SideBySideDiffWindowState(
-                            repositoryURL: repositoryURL,
-                            change: change,
-                            staged: staged,
-                            diff: store.diff
-                        )
-                    )
-                }
-            } label: {
-                Label("Side by Side", systemImage: "rectangle.split.2x1")
-            }
-            .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
-            .help("Open a side-by-side comparison in a new window")
-            .disabled(
-                store.repositoryURL == nil
-                    || store.diff.isEmpty
-                    || change.isConflicted
-            )
+            Spacer(minLength: 12)
 
             if change.isConflicted {
                 Menu {
@@ -489,44 +448,78 @@ private struct ChangeHeader: View {
                         Label("Use Theirs…", systemImage: "arrow.right")
                     }
                 } label: {
-                    Label("Choose Version", systemImage: "arrow.triangle.branch")
+                    HStack(spacing: 4) {
+                        Text("Choose Version")
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(look.secondary)
+                    }
+                    .font(.system(size: 11.5, weight: .medium))
                 }
-                .menuStyle(.borderedButton)
+                .menuStyle(.button)
+                .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
+                .menuIndicator(.hidden)
+                .fixedSize()
                 .help("Choose one side and replace the current file after confirmation")
                 .disabled(store.isLoading)
 
                 Button {
                     store.markConflictsResolved([conflictEntry])
                 } label: {
-                    Label("Mark Resolved", systemImage: "checkmark.circle")
+                    Text("Mark Resolved")
+                        .font(.system(size: 11.5, weight: .medium))
                 }
                 .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
                 .help("Stage the file’s current contents as the resolved version")
                 .disabled(store.isLoading)
             } else {
+                ToolbarIconButton(
+                    diffMode == .stageOrUnstage ? "Plain Diff" : "Diff to Stage Lines",
+                    systemImage: diffMode == .stageOrUnstage ? "doc.plaintext" : "checklist",
+                    help: diffMode == .stageOrUnstage
+                        ? "Show a plain diff, without the stage and unstage buttons"
+                        : "Show the diff with buttons to stage or unstage hunks and lines"
+                ) {
+                    diffMode = diffMode == .stageOrUnstage ? .plain : .stageOrUnstage
+                }
+                .disabled(store.diff.isEmpty)
+
+                ToolbarIconButton("Side by Side", systemImage: "rectangle.split.2x1", help: "Open the diff side by side in a window of its own (Space)") {
+                    if let repositoryURL = store.repositoryURL {
+                        GitWindows.openSideBySideDiff(SideBySideDiffWindowState(
+                                repositoryURL: repositoryURL,
+                                change: change,
+                                staged: staged,
+                                diff: store.diff
+                            )
+                        )
+                    }
+                }
+                .disabled(store.repositoryURL == nil || store.diff.isEmpty)
+
+                if !staged {
+                    ToolbarIconButton("Discard", systemImage: "trash", help: "Discard every unstaged change in this file, after asking") {
+                        isConfirmingFileDiscard = true
+                    }
+                    .disabled(store.isLoading)
+                }
+
                 Button {
                     staged ? store.unstage(change) : store.stage(change)
                 } label: {
-                    Label(staged ? "Unstage" : "Stage", systemImage: staged ? "minus" : "plus")
+                    Text(staged ? "Unstage File" : "Stage File")
+                        .font(.system(size: 11.5, weight: .medium))
                 }
                 .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
-                .help(staged ? "Move this file back to working changes" : "Stage this file for commit")
-                .disabled(store.isLoading)
-            }
-
-            if !staged && !change.isConflicted {
-                Button(role: .destructive) {
-                    isConfirmingFileDiscard = true
-                } label: {
-                    Label("Discard File…", systemImage: "trash")
-                }
-                .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
-                .help("Permanently discard every unstaged change in this file after confirmation")
+                .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 5))
+                .padding(.leading, 4)
+                .help(staged ? "Move this file back to the unstaged changes" : "Stage the whole file for the next commit")
                 .disabled(store.isLoading)
             }
         }
-        .padding(14)
-        .background(HeaderBackground())
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
+        .frame(height: 34)
         .alert("Discard All Changes in This File?", isPresented: $isConfirmingFileDiscard) {
             Button("Cancel", role: .cancel) {}
             Button("Discard", role: .destructive) {
@@ -574,6 +567,15 @@ private struct ChangeHeader: View {
         ChangeEntry(change, staged: false)
     }
 
+    private var fileName: String {
+        (change.path as NSString).lastPathComponent
+    }
+
+    /// The folder the file is in, empty at the top of the repository.
+    private var folder: String {
+        (change.path as NSString).deletingLastPathComponent
+    }
+
     private var changeDetailStatus: String {
         if change.isConflicted {
             return "\(change.conflictDescription ?? "Unmerged") · Conflict"
@@ -595,19 +597,19 @@ private struct ConflictDocumentView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.triangle.branch")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(GitForkTheme.orange)
                         Text(
                             "\(document.conflicts.count) unresolved conflict"
                                 + (document.conflicts.count == 1 ? "" : "s")
                         )
-                        .font(.callout.weight(.semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         Spacer()
                         Text("Choose a version for each block")
-                            .font(.caption)
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
                     .padding(10)
-                    .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    .background(GitForkTheme.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
 
                     if document.hasUnparsedMarkers {
                         Label(
@@ -615,10 +617,10 @@ private struct ConflictDocumentView: View {
                                 + "agentz will not mark the file resolved automatically.",
                             systemImage: "exclamationmark.triangle"
                         )
-                        .font(.caption)
-                        .foregroundStyle(.orange)
+                        .font(.system(size: 11))
+                        .foregroundStyle(GitForkTheme.orange)
                         .padding(10)
-                        .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        .background(GitForkTheme.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                     }
 
                     ForEach(document.conflicts) { block in
@@ -658,9 +660,9 @@ private struct ConflictBlockView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Text("Conflict \(number) of \(total)")
-                    .font(.callout.weight(.semibold))
+                    .font(.system(size: 12, weight: .semibold))
                 Text("Lines \(block.id + 1)–\(block.endLine + 1)")
-                    .font(.caption.monospacedDigit())
+                    .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(.secondary)
                 Spacer()
             }
@@ -700,10 +702,10 @@ private struct ConflictBlockView: View {
                 } label: {
                     HStack(spacing: 6) {
                         Text("Base")
-                            .font(.caption.weight(.semibold))
+                            .font(.system(size: 11, weight: .semibold))
                         if let baseLabel = block.baseLabel, !baseLabel.isEmpty {
                             Text(baseLabel)
-                                .font(.caption2.monospaced())
+                                .font(.system(size: 10.5, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
@@ -718,7 +720,7 @@ private struct ConflictBlockView: View {
         .clipShape(RoundedRectangle(cornerRadius: 9))
         .overlay {
             RoundedRectangle(cornerRadius: 9)
-                .strokeBorder(.orange.opacity(0.35))
+                .strokeBorder(GitForkTheme.orange.opacity(0.35))
         }
     }
 }
@@ -738,10 +740,10 @@ private struct ConflictVersionColumn: View {
                     .fill(tint)
                     .frame(width: 7, height: 7)
                 Text(title)
-                    .font(.caption.weight(.bold))
+                    .font(.system(size: 11, weight: .semibold))
                 if !label.isEmpty {
                     Text(label)
-                        .font(.caption2.monospaced())
+                        .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -777,7 +779,7 @@ private struct ConflictCodeLines: View {
         VStack(alignment: .leading, spacing: 0) {
             if lines.isEmpty {
                 Text("No content — choosing this version removes the block")
-                    .font(.caption.italic())
+                    .font(.system(size: 11).italic())
                     .foregroundStyle(.secondary)
                     .padding(10)
             } else {
@@ -814,17 +816,16 @@ private struct CopyableValue: View {
 
     var body: some View {
         Button(action: copy) {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 Text(label)
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Look.shared.faint)
                 Text(display)
-                    .font(.caption.monospaced())
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Look.shared.secondary)
                 Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
-                    .font(.caption2)
-                    .foregroundStyle(
-                        didCopy ? AnyShapeStyle(GitForkTheme.green) : AnyShapeStyle(.tertiary)
-                    )
+                    .font(.system(size: 9))
+                    .foregroundStyle(didCopy ? GitForkTheme.green : Look.shared.faint)
             }
         }
         .buttonStyle(GitForkHoverButtonStyle(.text))
@@ -930,19 +931,19 @@ private struct DiffTextView: View {
     var body: some View {
         Group {
             if text.isEmpty {
-                VStack {
-                    ProgressView()
+                VStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
                     Text("Loading diff…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Look.shared.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if parsedDiff.source.isEmpty {
-                VStack {
-                    ProgressView()
+                VStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
                     Text("Preparing diff…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Look.shared.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if displayedLineCount > DiffLayout.automaticLineLimit,
@@ -1168,26 +1169,18 @@ struct SideBySideDiffWindow: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
+            HStack(spacing: 6) {
                 Text(model.state.statusSymbol)
-                    .font(.headline.monospaced())
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
                     .foregroundStyle(Color.statusColor(model.state.statusSymbol))
-                    .frame(width: 32, height: 32)
-                    .background(
-                        Color.statusColor(model.state.statusSymbol).opacity(0.12),
-                        in: RoundedRectangle(cornerRadius: 7)
-                    )
+                    .frame(width: 12)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.state.path)
-                        .font(.headline)
-                        .textSelection(.enabled)
-                    Text(
-                        "\(model.state.status) · \(model.state.staged ? "Staged" : "Working tree")"
-                    )
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text(model.state.path)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .help("\(model.state.status) · \(model.state.staged ? "Staged" : "Working tree")")
 
                 Spacer()
 
@@ -1205,19 +1198,21 @@ struct SideBySideDiffWindow: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                .controlSize(.small)
                 .fixedSize()
                 .help("Show only changed regions or the complete contents of both files")
             }
-            .padding(14)
+            .padding(.horizontal, 14)
+            .frame(height: 38)
             .background(HeaderBackground())
 
-            Divider()
+            Rectangle().fill(Look.shared.divider).frame(height: 1)
 
             if model.isLoadingFullFile {
                 VStack(spacing: 10) {
                     ProgressView()
                     Text("Loading full file contents…")
-                        .font(.caption)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1225,7 +1220,7 @@ struct SideBySideDiffWindow: View {
                 VStack(spacing: 10) {
                     ProgressView()
                     Text("Preparing side-by-side diff…")
-                        .font(.caption)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1236,11 +1231,7 @@ struct SideBySideDiffWindow: View {
                     action: { showsLargeDiff = true }
                 )
             } else if document.isEmpty {
-                ContentUnavailableView(
-                    "No Side-by-Side Changes",
-                    systemImage: "rectangle.split.2x1",
-                    description: Text("This diff has no comparable changed lines.")
-                )
+                GitPlaceholder("This diff has no lines to set side by side.")
             } else {
                 GeometryReader { viewport in
                     SideBySideDiffView(
@@ -1319,20 +1310,17 @@ private struct CommitDiffFileView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 7) {
-                Image(systemName: "doc.text")
-                    .foregroundStyle(GitForkTheme.blue)
+            HStack(spacing: 6) {
+                Text(file.change.symbol)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(statusColor)
+                    .frame(width: 12)
+                    .help(file.change.title)
                 Text(file.path)
-                    .font(.callout.monospaced().weight(.semibold))
+                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
-                Text(file.change.title)
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(statusColor)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(statusColor.opacity(0.12), in: Capsule())
                 Spacer(minLength: 12)
                 if file.additions > 0 {
                     Text("+\(file.additions)")
@@ -1343,12 +1331,12 @@ private struct CommitDiffFileView: View {
                         .foregroundStyle(GitForkTheme.red)
                 }
             }
-            .font(.caption.monospaced())
+            .font(.system(size: 11, design: .monospaced))
             .padding(.horizontal, 10)
-            .frame(height: 34)
-            .background(Look.shared.text.opacity(0.045))
+            .frame(height: 30)
+            .background(Look.shared.hover)
 
-            Divider()
+            Rectangle().fill(Look.shared.divider).frame(height: 1)
 
             CommitDiffLinesView(
                 lines: contentLines,
@@ -1358,10 +1346,10 @@ private struct CommitDiffFileView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Look.shared.background)
-        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
         .overlay {
-            RoundedRectangle(cornerRadius: 7)
-                .strokeBorder(Look.shared.text.opacity(0.14))
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Look.shared.divider)
         }
     }
 }
@@ -1665,18 +1653,13 @@ private struct LargeDiffPlaceholder: View {
     let action: () -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.largeTitle)
-                .foregroundStyle(.secondary)
-            Text("Large Diff")
-                .font(.headline)
-            Text("\(lineCount.formatted()) lines are ready to display.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Button("Display Diff", action: action)
-                .buttonStyle(.borderedProminent)
-                .help("Render this large diff")
+        VStack(spacing: 10) {
+            Text("This diff has \(lineCount.formatted()) lines.")
+                .font(.system(size: 12))
+                .foregroundStyle(Look.shared.secondary)
+            Button("Show It", action: action)
+                .buttonStyle(GitPrimaryButtonStyle())
+                .help("Draw this large diff, which may take a moment")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1693,24 +1676,27 @@ private struct DiffHunkActions: View {
     let discard: (Set<Int>) -> Void
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 0) {
+            if !staged {
+                Button("Discard…", role: .destructive) {
+                    discard(lineIDs)
+                }
+                .foregroundStyle(GitForkTheme.red)
+                .help("Permanently discard \(subject) after confirmation")
+            }
             Button(staged ? "Unstage" : "Stage") {
                 apply(lineIDs)
             }
+            .foregroundStyle(Look.shared.accent)
             .help(staged ? "Unstage \(subject)" : "Stage \(subject)")
-
-            if !staged {
-                Button("Discard Changes…", role: .destructive) {
-                    discard(lineIDs)
-                }
-                .help("Permanently discard \(subject) after confirmation")
-            }
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
+        .font(.system(size: 11.5, weight: .medium))
+        .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
         .disabled(isLoading)
-        .padding(6)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+        .padding(2)
+        .background(Look.shared.background, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Look.shared.divider))
+        .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
     }
 }
 
@@ -1814,8 +1800,8 @@ private struct DiffHunkView: View {
                     .frame(width: DiffLayout.accentBarWidth + DiffLayout.lineNumberWidth * 2)
                 Divider()
                 Text(hunk.header.text)
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(Look.shared.secondary)
                     .lineLimit(1)
                     .padding(.horizontal, 9)
                     .frame(height: DiffLayout.rowHeight, alignment: .leading)
@@ -2026,7 +2012,7 @@ private struct SideBySideDiffPane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title)
-                .font(.caption2.weight(.semibold))
+                .font(.system(size: 10.5, weight: .semibold))
                 .textCase(.uppercase)
                 .foregroundStyle(.secondary)
                 .padding(
