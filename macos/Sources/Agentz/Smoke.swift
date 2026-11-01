@@ -1089,25 +1089,61 @@ final class SmokeTest {
         }, "\(git.store.changes.count) changes, \(git.store.stashes.count) stashes")
         check("quitting stops nothing in it", ws.quitCounts() == before)
 
+        // A git tab always shows on its own: it can't be split, go into a
+        // split, or get a session next to it.
+        check("it can't be split, or go into a split", !ws.canSplit && !ws.canOpenInSplit(key) && !ws.canOpenInSplit(shell.key))
+        ws.toggleSplit(.right)
         ws.openInSplit(shell.key, .right)
-        check("it shares a split with the shell", ws.panes.split == .right && ws.panes.keys.contains(key)
-            && ws.panes.keys.contains(shell.key) && !git.paneView.isHidden && !shell.terminal!.view.isHidden)
-        check("the Changes panel stays hidden while the split shows it", !window.isGitShown)
-        if let i = ws.panes.keys.firstIndex(of: key) {
-            ws.focusPane(1 - i)
-            click(git.paneView, at: NSPoint(x: git.paneView.bounds.midX, y: git.paneView.bounds.midY))
-            check("a click in it makes its pane the focused one", ws.panes.focused == i, "focused=\(ws.panes.focused) git=\(i)")
-        }
+        check("so it stays on its own", ws.panes.split == nil && ws.current == key, "\(ws.panes)")
         check("it is saved with the tabs", ws.savedState().tabs.contains { $0.agent == .git && realPath($0.cwd) == root })
 
+        // Opened from a split, it hides the split, which comes back as it
+        // was, without it.
+        ws.open(shell.key)
+        ws.split(.right)
+        let split = ws.panes
+        check("the shell can be split", split.split == .right && split.keys.contains(shell.key), "\(split)")
+        ws.openGit(repo)
+        check("opened from a split, it shows on its own", ws.panes.split == nil && ws.current == key
+            && ws.hiddenSplits.contains(split), "\(ws.panes)")
+        check("and can't go into the split", !ws.canOpenInSplit(key))
+        ws.open(shell.key)
+        check("the split comes back without it", ws.panes.split == .right && ws.panes.keys == split.keys, "\(ws.panes)")
+        // The Changes panel hid over the git tab. When it did so with an
+        // animation, switching away this fast left it hidden, as if the
+        // user had hidden it.
+        _ = await wait(1) { false }
+        check("switching away from it at once brings the Changes panel back", window.isGitShown && window.gitPanelWidth > 0,
+              "width \(window.gitPanelWidth)")
+        // A hidden git tab stays over the terminals, where SwiftUI took the
+        // clicks even then.
+        let shellView = shell.terminal!.view
+        _ = await wait(3) { self.window.gitPanelWidth > 0 }
+        _ = await wait(0.5) { false }
+        let missed = missedClick(shellView)
+        check("hidden, it takes no clicks meant for the terminals", git.paneView.isHidden && missed == nil, missed.map { "at \($0)" } ?? "")
         ws.unsplit()
+
         ws.close(key)
         check("closing it removes it", !ws.tabs.contains { $0.key == key } && !git.isRunning)
         check("and the Changes panel is back", await wait(3) { self.window.isGitShown && self.window.gitPanelWidth > 0 })
-        _ = ws.restore(SavedState(tabs: [SavedTab(agent: .git, id: nil, cwd: root, title: "main", pinned: false)], project: ws.projectDir))
+        // An earlier version let git tabs into splits. Such a saved split
+        // comes back as its tabs on their own.
+        var saved = SavedState(tabs: [
+            SavedTab(agent: .git, id: nil, cwd: root, title: "main", pinned: false),
+            SavedTab(agent: .shell, id: nil, cwd: root, title: Launch.shellName, pinned: false),
+        ], project: ws.projectDir)
+        saved.split = SavedSplit(direction: .right, panes: [0, 1], focused: 0)
+        let tabsBefore = ws.tabs.map(\.key)
+        _ = ws.restore(saved)
         check("a saved git tab comes back", ws.tabs.contains { $0.key == key && $0.git != nil })
+        check("but not in the split it was saved in", ws.panes.split == nil
+            && !ws.hiddenSplits.contains { $0.keys.contains(key) }, "\(ws.panes)")
         check("and hides the Changes panel again", ws.current != key || !window.isGitShown)
         ws.close(key)
+        for r in ws.tabs where !tabsBefore.contains(r.key) {
+            ws.close(r.key)
+        }
         window.setGitShown(false)
 
         check("outside a repository there is none", !ws.openGit(tmp) && !ws.tabs.contains { $0.key == SessionKey(.git, tmp) })
@@ -1180,6 +1216,22 @@ private func click(_ view: NSView, at point: NSPoint) {
         ) else { continue }
         NSApp.sendEvent(event)
     }
+}
+
+/// A point of `view` where a click would go to another view, if there is
+/// one. Not at its edges, where the line between two panes takes clicks.
+@MainActor
+private func missedClick(_ view: NSView) -> NSPoint? {
+    guard let content = view.window?.contentView else { return .zero }
+    let b = view.bounds
+    for y in [b.height * 0.25, b.midY, b.height * 0.75] {
+        for x in stride(from: 6, through: b.width - 6, by: 8) {
+            let p = view.convert(NSPoint(x: x, y: y), to: nil)
+            let hit = content.hitTest(content.superview?.convert(p, from: nil) ?? p)
+            if hit?.isDescendant(of: view) != true { return NSPoint(x: x, y: y) }
+        }
+    }
+    return nil
 }
 
 /// One turn of the mouse wheel, up, over the middle of `view`, sent

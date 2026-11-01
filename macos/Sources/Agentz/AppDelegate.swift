@@ -637,8 +637,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return activeTerminal?.isFinding == true
         case #selector(splitRight(_:)):
             item.state = workspace.panes.split == .right ? .on : .off
+            return workspace.canSplit
         case #selector(splitDown(_:)):
             item.state = workspace.panes.split == .down ? .on : .off
+            return workspace.canSplit
         case #selector(unsplit(_:)), #selector(focusOtherPane(_:)):
             return workspace.panes.split != nil
         case #selector(nextAttention(_:)):

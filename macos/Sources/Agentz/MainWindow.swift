@@ -240,8 +240,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     var isGitShown: Bool { !gitItem.isCollapsed }
 
-    /// A git tab is in a pane on screen, either one of a split: the Changes
-    /// panel stays hidden then, and can't be shown.
+    /// A git tab is on screen, on its own as always: the Changes panel
+    /// stays hidden then, and can't be shown.
     var isGitTabShown: Bool { workspace.panes.keys.contains { $0?.agent == .git } }
 
     /// How wide the Changes panel is on screen: 0 while hidden.
@@ -262,19 +262,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         updateGitPanel()
     }
 
-    /// The panel shows when it is wanted and no git tab is on screen.
+    /// The panel shows when it is wanted and no git tab is on screen. It
+    /// shows and hides at once, without an animation: a collapse that a
+    /// quick switch to another session cut short ended with the panel
+    /// collapsed anyway, which `gitCollapsed` took for the user hiding it.
     private func updateGitPanel() {
         let shown = gitWanted && !isGitTabShown
-        if isGitShown != shown {
-            // An animation needs the window on screen to finish; without
-            // it, e.g. while the screen is locked, the panel would stay in
-            // sight.
-            if window?.occlusionState.contains(.visible) == true {
-                gitItem.animator().isCollapsed = !shown
-            } else {
-                gitItem.isCollapsed = !shown
-            }
-        }
+        if isGitShown != shown { gitItem.isCollapsed = !shown }
         if shown { git.follow(workspace.gitFolder) }
         git.isShown = shown
     }
@@ -469,8 +463,10 @@ private struct SplitButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!workspace.canSplit)
+        .opacity(workspace.canSplit ? 1 : 0.4)
         .onHover { hovered = $0 }
-        .help(on ? "Unsplit (\(keys))" : "\(title) (\(keys))")
+        .help(!workspace.canSplit ? "A git tab shows on its own" : on ? "Unsplit (\(keys))" : "\(title) (\(keys))")
         .accessibilityLabel(on ? "Unsplit" : title)
     }
 }
@@ -489,7 +485,7 @@ final class PaneViewController: NSViewController {
     /// The terminal views, under everything else.
     private let terminals = NSView()
     /// One per pane, shown while the pane has no terminal.
-    private let placeholders: [PlaceholderView]
+    private let placeholders: [PaneHostingView<EmptyPaneView>]
     /// Fades the pane the user does not work in, as Ghostty does.
     private let fade = FadeView()
     private let divider = PaneDivider()
@@ -498,30 +494,12 @@ final class PaneViewController: NSViewController {
     private var draggedRatio: CGFloat?
     /// A session from the list is dragged over the pane area.
     var onSessionDrag: (() -> Void)?
-    /// Sees clicks in git tabs, which say nothing of them as terminals do.
-    private var clicks: Any?
 
     init(workspace: Workspace, look: Look) {
         self.workspace = workspace
         self.look = look
-        placeholders = [0, 1].map { PlaceholderView(rootView: EmptyPaneView(workspace: workspace, look: look, pane: $0)) }
+        placeholders = [0, 1].map { PaneHostingView(rootView: EmptyPaneView(workspace: workspace, look: look, pane: $0)) }
         super.init(nibName: nil, bundle: nil)
-        clicks = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            MainActor.assumeIsolated { self?.clicked(event) }
-            return event
-        }
-    }
-
-    /// A click in the git tab of a split's other pane makes that pane the
-    /// one the user works in.
-    private func clicked(_ event: NSEvent) {
-        let layout = workspace.panes
-        guard event.window === view.window, let split = layout.split else { return }
-        let point = container.convert(event.locationInWindow, from: nil)
-        guard let i = paneRects(split, ratio: layout.ratio).firstIndex(where: { $0.contains(point) }), i != layout.focused,
-              let key = layout.keys[i], workspace.tabs.first(where: { $0.key == key })?.git != nil
-        else { return }
-        workspace.clickedPane(i)
     }
 
     @available(*, unavailable)
@@ -570,12 +548,15 @@ final class PaneViewController: NSViewController {
         let b = container.bounds
         guard b.width > 0, b.height > 0 else { return nil }
         if let split = layout.split {
+            // A git tab never goes into a split.
+            guard workspace.canOpenInSplit(key) else { return nil }
             let rects = paneRects(split, ratio: layout.ratio)
             guard let i = rects.firstIndex(where: { $0.contains(point) }) else { return nil }
             if workspace.tabs.first(where: { $0.key == layout.keys[i] })?.shows(key) == true { return nil }
             return (rects[i], i, split)
         }
         guard workspace.current != nil else { return (b, 0, nil) }
+        // Not the shown session itself, a git tab, or any next to one.
         guard workspace.canOpenInSplit(key) else { return nil }
         let fromLeft = point.x / b.width, fromTop = (b.height - point.y) / b.height
         let edges: [(distance: CGFloat, direction: SplitDirection, pane: Int)] = [
@@ -828,11 +809,26 @@ final class DropHighlight: NSView {
     override func hitTest(_: NSPoint) -> NSView? { nil }
 }
 
-/// What an empty pane shows. It lies over the terminals, so while hidden it
-/// must let clicks through: SwiftUI's hosting view takes them even then.
-private final class PlaceholderView: NSHostingView<EmptyPaneView> {
+/// SwiftUI in a pane: a git tab, or what an empty pane shows. SwiftUI's
+/// hosting view takes clicks while hidden, and wherever its content
+/// reaches, also past its frame when the content is wider than the pane.
+/// Lying over the terminals, a hidden git tab took the clicks on the
+/// terminal on screen. Sometimes the terminal still got the press of such
+/// a click, but never its release, and went on selecting text as the mouse
+/// moved. This one takes only clicks in its frame while shown, and draws
+/// nothing past its frame.
+final class PaneHostingView<Content: View>: NSHostingView<Content> {
+    required init(rootView: Content) {
+        super.init(rootView: rootView)
+        clipsToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) { fatalError() }
+
+    // `point` is in the superview's coordinates, like `frame`.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        isHidden ? nil : super.hitTest(point)
+        isHidden || !frame.contains(point) ? nil : super.hitTest(point)
     }
 }
 

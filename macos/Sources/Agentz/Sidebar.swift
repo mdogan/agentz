@@ -402,11 +402,14 @@ struct SidebarView: View {
         let running = workspace.runningKeys.contains(key)
         let pinned = workspace.isPinned(key)
         Button(running ? "Show" : workspace.elsewhere[key] != nil ? "Fork…" : "Resume") { workspace.open(key) }
-        let splittable = workspace.canOpenInSplit(key)
-        Button("Open in Split Right") { workspace.openInSplit(key, .right) }
-            .disabled(!splittable)
-        Button("Open in Split Down") { workspace.openInSplit(key, .down) }
-            .disabled(!splittable)
+        // A git tab is never in a split.
+        if key.agent != .git {
+            let splittable = workspace.canOpenInSplit(key)
+            Button("Open in Split Right") { workspace.openInSplit(key, .right) }
+                .disabled(!splittable)
+            Button("Open in Split Down") { workspace.openInSplit(key, .down) }
+                .disabled(!splittable)
+        }
         if running || pinned || workspace.quitKeys.contains(key) {
             Button(pinned ? "Unpin" : "Pin") { workspace.setPinned(key, !pinned) }
         }

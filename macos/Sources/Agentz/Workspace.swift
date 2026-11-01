@@ -520,8 +520,11 @@ final class Workspace {
         }
         func layout(_ split: SavedSplit) -> PaneLayout? {
             let keys = split.panes.map { $0.flatMap { started[Int($0)] } }
-            // Not if both its tabs are gone.
-            guard keys.count == 2, split.focused < 2, keys.contains(where: { $0 != nil }) else { return nil }
+            // Not if both its tabs are gone. Not with a git tab either,
+            // which an earlier version let into splits.
+            guard keys.count == 2, split.focused < 2, keys.contains(where: { $0 != nil }),
+                  !keys.contains(where: { $0?.agent == .git })
+            else { return nil }
             return PaneLayout(keys: keys, split: split.direction, focused: Int(split.focused))
         }
         hiddenSplits += saved.hiddenSplits.compactMap(layout)
@@ -942,7 +945,8 @@ final class Workspace {
 
     /// Shows the running tab `r`, for the session `key`. One already on
     /// screen stays in its pane, which gets the focus, and one in a hidden
-    /// split brings that split back. Any other is shown on its own.
+    /// split brings that split back. Any other is shown on its own; a git
+    /// tab also when the split on screen has an empty pane.
     private func show(_ r: Tab, for key: SessionKey) {
         if let pane = panes.keys.firstIndex(of: r.key) {
             panes.focused = pane
@@ -957,7 +961,7 @@ final class Workspace {
             hiddenSplits = hidden
             panes = split
         } else {
-            makeRoom()
+            makeRoom(alone: r.git != nil)
             current = r.key
         }
         prune()
@@ -965,9 +969,15 @@ final class Workspace {
 
     /// Frees the focused pane for a session from outside the split on
     /// screen: the split is hidden, as it is, and one pane takes its place.
-    /// An empty pane of a split is free already.
-    private func makeRoom() {
-        guard panes.split != nil, current != nil else { return }
+    /// An empty pane of a split is free already, except for a git tab
+    /// (`alone`), which never goes into a split: that split ends, and its
+    /// other tab runs on in the list.
+    private func makeRoom(alone: Bool = false) {
+        guard panes.split != nil else { return }
+        if current == nil {
+            if alone { panes = PaneLayout() }
+            return
+        }
         hiddenSplits.append(panes)
         panes = PaneLayout()
     }
@@ -1201,12 +1211,14 @@ final class Workspace {
 
     /// Splits the pane area in two. The new pane gets the focus and a new
     /// shell in the folder of the shown tab; ⌘N there starts an agent in its
-    /// place. Already split, it turns the split to `direction`.
+    /// place. Already split, it turns the split to `direction`. A git tab
+    /// is not split: it always shows on its own.
     func split(_ direction: SplitDirection) {
         guard panes.split == nil else {
             panes.split = direction
             return
         }
+        guard canSplit else { return }
         let cwd = shownFolder
         panes = PaneLayout(keys: [current, nil], split: direction, focused: 1)
         // Like the shell that replaces an agent that quit, it goes away if
@@ -1226,10 +1238,18 @@ final class Workspace {
         }
     }
 
-    /// False for the session shown in the only pane: it can't be split off
-    /// from itself.
+    /// ⌘D and ⇧⌘D split the pane, turn the split or end it: all but while
+    /// a git tab shows, which is never in a split.
+    var canSplit: Bool {
+        panes.split != nil || current?.agent != .git
+    }
+
+    /// False for a git tab, which is never in a split. With one pane, also
+    /// false for the session shown in it, which can't be split off from
+    /// itself, and for any while that is a git tab.
     func canOpenInSplit(_ key: SessionKey) -> Bool {
-        panes.split != nil || !isCurrent(key)
+        guard key.agent != .git else { return false }
+        return panes.split != nil || !isCurrent(key) && current?.agent != .git
     }
 
     /// Shows the session in a pane of a split `direction`, the right or
@@ -1303,14 +1323,6 @@ final class Workspace {
         if moved, let r = currentTab { selection = r.linked ?? r.key }
     }
 
-    /// A click in pane `i` makes it the one the user works in. The click
-    /// itself moves the keyboard, as a terminal's does.
-    func clickedPane(_ i: Int) {
-        guard panes.split != nil, panes.keys.indices.contains(i), panes.focused != i else { return }
-        panes.focused = i
-        if let r = currentTab { selection = r.linked ?? r.key }
-    }
-
     /// Makes pane `i` the one the user works in, and moves the keyboard to
     /// its terminal, or to the list if it has none.
     func focusPane(_ i: Int) {
@@ -1335,7 +1347,8 @@ final class Workspace {
     }
 
     /// Spawns an agent or shell, in the focused pane unless `pane` says
-    /// another. `resume` is the session id to resume, or nil for a new
+    /// another. A git client shows on its own instead, whatever `pane`
+    /// says. `resume` is the session id to resume, or nil for a new
     /// session. With `fork`, Claude starts a new session with a copy of
     /// that one's conversation. Returns false if it could not start.
     @discardableResult
@@ -1343,7 +1356,7 @@ final class Workspace {
         _ agent: Agent, resume: String?, fork: Bool = false, cwd: String, title: String, focus: Bool = true, pane: Int? = nil
     ) -> Bool {
         guard checkFolder(cwd) else { return false }
-        if agent == .git { return startGit(cwd, focus: focus, pane: pane) }
+        if agent == .git { return startGit(cwd, focus: focus) }
         let key: SessionKey
         var args: [String] = []
         switch (agent, resume) {
@@ -1404,9 +1417,10 @@ final class Workspace {
     // MARK: - Git
 
     /// Shows the git client of the repository `cwd` is in, in a tab of its
-    /// own: the one there is for that worktree, or a new one. A split on
-    /// screen stays as it is. With `change`, it shows that changed file's
-    /// diff. False, with a status line, outside a repository.
+    /// own: the one there is for that worktree, or a new one. It shows on
+    /// its own, never in a split; a split on screen waits, as it is. With
+    /// `change`, it shows that changed file's diff. False, with a status
+    /// line, outside a repository.
     @discardableResult
     func openGit(_ cwd: String, showing change: ChangeEntryID? = nil) -> Bool {
         guard checkFolder(cwd) else { return false }
@@ -1422,16 +1436,15 @@ final class Workspace {
             setStatus("\(tilde(cwd)) is not in a git repository.")
             return false
         }
-        makeRoom()
-        let started = startGit(root, focus: true, pane: nil)
+        let started = startGit(root, focus: true)
         if started, let change { currentTab?.git?.showChange(change) }
         prune()
         return started
     }
 
-    /// Adds a git client for the worktree `cwd` is in, in the focused pane
-    /// unless `pane` says another.
-    private func startGit(_ cwd: String, focus: Bool, pane: Int?) -> Bool {
+    /// Adds a git client for the worktree `cwd` is in, on its own: a split
+    /// on screen makes room for it.
+    private func startGit(_ cwd: String, focus: Bool) -> Bool {
         let root = projectRoot(cwd)
         guard isGitWorktree(root) else {
             setStatus("\(tilde(cwd)) is not in a git repository.")
@@ -1446,10 +1459,10 @@ final class Workspace {
             if agent == .git { self?.openGit(folder.path) } else { self?.newSession(agent, cwd: folder.path) }
         }
         let tab = Tab(key: key, content: session, cwd: root, title: "Git", resumed: false)
-        let pane = pane ?? panes.focused
-        panes.keys[pane] = key
+        makeRoom(alone: true)
+        current = key
         tabs.append(tab)
-        if pane == panes.focused { selection = key }
+        selection = key
         rebuildRows()
         if focus { focusTerminal?() }
         return true

@@ -12,7 +12,8 @@ import SwiftUI
 final class GitSession: PaneContent {
     let root: URL
     let store = RepositoryStore()
-    private let host: NSHostingView<GitSessionView>
+    /// Takes no clicks meant for the terminals while hidden.
+    private let host: PaneHostingView<GitSessionView>
     private(set) var isRunning = true
     private var visible = false
     private var windowVisible = true
@@ -22,7 +23,7 @@ final class GitSession: PaneContent {
 
     init(root: URL) {
         self.root = root
-        host = NSHostingView(rootView: GitSessionView(store: store, look: Look.shared))
+        host = PaneHostingView(rootView: GitSessionView(store: store, look: Look.shared))
         // Read once now; watch only while shown.
         store.setMonitoringActive(false)
         store.openRepository(root)
@@ -96,7 +97,10 @@ struct GitSessionView: View {
     @State private var stashScope = StashScope.all
 
     var body: some View {
-        VStack(spacing: 0) {
+        // In a pane narrower than its three columns, e.g. in a small window,
+        // they start at its left edge and the pane cuts off the right of
+        // the last one. Centered, the pane cut off both ends.
+        VStack(alignment: .leading, spacing: 0) {
             GitSessionBar()
             Rectangle().fill(look.divider).frame(height: 1)
             HSplitView {
@@ -115,6 +119,7 @@ struct GitSessionView: View {
                     .frame(minWidth: 320, maxWidth: .infinity)
             }
         }
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .foregroundStyle(look.text)
         .background(look.background)
         .tint(look.accent)
