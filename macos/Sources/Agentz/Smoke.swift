@@ -1082,6 +1082,41 @@ final class SmokeTest {
         check("its view shows, and it reads while it shows", !git.paneView.isHidden && git.paneView.window != nil)
         _ = await wait(5) { git.store.operationLabel == nil && !git.store.commits.isEmpty }
         snapshot("git-tab")
+
+        // The left column keeps the width it was given, whichever tab it shows.
+        if let columns = firstSplitView(in: git.paneView), let left = columns.arrangedSubviews.first {
+            columns.setPosition(430, ofDividerAt: 0)
+            _ = await wait(0.3) { false }
+            let width = left.frame.width
+            check("the left column can be made wider", width > 400, "width \(width)")
+            func same(_ name: String) async {
+                _ = await wait(0.5) { false }
+                let now = columns.arrangedSubviews.first?.frame.width ?? 0
+                check("it keeps its width in \(name)", abs(now - width) < 1, "\(now), was \(width)")
+            }
+            git.store.selectReference(nil)
+            await same("History")
+            git.store.selectChanges()
+            await same("Changes")
+            git.store.showsReferences = true
+            await same("Branches")
+            git.store.showsReferences = false
+            await same("Changes again")
+        } else {
+            check("the git tab has columns", false)
+        }
+
+        // The button in the bar opens the log, showing this repository. It
+        // comes third from the right, before Zed, Finder and the name "tab".
+        click(git.paneView, at: NSPoint(x: git.paneView.bounds.width - 102, y: 18))
+        check("the bar's button opens the git command log", await wait(3) {
+            NSApp.windows.contains { $0.title == "Git Command Log" && $0.isVisible }
+        })
+        let shownRepository = GitCommandLog.shared.focusRequest?.repositoryPath
+        check("for this repository", shownRepository.flatMap(realPath) == root, shownRepository ?? "none")
+        NSApp.windows.first { $0.title == "Git Command Log" }?.close()
+        window.window?.makeKeyAndOrderFront(nil)
+        _ = await wait(0.3) { false }
         ws.openGit(repo + "/.")
         check("one git tab per worktree", ws.tabs.filter { $0.key.agent == .git }.count == 1 && ws.current == key)
 
@@ -1247,6 +1282,16 @@ final class SmokeTest {
         for r in ws.tabs where !tabsBefore.contains(r.key) {
             ws.close(r.key)
         }
+    }
+
+    /// The outermost split view in `view`.
+    private func firstSplitView(in view: NSView) -> NSSplitView? {
+        var level = [view]
+        while !level.isEmpty {
+            if let found = level.lazy.compactMap({ $0 as? NSSplitView }).first { return found }
+            level = level.flatMap(\.subviews)
+        }
+        return nil
     }
 
     private func snapshot(_ name: String? = nil) {

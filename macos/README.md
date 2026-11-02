@@ -81,7 +81,7 @@ Uncommitted changes come along to the other branch, as with `git switch`, as lon
 
 While an agent works in that worktree, here or in another app, agentz asks before it switches: the agent's files would change under it, and it would not be told. An agent that waits for you does not count, and neither do other worktrees of the repo.
 
-The **Git** menu works on the git tab in the focused pane, or else on the Changes panel's repository, with GitFork's keys where agentz has no other use for them. **Git › Git Command Log** (⇧⌘L) lists every git command they ran and how each went.
+The **Git** menu works on the git tab in the focused pane, or else on the Changes panel's repository, with GitFork's keys where agentz has no other use for them. **Git › Git Command Log** (⇧⌘L), or the terminal button in the git tab's bar, lists every git command they ran and how each went.
 
 **View › Quick Terminal**, or its global key (see below), slides a shell of its own in from the edge of the screen (the top, unless set otherwise), over any app, like Ghostty's quick terminal. Do it again and it slides away, and the app you were in gets the keyboard back. Its shell keeps running while it is hidden. It also slides away when you click another window. When its shell exits, or you press ⌘W in it, it closes; the next one starts a new shell in your home folder.
 

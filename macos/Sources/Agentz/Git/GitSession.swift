@@ -104,7 +104,10 @@ struct GitSessionView: View {
             GitSessionBar()
             Rectangle().fill(look.divider).frame(height: 1)
             HSplitView {
-                Group {
+                // A stack, not a Group: the split view would take each view
+                // in a Group as a column of its own, so a new tab would be a
+                // new column, at the first width and not the one it was given.
+                ZStack {
                     if store.showsReferences {
                         GitSidebarView()
                     } else {
@@ -193,6 +196,10 @@ private struct GitSessionBar: View {
             }
             .disabled(store.isLoading)
             ToolbarSeparator()
+            ToolbarIconButton("Git Command Log", systemImage: "terminal", help: "The git commands run here, and how each went (⇧⌘L)") {
+                GitCommandLog.shared.requestFocus(on: store.repositoryURL)
+                GitWindows.openCommandLog()
+            }
             ToolbarIconButton("Open in Zed", systemImage: "chevron.left.forwardslash.chevron.right", help: "Open the repository in Zed") {
                 store.openZedEditor()
             }
