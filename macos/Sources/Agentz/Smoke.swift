@@ -1083,6 +1083,19 @@ final class SmokeTest {
         _ = await wait(5) { git.store.operationLabel == nil && !git.store.commits.isEmpty }
         snapshot("git-tab")
 
+        // The history keeps its branch while the changes show.
+        if let other = git.store.references.first(where: { $0.name == "other" }) {
+            git.store.selectReference(other)
+            _ = await wait(3) { git.store.operationLabel == nil }
+            snapshot("git-tab-branch")
+            git.store.selectChanges()
+            git.store.showHistory()
+            check("the history keeps its branch across the changes", git.store.selectedSection == .history
+                && git.store.historyScope == .revision(other.fullName) && git.store.selectedReference?.name == "other")
+            git.store.selectReference(nil)
+            _ = await wait(3) { git.store.operationLabel == nil }
+        }
+
         // The left column keeps the width it was given, whichever tab it shows.
         if let columns = firstSplitView(in: git.paneView), let left = columns.arrangedSubviews.first {
             columns.setPosition(430, ofDividerAt: 0)

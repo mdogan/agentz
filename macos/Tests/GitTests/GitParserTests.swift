@@ -2025,6 +2025,138 @@ struct GitParserTests {
         #expect(store.errorMessage == nil)
     }
 
+    /// A repository on `main`, with a commit only `feature` has, and a store
+    /// that has read it.
+    @MainActor
+    private func storeWithFeatureBranch(
+        historyPageSize: Int = GitClient.historyPageSize
+    ) async throws -> (root: URL, store: RepositoryStore, feature: GitReference) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GitForkHistoryFilterTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try runGit(["init", "-b", "main"], at: root)
+        try runGit(["config", "user.name", "GitFork Tests"], at: root)
+        try runGit(["config", "user.email", "tests@example.com"], at: root)
+        try runGit(["commit", "--allow-empty", "-m", "On main"], at: root)
+        try runGit(["checkout", "-b", "feature"], at: root)
+        try runGit(["commit", "--allow-empty", "-m", "On feature"], at: root)
+        try runGit(["checkout", "main"], at: root)
+        try runGit(["commit", "--allow-empty", "-m", "Later on main"], at: root)
+
+        let store = RepositoryStore(historyPageSize: historyPageSize)
+        store.setMonitoringActive(false)
+        store.openRepository(root)
+        try await settle(store)
+        let feature = try #require(store.references.first { $0.fullName == "refs/heads/feature" })
+        return (root, store, feature)
+    }
+
+    @Test
+    @MainActor
+    func historyKeepsItsBranchAcrossTheChanges() async throws {
+        let (root, store, feature) = try await storeWithFeatureBranch()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        store.selectReference(feature)
+        try await settle(store)
+        let picked = try #require(store.commits.last)
+        store.selectCommit(picked)
+
+        try "new\n".write(to: root.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        store.selectChanges()
+        #expect(store.selectedSection == .changes)
+        store.refresh()
+        try await settle(store)
+        #expect(store.changes.map(\.path) == ["new.txt"])
+
+        store.showHistory()
+        try await settle(store)
+        #expect(store.selectedSection == .history)
+        #expect(store.historyScope == .revision("refs/heads/feature"))
+        #expect(store.selectedReference?.fullName == "refs/heads/feature")
+        #expect(store.commits.map(\.subject) == ["On feature", "On main"])
+        #expect(store.selectedCommit?.hash == picked.hash)
+        #expect(store.selectedChange == nil)
+    }
+
+    @Test
+    @MainActor
+    func historyCanLoadMoreAfterComingBackFromTheChanges() async throws {
+        let (root, store, _) = try await storeWithFeatureBranch(historyPageSize: 2)
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(store.canLoadMoreHistory)
+
+        store.selectChanges()
+        store.showHistory()
+        #expect(store.canLoadMoreHistory)
+        store.loadMoreHistory()
+        for _ in 0..<500 {
+            guard store.isLoadingMoreHistory else { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(store.commits.count == 3)
+    }
+
+    @Test
+    @MainActor
+    func historyFilterEndsWhenItsBranchIsGone() async throws {
+        let (root, store, feature) = try await storeWithFeatureBranch()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        store.selectReference(feature)
+        try await settle(store)
+        store.selectChanges()
+
+        try runGit(["branch", "-D", "feature"], at: root)
+        try "new\n".write(to: root.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        store.refresh()
+        try await settle(store)
+
+        #expect(store.errorMessage == nil)
+        #expect(store.changes.map(\.path) == ["new.txt"])
+        #expect(store.historyScope == .all)
+        #expect(store.selectedReference == nil)
+        #expect(store.commits.map(\.subject) == ["Later on main", "On main"])
+    }
+
+    @Test
+    @MainActor
+    func committingKeepsOnlyAFilterThatHasTheNewCommit() async throws {
+        let (root, store, feature) = try await storeWithFeatureBranch()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // `feature` is not checked out: the new commit would not show.
+        store.selectReference(feature)
+        try await settle(store)
+        store.selectChanges()
+        try "one\n".write(to: root.appendingPathComponent("one.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "one.txt"], at: root)
+        store.refresh()
+        try await settle(store)
+        store.commitMessage = "First"
+        store.createCommit()
+        try await settle(store)
+        #expect(store.selectedSection == .history)
+        #expect(store.historyScope == .all)
+        #expect(store.selectedReference == nil)
+        #expect(store.commits.first?.subject == "First")
+
+        // `main` is: the filter stays and shows it.
+        let main = try #require(store.references.first { $0.fullName == "refs/heads/main" })
+        store.selectReference(main)
+        try await settle(store)
+        store.selectChanges()
+        try "two\n".write(to: root.appendingPathComponent("two.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "two.txt"], at: root)
+        store.refresh()
+        try await settle(store)
+        store.commitMessage = "Second"
+        store.createCommit()
+        try await settle(store)
+        #expect(store.historyScope == .revision("refs/heads/main"))
+        #expect(store.commits.first?.subject == "Second")
+    }
+
     @Test
     func parsesLostAndDanglingCommitHashes() {
         let first = String(repeating: "a", count: 40)

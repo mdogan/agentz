@@ -291,16 +291,23 @@ final class RepositoryStore: ObservableObject {
         NSWorkspace.shared.open(root)
     }
 
+    /// Shows the changes. What the history shows stays as it is, for when
+    /// the user comes back to it.
     func selectChanges() {
-        cancelHistoryPagination()
+        cancelHistoryPagination(resetState: false)
         showsReferences = false
         selectedSection = .changes
-        historyScope = .all
-        selectedReference = nil
-        selectedStash = nil
         if let change = changes.first {
             selectChange(change, staged: change.isStaged)
         }
+    }
+
+    /// Goes back to the history as it was left: the same branch and commit.
+    func showHistory() {
+        showsReferences = false
+        guard selectedSection != .history else { return }
+        selectedSection = .history
+        showCommit(selectedCommit)
     }
 
     func selectCommit(_ commit: GitCommit?) {
@@ -732,6 +739,13 @@ final class RepositoryStore: ObservableObject {
             self.commitMessage = ""
             self.amend = false
             self.selectedSection = .history
+            // The history shows next, with the new commit in it: only a
+            // filter on the current branch has that commit.
+            if case .revision = self.historyScope, self.selectedReference?.isCurrent == true {
+                return
+            }
+            self.selectedStash = nil
+            self.selectedReference = nil
             self.historyScope = .all
         }
     }
@@ -1257,11 +1271,31 @@ final class RepositoryStore: ObservableObject {
     ) async throws {
         cancelHistoryPagination(resetState: false)
         let previousChangeOrder = changeOrder
-        let load = try await client.snapshotAndStateToken(
-            at: root,
-            historyScope: historyScope,
-            historyLimit: historyPageSize
-        )
+        let load: RepositoryLoad
+        do {
+            load = try await client.snapshotAndStateToken(
+                at: root,
+                historyScope: historyScope,
+                historyLimit: historyPageSize
+            )
+        } catch {
+            // The filter's branch may be gone, deleted in a terminal or by a
+            // fetch. It must not stop the changes from being read.
+            guard !(error is CancellationError),
+                  let revision = historyScope.revision,
+                  (try? await client.commit(at: root, revision: revision)) == nil else {
+                throw error
+            }
+            try Task.checkCancellation()
+            guard isCurrentRepository(root) else { return }
+            self.selectedReference = nil
+            self.historyScope = .all
+            load = try await client.snapshotAndStateToken(
+                at: root,
+                historyScope: .all,
+                historyLimit: historyPageSize
+            )
+        }
         try Task.checkCancellation()
         guard isCurrentRepository(root) else { return }
         let snapshot = load.snapshot

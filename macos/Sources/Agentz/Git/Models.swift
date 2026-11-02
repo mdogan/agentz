@@ -20,6 +20,18 @@ enum CommitHistoryScope: Equatable, Sendable {
     init(revision: String?) {
         self = revision.map(Self.revision) ?? .all
     }
+
+    /// The ref the history is limited to, when that is a ref that can go away.
+    var revision: String? {
+        switch self {
+        case let .revision(revision):
+            revision
+        case let .path(_, revision) where revision != "HEAD":
+            revision
+        case .all, .commit, .path, .lostAndDangling:
+            nil
+        }
+    }
 }
 
 /// A request to scroll the history list to a commit the user opened by hash.

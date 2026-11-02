@@ -527,7 +527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
     }
 
-    @objc func showGitHistory(_: Any?) { gitTab?.store.selectReference(nil) }
+    @objc func showGitHistory(_: Any?) { gitTab?.store.showHistory() }
 
     @objc func switchBranch(_: Any?) { gitStore?.showBranchPicker() }
     @objc func newBranch(_: Any?) { gitStore?.isShowingNewBranchSheet = true }

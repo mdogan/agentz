@@ -1,4 +1,5 @@
 import AgentzCore
+import AppKit
 import SwiftUI
 
 struct HistoryView: View {
@@ -332,8 +333,8 @@ private struct CommitGraph: View {
     }
 }
 
-/// The top of the history: a search over the loaded commits, and which
-/// commits these are when they are not all of them.
+/// The top of the history: a search over the loaded commits, and a menu of
+/// the branches to limit them to.
 private struct HistoryHeader: View {
     @EnvironmentObject private var store: RepositoryStore
     let commitCount: Int
@@ -341,6 +342,7 @@ private struct HistoryHeader: View {
 
     var body: some View {
         let look = Look.shared
+        let scope = scope
         HStack(spacing: 6) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
@@ -364,48 +366,66 @@ private struct HistoryHeader: View {
             .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
             .help("Find commits by message, author, hash or branch, among those loaded")
 
-            if let scope {
-                Button {
-                    store.selectReference(nil)
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: scope.icon)
-                            .font(.system(size: 10))
-                        Text(scope.title)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(look.secondary)
-                    }
-                    .font(.system(size: 11, weight: .medium))
-                    .frame(maxWidth: 170)
+            PopUpButton(look: look, help: "Showing \(scope.help). Click to pick a branch.", menu: branchMenu) {
+                HStack(spacing: 4) {
+                    Image(systemName: scope.icon)
+                        .font(.system(size: 10))
+                    Text(scope.title)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-                .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
-                .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 5))
-                .fixedSize()
-                .help("Showing \(scope.help). Click to show all commits again.")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(showsAll ? look.secondary : look.text)
+                .frame(maxWidth: 150)
             }
+            .fixedSize()
         }
         .padding(.horizontal, 8)
         .frame(height: 34)
     }
 
-    private var placeholder: String {
-        scope == nil ? "Search \(commitCount) commit\(commitCount == 1 ? "" : "s")" : "Search"
+    private var showsAll: Bool {
+        store.historyScope == .all && store.selectedStash == nil
     }
 
-    /// Which commits show, when not all of them.
-    private var scope: (title: String, icon: String, help: String)? {
+    private var placeholder: String {
+        showsAll ? "Search \(commitCount) commit\(commitCount == 1 ? "" : "s")" : "Search"
+    }
+
+    /// All branches, then the local ones, then the remote ones.
+    private func branchMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let all = MenuAction("All Branches") { store.selectReference(nil) }
+        all.state = showsAll ? .on : .off
+        menu.addItem(all)
+        for (title, kind) in [("Local", ReferenceKind.localBranch), ("Remote", .remoteBranch)] {
+            let branches = store.references.filter { $0.kind == kind }
+            guard !branches.isEmpty else { continue }
+            menu.addItem(.separator())
+            menu.addItem(.sectionHeader(title: title))
+            for branch in branches {
+                let item = MenuAction(branch.name, detail: branch.isCurrent ? "current" : nil) {
+                    store.selectReference(branch)
+                }
+                item.state = store.historyScope == .revision(branch.fullName) ? .on : .off
+                menu.addItem(item)
+            }
+        }
+        return menu
+    }
+
+    /// Which commits show.
+    private var scope: (title: String, icon: String, help: String) {
         if let stash = store.selectedStash {
             return (stash.displayName, "archivebox", "the stash \(stash.displayName)")
         }
         switch store.historyScope {
         case .all:
-            return nil
+            return ("All Branches", "arrow.triangle.branch", "the commits of all branches")
         case .revision:
             let name = store.selectedReference?.name ?? "branch"
-            return (name, "arrow.triangle.branch", "the commits of \(name)")
+            return (name, store.selectedReference?.kind.icon ?? "arrow.triangle.branch", "the commits of \(name)")
         case let .commit(hash):
             let short = String(hash.prefix(8))
             return (short, "number", "commit \(short) and the ones before it")

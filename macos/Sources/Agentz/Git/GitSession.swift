@@ -159,12 +159,8 @@ private struct GitSessionBar: View {
                 }
             }
             GitTabButton(title: "History", count: nil, isSelected: !store.showsReferences && store.selectedSection == .history,
-                         help: "The commits, of all branches or of the one picked under Branches") {
-                if store.selectedSection == .history {
-                    store.showsReferences = false
-                } else {
-                    store.selectReference(nil)
-                }
+                         help: "The commits, of all branches or of the one picked above them") {
+                store.showHistory()
             }
             GitTabButton(title: "Branches", count: nil, isSelected: store.showsReferences,
                          help: "The branches, remotes, tags, stashes and worktrees") {
