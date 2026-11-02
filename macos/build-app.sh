@@ -15,5 +15,7 @@ cp "$bin/agentz" "$app/Contents/MacOS/agentz"
 cp -R "$bin"/*.bundle "$app/Contents/Resources/"
 cp "$dir/Resources/Agentz.icns" "$app/Contents/Resources/Agentz.icns"
 cp "$dir/Info.plist" "$app/Contents/Info.plist"
-codesign --force --deep --sign - "$app"
+# A certificate keeps the app's identity stable so macOS privacy grants survive
+# rebuilds. Ad hoc signing ties those grants to a single build's code hash.
+codesign --force --deep --sign "${CODE_SIGN_IDENTITY:-Apple Development}" "$app"
 printf '%s\n' "$app"
