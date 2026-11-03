@@ -100,13 +100,27 @@ final class GitSession: PaneContent {
 }
 
 /// A repository's git in a pane: a bar with where HEAD is, the tabs and
-/// the repository's actions; under it the changes, the history or the
-/// branches on the left, and the picked file or commit on the right.
+/// the repository's actions; under it the changes or the history on the
+/// left, and the picked file or commit on the right. The history has the
+/// branches next to it, since picking one of them narrows its commits.
 struct GitSessionView: View {
     @ObservedObject var store: RepositoryStore
     let look: Look
     @State private var showingStashSheet = false
     @State private var stashScope = StashScope.all
+    @AppStorage("gitReferencesShown") private var referencesShown = true
+    @AppStorage("gitReferencesWidth") private var referencesWidth = 220.0
+    @AppStorage("gitListWidth") private var listWidth = 360.0
+    @State private var paneWidth = CGFloat.infinity
+
+    /// The branches need room next to the list and the least of the detail.
+    private var referencesFit: Bool {
+        paneWidth >= referencesWidth + listWidth + 320
+    }
+
+    private var showsReferences: Bool {
+        store.selectedSection == .history && referencesShown && referencesFit
+    }
 
     var body: some View {
         // In a pane narrower than its columns, e.g. in a small window, they
@@ -115,35 +129,71 @@ struct GitSessionView: View {
         VStack(alignment: .leading, spacing: 0) {
             GitSessionBar()
             Rectangle().fill(look.divider).frame(height: 1)
-            HSplitView {
-                // A stack, not a Group: the split view would take each view
-                // in a Group as a column of its own, so a new tab would be a
-                // new column, at the first width and not the one it was given.
-                ZStack {
-                    if store.showsReferences {
-                        GitSidebarView()
-                    } else {
-                        switch store.selectedSection {
-                        case .history:
-                            HistoryView()
-                        case .changes:
-                            GitChangesView(showingStashSheet: $showingStashSheet, stashScope: $stashScope)
-                        }
+            // Not a split view: it shares out new room between its columns,
+            // so the list would change width when the branches come and go.
+            HStack(spacing: 0) {
+                if showsReferences {
+                    GitSidebarView()
+                        .frame(width: referencesWidth)
+                        .background(look.sidebar)
+                    ColumnResizer(width: $referencesWidth, range: 160...400)
+                        .zIndex(1)
+                }
+                Group {
+                    switch store.selectedSection {
+                    case .history:
+                        HistoryView(canShowReferences: referencesFit)
+                    case .changes:
+                        GitChangesView(showingStashSheet: $showingStashSheet, stashScope: $stashScope)
                     }
                 }
-                .frame(minWidth: 300, idealWidth: 360, maxWidth: 600)
+                .frame(width: listWidth)
                 .background(look.sidebar)
+                ColumnResizer(width: $listWidth, range: 300...600)
+                    .zIndex(1)
                 DetailView()
                     .frame(minWidth: 320, maxWidth: .infinity)
             }
         }
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onGeometryChange(for: CGFloat.self, of: \.size.width) { paneWidth = $0 }
         .font(.system(size: 12))
         .foregroundStyle(look.text)
         .background(look.background)
         .tint(look.accent)
         .environmentObject(store)
         .modifier(GitDialogs(store: store, showingStashSheet: $showingStashSheet, stashScope: stashScope))
+    }
+}
+
+/// The line at the end of a column. Drag it to change the column's width,
+/// which stays whichever columns show.
+private struct ColumnResizer: View {
+    @Binding var width: Double
+    let range: ClosedRange<Double>
+    @State private var widthAtStart: Double?
+
+    var body: some View {
+        Rectangle()
+            .fill(Look.shared.divider)
+            .frame(width: 1)
+            .overlay {
+                Color.clear
+                    .frame(width: 7)
+                    .contentShape(Rectangle())
+                    .onHover { inside in
+                        if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                            .onChanged { drag in
+                                let start = widthAtStart ?? width
+                                widthAtStart = start
+                                width = min(max(start + drag.translation.width, range.lowerBound), range.upperBound)
+                            }
+                            .onEnded { _ in widthAtStart = nil }
+                    )
+            }
     }
 }
 
@@ -162,21 +212,15 @@ private struct GitSessionBar: View {
             .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
             .help("Switch to another branch (⌘B)")
             .padding(.trailing, 10)
-            GitTabButton(title: "Changes", count: store.changes.count, isSelected: !store.showsReferences && store.selectedSection == .changes,
+            GitTabButton(title: "Changes", count: store.changes.count, isSelected: store.selectedSection == .changes,
                          help: "The staged and unstaged changes (⌘P)") {
-                if store.selectedSection == .changes {
-                    store.showsReferences = false
-                } else {
+                if store.selectedSection != .changes {
                     store.selectChanges()
                 }
             }
-            GitTabButton(title: "History", count: nil, isSelected: !store.showsReferences && store.selectedSection == .history,
-                         help: "The commits, of all branches or of the one picked above them") {
+            GitTabButton(title: "History", count: nil, isSelected: store.selectedSection == .history,
+                         help: "The commits, and the branches, remotes, tags, stashes and worktrees") {
                 store.showHistory()
-            }
-            GitTabButton(title: "Branches", count: nil, isSelected: store.showsReferences,
-                         help: "The branches, remotes, tags, stashes and worktrees") {
-                store.showsReferences = true
             }
             Spacer(minLength: 12)
             ToolbarIconButton("Fetch", systemImage: "arrow.down.circle", help: "Fetch all remotes") {
@@ -385,7 +429,7 @@ struct GitDialogs: ViewModifier {
         if files.count > names.count { names.append("\(files.count - names.count) more") }
         return "Switching would overwrite your changes to \(names.formatted(.list(type: .and))).\n\n"
             + "Stash and Switch puts all your changes away first, untracked files too. "
-            + "To get them back, apply the stash under Branches in the git tab."
+            + "To get them back, apply the stash under Stashes in the git tab's History."
     }
 
     private var pushMessage: String {

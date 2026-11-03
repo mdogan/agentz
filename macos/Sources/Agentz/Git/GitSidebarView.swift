@@ -2,9 +2,9 @@ import AgentzCore
 import AppKit
 import SwiftUI
 
-/// The git tab's Branches tab: the local and remote branches, tags,
-/// stashes and worktrees, and the unreachable commits. Picking one shows
-/// its history; right-click one for what it can do.
+/// The column next to the git tab's history: the local and remote branches,
+/// tags, stashes and worktrees, and the unreachable commits. Picking one
+/// narrows the history to it; right-click one for what it can do.
 struct GitSidebarView: View {
     @EnvironmentObject private var store: RepositoryStore
     @AppStorage("gitBranchesExpanded") private var branchesExpanded = true
@@ -41,6 +41,17 @@ struct GitSidebarView: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 1) {
+                SidebarRow(
+                    title: "All Branches",
+                    icon: "square.stack.3d.up",
+                    isSelected: store.historyScope == .all && store.selectedStash == nil
+                ) {
+                    store.selectReference(nil)
+                } badge: {
+                    EmptyView()
+                }
+                .help("Show the commits of all branches")
+
                 let locals = references(of: .localBranch)
                 SidebarSectionHeader(title: "Branches", count: locals.count, isExpanded: $branchesExpanded) {
                     Button {
@@ -127,7 +138,7 @@ struct GitSidebarView: View {
                 SidebarRow(
                     title: "Unreachable Commits",
                     icon: "lifepreserver",
-                    isSelected: false
+                    isSelected: store.historyScope == .lostAndDangling
                 ) {
                     store.selectLostAndDanglingCommits()
                 } badge: {
@@ -647,8 +658,7 @@ private struct ReferenceSidebarRow: View {
             isSelected: store.selectedReference == reference,
             isProminent: reference.isCurrent,
             indent: indent,
-            dragPayload: reference.kind == .localBranch ? reference.name : nil,
-            doubleClick: reference.kind == .tag || reference.isCurrent ? nil : { store.checkout(reference) }
+            dragPayload: reference.kind == .localBranch ? reference.name : nil
         ) {
             store.selectReference(reference)
         } badge: {
@@ -900,11 +910,8 @@ private struct SidebarRow<Badge: View>: View {
     /// Makes the row draggable, carrying this string, such as a local branch
     /// name dropped on a `BranchDropTarget`.
     let dragPayload: String?
-    /// What a double-click does, if anything.
-    let doubleClick: (() -> Void)?
     let action: () -> Void
     @ViewBuilder let badge: () -> Badge
-    @State private var waitingForSecondClick: Task<Void, Never>?
 
     init(
         title: String,
@@ -914,7 +921,6 @@ private struct SidebarRow<Badge: View>: View {
         isProminent: Bool = false,
         indent: CGFloat = 0,
         dragPayload: String? = nil,
-        doubleClick: (() -> Void)? = nil,
         action: @escaping () -> Void,
         @ViewBuilder badge: @escaping () -> Badge
     ) {
@@ -925,7 +931,6 @@ private struct SidebarRow<Badge: View>: View {
         self.isProminent = isProminent
         self.indent = indent
         self.dragPayload = dragPayload
-        self.doubleClick = doubleClick
         self.action = action
         self.badge = badge
     }
@@ -933,30 +938,7 @@ private struct SidebarRow<Badge: View>: View {
     var body: some View {
         clickableRow
             .disabled(!isEnabled)
-            .help(doubleClick == nil ? "Show \(title)" : "Show the commits of \(title). Double-click to switch to it.")
-            .onDisappear {
-                waitingForSecondClick?.cancel()
-                waitingForSecondClick = nil
-            }
-    }
-
-    /// A click leaves this list, so a second click would land somewhere
-    /// else. A row with a double-click therefore waits a moment before it
-    /// does what a click does.
-    private func click() {
-        guard let doubleClick else { return action() }
-        if let waiting = waitingForSecondClick {
-            waiting.cancel()
-            waitingForSecondClick = nil
-            doubleClick()
-            return
-        }
-        waitingForSecondClick = Task {
-            try? await Task.sleep(for: .seconds(min(NSEvent.doubleClickInterval, 0.3)))
-            guard !Task.isCancelled else { return }
-            waitingForSecondClick = nil
-            action()
-        }
+            .help("Show \(title)")
     }
 
     /// A `Button` tracks the mouse from press to release and never lets a drag
@@ -967,7 +949,7 @@ private struct SidebarRow<Badge: View>: View {
     private var clickableRow: some View {
         if let dragPayload {
             GitForkHoverButtonBody(label: label, isPressed: false, variant: variant)
-                .onTapGesture(perform: click)
+                .onTapGesture(perform: action)
                 .draggable(dragPayload) {
                     Label(dragPayload, systemImage: icon)
                         .padding(.horizontal, 8)
@@ -978,7 +960,7 @@ private struct SidebarRow<Badge: View>: View {
                 .accessibilityAddTraits(.isButton)
                 .accessibilityAction { action() }
         } else {
-            Button(action: click) {
+            Button(action: action) {
                 label
             }
             .buttonStyle(GitForkHoverButtonStyle(variant))

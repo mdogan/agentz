@@ -3474,6 +3474,27 @@ struct GitParserTests {
     }
 
     @Test
+    @MainActor
+    func pickingBranchesWhileBusyShowsTheLastOneAndNoError() async throws {
+        let root = try prepareBranches(named: "picks")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = try await openedStore(root)
+        let feature = try #require(store.references.first { $0.name == "feature" })
+        let main = try #require(store.references.first { $0.name == "main" })
+
+        store.selectReference(feature)
+        #expect(store.isLoading)
+        store.selectReference(nil)
+        store.selectReference(main)
+        try await settle(store)
+
+        #expect(store.errorMessage == nil)
+        #expect(store.selectedReference == main)
+        #expect(store.historyScope == .revision(main.fullName))
+    }
+
+    @Test
     func newBranchStartsAtThePickedBranchAndChecksOutOnlyIfAsked() async throws {
         let root = try prepareBranches(named: "new-branch")
         defer { try? FileManager.default.removeItem(at: root) }

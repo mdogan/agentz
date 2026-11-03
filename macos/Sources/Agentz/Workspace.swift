@@ -583,11 +583,11 @@ final class Workspace {
             waiting[ObjectIdentifier(r)] = notice.message ?? "Finished"
             notify?("\(key.agent.displayName) is waiting", title, notice.message, key)
         }
-        let titleChanged = tabs.contains { r in
+        let rowChanged = tabs.contains { r in
             (r.key.agent == .shell && r.linked == nil || r.key.agent == .git)
-                && rows.contains { $0.key == r.key && $0.title != r.title }
+                && rows.contains { $0.key == r.key && ($0.title != r.title || $0.git != r.git?.status) }
         }
-        if cwdChanged || titleChanged {
+        if cwdChanged || rowChanged {
             rebuildRows()
         } else {
             refreshStates()

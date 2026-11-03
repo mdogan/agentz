@@ -27,10 +27,6 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var operationLabel: String?
     @Published var selectedSection: WorkspaceSection = .history
-    /// The git tab lists the branches, remotes, tags, stashes and worktrees
-    /// in place of the changes or the history. Picking one of them, or the
-    /// changes or a history, ends it.
-    @Published var showsReferences = false
     @Published private(set) var historyScope: CommitHistoryScope = .all
     @Published var selectedCommit: GitCommit?
     @Published private(set) var selectedChange: WorkingChange?
@@ -51,6 +47,9 @@ final class RepositoryStore: ObservableObject {
     /// A switch that waits for the user: agents work in the worktree, or
     /// git refused because of uncommitted changes.
     @Published private(set) var pendingCheckout: PendingCheckout?
+    /// The last pick in the branch list made during another operation. It
+    /// runs when that one ends: clicking down the list isn't an error.
+    private var queuedPick: (() -> Void)?
     @Published private(set) var worktreePendingForceDelete: GitWorktree?
     @Published private(set) var pendingPushPlan: GitPushPlan?
     @Published private(set) var pendingBranchMove: GitBranchMove?
@@ -237,7 +236,6 @@ final class RepositoryStore: ObservableObject {
 
             self.selectedStash = nil
             self.selectedSection = .history
-            self.showsReferences = false
             if let loaded = self.commits.first(where: { $0.hash == commit.hash }) {
                 if !self.filteredCommits.contains(loaded) {
                     self.searchText = ""
@@ -303,7 +301,6 @@ final class RepositoryStore: ObservableObject {
     /// the user comes back to it.
     func selectChanges() {
         cancelHistoryPagination(resetState: false)
-        showsReferences = false
         selectedSection = .changes
         if let change = changes.first {
             selectChange(change, staged: change.isStaged)
@@ -312,7 +309,6 @@ final class RepositoryStore: ObservableObject {
 
     /// Goes back to the history as it was left: the same branch and commit.
     func showHistory() {
-        showsReferences = false
         guard selectedSection != .history else { return }
         selectedSection = .history
         showCommit(selectedCommit)
@@ -501,8 +497,11 @@ final class RepositoryStore: ObservableObject {
 
     func selectReference(_ reference: GitReference?) {
         guard let root = repositoryURL else { return }
+        guard !isLoading else {
+            queuedPick = { [weak self] in self?.selectReference(reference) }
+            return
+        }
         cancelHistoryPagination()
-        showsReferences = false
         _ = startOperation("Loading \(reference?.name ?? "history")") {
             self.selectedStash = nil
             self.selectedReference = reference
@@ -514,8 +513,11 @@ final class RepositoryStore: ObservableObject {
 
     func selectLostAndDanglingCommits() {
         guard let root = repositoryURL else { return }
+        guard !isLoading else {
+            queuedPick = { [weak self] in self?.selectLostAndDanglingCommits() }
+            return
+        }
         cancelHistoryPagination()
-        showsReferences = false
         _ = startOperation("Loading unreachable commits") {
             self.selectedStash = nil
             self.selectedReference = nil
@@ -548,7 +550,6 @@ final class RepositoryStore: ObservableObject {
         }
         cancelHistoryPagination()
         let revision = pathHistoryRevision
-        showsReferences = false
         _ = startOperation("Loading history for \(path)") {
             self.selectedStash = nil
             self.selectedSection = .history
@@ -559,8 +560,11 @@ final class RepositoryStore: ObservableObject {
 
     func selectStash(_ stash: GitStash) {
         guard let root = repositoryURL else { return }
+        guard !isLoading else {
+            queuedPick = { [weak self] in self?.selectStash(stash) }
+            return
+        }
         cancelHistoryPagination()
-        showsReferences = false
         _ = startOperation("Loading \(stash.displayName)") {
             self.selectedStash = stash
             self.selectedReference = nil
@@ -1551,6 +1555,9 @@ final class RepositoryStore: ObservableObject {
                 activeOperationID = nil
                 isLoading = false
                 operationLabel = nil
+                let pick = queuedPick
+                queuedPick = nil
+                pick?()
             }
         }
         do {
@@ -1575,6 +1582,7 @@ final class RepositoryStore: ObservableObject {
         repositoryPathItems = []
         isLoadingRepositoryPaths = false
         isShowingBranchPicker = false
+        queuedPick = nil
         isShowingPathHistoryPicker = false
         isShowingCommitHashPicker = false
         commitReveal = nil

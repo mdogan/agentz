@@ -1096,27 +1096,22 @@ final class SmokeTest {
             _ = await wait(3) { git.store.operationLabel == nil }
         }
 
-        // The left column keeps the width it was given, whichever tab it shows.
-        if let columns = firstSplitView(in: git.paneView), let left = columns.arrangedSubviews.first {
-            columns.setPosition(430, ofDividerAt: 0)
-            _ = await wait(0.3) { false }
-            let width = left.frame.width
-            check("the left column can be made wider", width > 400, "width \(width)")
-            func same(_ name: String) async {
-                _ = await wait(0.5) { false }
-                let now = columns.arrangedSubviews.first?.frame.width ?? 0
-                check("it keeps its width in \(name)", abs(now - width) < 1, "\(now), was \(width)")
-            }
-            git.store.selectReference(nil)
-            await same("History")
+        // The list keeps the width it was dragged to, whichever tab it shows.
+        do {
+            let defaults = UserDefaults.standard
+            let saved = defaults.object(forKey: "gitListWidth")
+            defaults.set(360.0, forKey: "gitListWidth")
+            defer { defaults.set(saved, forKey: "gitListWidth") }
             git.store.selectChanges()
-            await same("Changes")
-            git.store.showsReferences = true
-            await same("Branches")
-            git.store.showsReferences = false
-            await same("Changes again")
-        } else {
-            check("the git tab has columns", false)
+            _ = await wait(0.5) { false }
+            drag(git.paneView, from: NSPoint(x: 360, y: 500), to: NSPoint(x: 430, y: 500))
+            _ = await wait(0.3) { false }
+            let width = defaults.double(forKey: "gitListWidth")
+            check("the list can be made wider by its line", abs(width - 430) < 2, "width \(width)")
+            git.store.showHistory()
+            _ = await wait(0.5) { false }
+            git.store.selectReference(nil)
+            _ = await wait(3) { git.store.operationLabel == nil }
         }
 
         // The button in the bar opens the log, showing this repository. It
@@ -1133,29 +1128,22 @@ final class SmokeTest {
         ws.openGit(repo + "/.")
         check("one git tab per worktree", ws.tabs.filter { $0.key.agent == .git }.count == 1 && ws.current == key)
 
-        // In the Branches tab, a click on a branch shows its commits after
-        // a moment, and a double-click switches to it. The row of `other`,
-        // under the bar, the section's header and `main`:
-        git.store.showsReferences = true
+        // Next to the history, a click on a branch shows its commits. The row
+        // of `other`, under the bar, All Branches, the section's header and
+        // `main`:
+        git.store.showHistory()
         _ = await wait(0.5) { false }
-        let other = NSPoint(x: 120, y: 37 + 6 + 29 + 23 + 11)
+        let other = NSPoint(x: 120, y: 37 + 6 + 24 + 29 + 23 + 11)
         click(git.paneView, at: other)
-        check("a click on a branch waits for a second one", git.store.showsReferences)
-        check("then shows the branch's commits, without switching to it", await wait(3) {
-            !git.store.showsReferences && git.store.selectedReference?.name == "other" && git.store.operationLabel == nil
+        check("a click on a branch shows its commits, without switching to it", await wait(3) {
+            git.store.selectedReference?.name == "other" && git.store.operationLabel == nil
         } && git.store.branch == "main", "\(git.store.selectedReference?.name ?? "none") on \(git.store.branch)")
-        git.store.selectReference(nil)
-        _ = await wait(3) { git.store.operationLabel == nil }
-        git.store.showsReferences = true
+        check("and the history stays", git.store.selectedSection == .history)
+        click(git.paneView, at: other)
+        click(git.paneView, at: other)
         _ = await wait(0.5) { false }
-        click(git.paneView, at: other)
-        click(git.paneView, at: other)
-        check("a double-click switches to it", await wait(5) {
-            git.store.branch == "other" && git.store.operationLabel == nil
-        }, git.store.branch)
-        check("and the Branches tab stays", git.store.showsReferences)
-        if let main = git.store.references.first(where: { $0.name == "main" }) { git.store.checkout(main) }
-        _ = await wait(5) { git.store.branch == "main" && git.store.operationLabel == nil }
+        check("a double-click doesn't switch to it", git.store.branch == "main" && git.store.errorMessage == nil,
+              "\(git.store.branch) \(git.store.errorMessage ?? "")")
         if let other = git.store.references.first(where: { $0.name == "other" }) {
             git.store.createBranch(named: "made-from-other", from: other, checkout: false)
             check("a new branch can start at another branch, without a switch", await wait(5) {
@@ -1313,16 +1301,6 @@ final class SmokeTest {
         }
     }
 
-    /// The outermost split view in `view`.
-    private func firstSplitView(in view: NSView) -> NSSplitView? {
-        var level = [view]
-        while !level.isEmpty {
-            if let found = level.lazy.compactMap({ $0 as? NSSplitView }).first { return found }
-            level = level.flatMap(\.subviews)
-        }
-        return nil
-    }
-
     private func snapshot(_ name: String? = nil) {
         guard var path = ProcessInfo.processInfo.environment["AGENTZ_SMOKE_SNAPSHOT"],
               let view = window.window?.contentView?.superview,
@@ -1386,6 +1364,24 @@ private func click(_ view: NSView, at point: NSPoint) {
             with: type, location: view.convert(point, to: nil), modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
             eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0
+        ) else { continue }
+        NSApp.sendEvent(event)
+    }
+}
+
+/// Presses the mouse at `start`, moves it to `end` and lets go.
+@MainActor
+private func drag(_ view: NSView, from start: NSPoint, to end: NSPoint) {
+    guard let window = view.window else { return }
+    let steps: [(NSEvent.EventType, NSPoint)] = [
+        (.leftMouseDown, start), (.leftMouseDragged, NSPoint(x: (start.x + end.x) / 2, y: end.y)),
+        (.leftMouseDragged, end), (.leftMouseUp, end),
+    ]
+    for (type, point) in steps {
+        guard let event = NSEvent.mouseEvent(
+            with: type, location: view.convert(point, to: nil), modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1
         ) else { continue }
         NSApp.sendEvent(event)
     }

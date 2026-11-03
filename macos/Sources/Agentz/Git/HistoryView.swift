@@ -4,6 +4,8 @@ import SwiftUI
 
 struct HistoryView: View {
     @EnvironmentObject private var store: RepositoryStore
+    /// The pane has room for the branches next to the history.
+    let canShowReferences: Bool
 
     var body: some View {
         let commits = store.filteredCommits
@@ -19,7 +21,7 @@ struct HistoryView: View {
         let look = Look.shared
         let remoteBranches = Set(store.references.filter { $0.kind == .remoteBranch }.map(\.name))
         VStack(spacing: 0) {
-            HistoryHeader(commitCount: commits.count)
+            HistoryHeader(commitCount: commits.count, canShowReferences: canShowReferences)
 
             Rectangle().fill(look.divider).frame(height: 1)
 
@@ -333,17 +335,40 @@ private struct CommitGraph: View {
     }
 }
 
-/// The top of the history: a search over the loaded commits, and a menu of
-/// the branches to limit them to.
+/// The top of the history: the button that shows or hides the branches, a
+/// search over the loaded commits, and, when the branches can't say what
+/// the commits are limited to, a menu that does.
 private struct HistoryHeader: View {
     @EnvironmentObject private var store: RepositoryStore
     let commitCount: Int
+    let canShowReferences: Bool
+    @AppStorage("gitReferencesShown") private var referencesShown = true
     @FocusState private var searchFocused: Bool
+
+    /// The branches list what shows, unless it is a commit or a file's history.
+    private var showsMenu: Bool {
+        guard referencesShown, canShowReferences else { return true }
+        switch store.historyScope {
+        case .commit, .path: return true
+        case .all, .revision, .lostAndDangling: return false
+        }
+    }
 
     var body: some View {
         let look = Look.shared
         let scope = scope
         HStack(spacing: 6) {
+            ToolbarIconButton(
+                "Branches",
+                systemImage: "sidebar.left",
+                help: !canShowReferences
+                    ? "The window is too narrow for the branches"
+                    : referencesShown ? "Hide the branches" : "Show the branches, remotes, tags, stashes and worktrees"
+            ) {
+                referencesShown.toggle()
+            }
+            .disabled(!canShowReferences)
+
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(look.secondary)
@@ -366,19 +391,21 @@ private struct HistoryHeader: View {
             .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
             .help("Find commits by message, author, hash or branch, among those loaded")
 
-            PopUpButton(look: look, help: "Showing \(scope.help). Click to pick a branch.", menu: branchMenu) {
-                HStack(spacing: 4) {
-                    Image(systemName: scope.icon)
-                        .font(.system(size: 10))
-                    Text(scope.title)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+            if showsMenu {
+                PopUpButton(look: look, help: "Showing \(scope.help). Click to pick a branch.", menu: branchMenu) {
+                    HStack(spacing: 4) {
+                        Image(systemName: scope.icon)
+                            .font(.system(size: 10))
+                        Text(scope.title)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(showsAll ? look.secondary : look.text)
+                    .frame(maxWidth: 150)
                 }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(showsAll ? look.secondary : look.text)
-                .frame(maxWidth: 150)
+                .fixedSize()
             }
-            .fixedSize()
         }
         .padding(.horizontal, 8)
         .frame(height: 34)
