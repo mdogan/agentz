@@ -1114,6 +1114,19 @@ final class SmokeTest {
             _ = await wait(3) { git.store.operationLabel == nil }
         }
 
+        // The sheet that asks where to start wears the theme, not the system's white.
+        let startApp = NSApp.delegate as! AppDelegate
+        startApp.newShell(nil)
+        check("the new session sheet shows", await wait(3) { self.window.window?.attachedSheet != nil })
+        if let sheet = window.window?.attachedSheet {
+            _ = await wait(0.5) { false }
+            let theme = NSColor(Look.shared.colors.background).usingColorSpace(.sRGB)
+            check("the new session sheet has the theme's background",
+                  sheet.backgroundColor.usingColorSpace(.sRGB) == theme, "\(sheet.backgroundColor)")
+            sheet.contentViewController?.dismiss(nil)
+            _ = await wait(1) { self.window.window?.attachedSheet == nil }
+        }
+
         // The button in the bar opens the log, showing this repository. It
         // comes third from the right, before Zed, Finder and the name "tab".
         click(git.paneView, at: NSPoint(x: git.paneView.bounds.width - 102, y: 18))

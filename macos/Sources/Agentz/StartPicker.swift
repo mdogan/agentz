@@ -148,7 +148,9 @@ struct StartPicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(agent == .shell ? "New Shell" : "New \(agent.displayName) Session").font(.headline)
+            // The field keeps the keyboard while the sheet shows.
             PickerField(text: $query, prompt: "Folder, repo or branch", move: move, submit: submit, cancel: cancel)
+                .lookField(isFocused: true, systemImage: "magnifyingglass")
             list
             HStack {
                 Spacer()
@@ -188,8 +190,8 @@ struct StartPicker: View {
                 .padding(4)
             }
             .frame(height: height)
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+            .background(Look.shared.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Look.shared.divider))
             .onChange(of: selection) { _, id in
                 if let id { proxy.scrollTo(id) }
             }
@@ -197,29 +199,29 @@ struct StartPicker: View {
     }
 
     private func row(_ place: StartPlace) -> some View {
+        let look = Look.shared
         let selected = place.id == selection
-        let dim = selected ? Color.white.opacity(0.75) : Color.secondary
         return HStack(spacing: 6) {
             Image(systemName: place.icon)
-                .foregroundStyle(dim)
+                .foregroundStyle(look.secondary)
                 .frame(width: 16)
             Text(place.title)
                 .lineLimit(1)
                 .layoutPriority(1)
             if let branch = place.branch {
-                Text(branch).foregroundStyle(dim).lineLimit(1)
+                Text(branch).foregroundStyle(look.secondary).lineLimit(1)
             }
             Spacer(minLength: 12)
             Text(place.detail)
-                .foregroundStyle(dim)
+                .foregroundStyle(look.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
-        .foregroundStyle(selected ? Color.white : Color.primary)
+        .foregroundStyle(look.text)
         .padding(.leading, place.indented ? 26 : 6)
         .padding(.trailing, 6)
         .frame(height: Self.rowHeight)
-        .background(selected ? Color(nsColor: .selectedContentBackgroundColor) : .clear, in: RoundedRectangle(cornerRadius: 5))
+        .background(selected ? look.selection : .clear, in: RoundedRectangle(cornerRadius: 5))
         .contentShape(Rectangle())
         .onTapGesture {
             selection = place.id
@@ -260,7 +262,9 @@ private struct PickerField: NSViewRepresentable {
     func makeNSView(context: Context) -> NSTextField {
         let field = FirstField(string: text)
         field.placeholderString = prompt
-        field.bezelStyle = .roundedBezel
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
         field.delegate = context.coordinator
         return field
     }
@@ -268,6 +272,7 @@ private struct PickerField: NSViewRepresentable {
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.field = self
         if field.stringValue != text { field.stringValue = text }
+        field.textColor = NSColor(Look.shared.colors.foreground)
     }
 
     func makeCoordinator() -> Coordinator {

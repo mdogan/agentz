@@ -152,6 +152,7 @@ struct SidebarView: View {
                 switchTo: { wt in actions.start(request.agent, wt.path, request.repo.dir) },
                 close: { newWorktree = nil }
             )
+            .lookWindowStyle()
         }
     }
 
@@ -328,6 +329,7 @@ struct SidebarView: View {
                     workspace.setStatus(removed == 1 ? "Removed 1 worktree." : "Removed \(removed) worktrees.")
                 }
             }
+            .lookWindowStyle()
         }
     }
 

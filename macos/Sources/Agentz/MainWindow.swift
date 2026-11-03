@@ -201,12 +201,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         tab.terminal?.showFind()
     }
 
-    /// Shows `content` in a sheet over the window. It gets a function that
-    /// closes the sheet.
+    /// Shows `content` in a sheet over the window, in the theme's colors. It
+    /// gets a function that closes the sheet.
     func showSheet<Content: View>(_ content: (_ close: @escaping () -> Void) -> Content) {
         guard let parent = window?.contentViewController else { return }
         weak var sheet: NSViewController?
-        let host = NSHostingController(rootView: content { sheet?.dismiss(nil) })
+        let host = NSHostingController(rootView: content { sheet?.dismiss(nil) }.lookWindowStyle())
         host.sizingOptions = .preferredContentSize
         sheet = host
         parent.presentAsSheet(host)

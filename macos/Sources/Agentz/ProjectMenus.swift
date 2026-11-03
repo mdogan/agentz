@@ -196,9 +196,9 @@ struct NewWorktreeView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("New Worktree").font(.headline)
             TextField("Branch", text: $name, prompt: Text("New or existing branch"))
-                .textFieldStyle(.roundedBorder)
                 .focused($nameFocused)
                 .onSubmit(create)
+                .lookField(isFocused: nameFocused)
             branchList
             details
             if let error {
@@ -262,7 +262,7 @@ struct NewWorktreeView: View {
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(picked ? Color.accentColor.opacity(0.2) : .clear, in: RoundedRectangle(cornerRadius: 4))
+                    .background(picked ? Look.shared.selection : .clear, in: RoundedRectangle(cornerRadius: 4))
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2) {
                         name = pickName(b)
@@ -274,8 +274,8 @@ struct NewWorktreeView: View {
             .padding(4)
         }
         .frame(height: 150)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+        .background(Look.shared.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Look.shared.divider))
         .overlay {
             if branches == nil {
                 ProgressView().controlSize(.small)
@@ -448,8 +448,8 @@ struct CleanupWorktreesView: View {
             .padding(6)
         }
         .frame(height: 260)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+        .background(Look.shared.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Look.shared.divider))
         .overlay {
             if let cleanup, cleanup.worktrees.isEmpty {
                 Text("\(repo.name) has no other worktrees.").foregroundStyle(.secondary)
