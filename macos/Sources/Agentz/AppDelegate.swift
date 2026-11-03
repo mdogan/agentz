@@ -530,7 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     @objc func showGitHistory(_: Any?) { gitTab?.store.showHistory() }
 
     @objc func switchBranch(_: Any?) { gitStore?.showBranchPicker() }
-    @objc func newBranch(_: Any?) { gitStore?.isShowingNewBranchSheet = true }
+    @objc func newBranch(_: Any?) { gitStore?.showNewBranchSheet() }
     @objc func pathHistory(_: Any?) { gitTab?.store.showPathHistoryPicker() }
     @objc func openCommit(_: Any?) { gitTab?.store.showCommitHashPicker() }
     @objc func gitFetch(_: Any?) { gitStore?.fetch() }

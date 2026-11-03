@@ -1156,11 +1156,27 @@ final class SmokeTest {
         check("and the Branches tab stays", git.store.showsReferences)
         if let main = git.store.references.first(where: { $0.name == "main" }) { git.store.checkout(main) }
         _ = await wait(5) { git.store.branch == "main" && git.store.operationLabel == nil }
+        if let other = git.store.references.first(where: { $0.name == "other" }) {
+            git.store.createBranch(named: "made-from-other", from: other, checkout: false)
+            check("a new branch can start at another branch, without a switch", await wait(5) {
+                git.store.operationLabel == nil && git.store.references.contains { $0.name == "made-from-other" }
+            } && git.store.branch == "main", git.store.branch)
+            git.store.createBranch(named: "switched-from-other", from: other)
+            check("or with one", await wait(5) {
+                git.store.branch == "switched-from-other" && git.store.operationLabel == nil
+            }, git.store.branch)
+            if let main = git.store.references.first(where: { $0.name == "main" }) { git.store.checkout(main) }
+            _ = await wait(5) { git.store.branch == "main" && git.store.operationLabel == nil }
+        }
         git.store.selectReference(nil)
         _ = await wait(3) { git.store.operationLabel == nil }
 
         FileManager.default.createFile(atPath: repo + "/wip.txt", contents: Data("wip\n".utf8))
         check("it sees new files", await wait(6) { !git.store.changes.isEmpty })
+        ws.tick()
+        check("and its row counts them", await wait(3) {
+            ws.rows.first { $0.key == key }?.git?.summary == "1 change"
+        }, "\(String(describing: ws.rows.first { $0.key == key }?.git))")
         git.store.stash(message: "wip")
         check("a stash takes the changes away", await wait(6) {
             git.store.changes.isEmpty && git.store.stashes.count == 1

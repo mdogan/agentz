@@ -110,7 +110,8 @@ enum GitCommandKind: String, CaseIterable, Identifiable, Hashable, Sendable {
                 || options.contains(where: { $0.hasPrefix("--set-upstream-to") }) {
                 return .write
             }
-            return operands.isEmpty || has("--list", "-l") ? .read : .write
+            // After `--` comes the name of a branch to make.
+            return operands.isEmpty && !hasPaths || has("--list", "-l") ? .read : .write
 
         case "tag":
             if has("-d", "--delete") { return .delete }

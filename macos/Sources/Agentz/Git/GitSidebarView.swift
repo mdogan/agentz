@@ -33,12 +33,29 @@ struct GitSidebarView: View {
         store.references.filter { $0.kind == kind }
     }
 
+    /// The branch clicked in this list, if a branch is what was clicked.
+    private var selectedBranch: GitReference? {
+        store.selectedReference.flatMap { $0.kind == .tag ? nil : $0 }
+    }
+
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 1) {
                 let locals = references(of: .localBranch)
-                SidebarSectionHeader(title: "Branches", count: locals.count, isExpanded: $branchesExpanded)
-                    .modifier(BranchDropTarget(prefix: ""))
+                SidebarSectionHeader(title: "Branches", count: locals.count, isExpanded: $branchesExpanded) {
+                    Button {
+                        store.showNewBranchSheet(from: selectedBranch)
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Look.shared.secondary)
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(GitForkHoverButtonStyle(.icon))
+                    .help("Create a branch that starts at \(selectedBranch?.name ?? "HEAD")")
+                    .disabled(store.isLoading)
+                }
+                .modifier(BranchDropTarget(prefix: ""))
                 if branchesExpanded {
                     if let primaryBranch {
                         ReferenceSidebarRow(
@@ -431,15 +448,25 @@ private struct StashSidebarRow: View {
 
 /// A section's title, its count and a chevron. Click it to fold or
 /// unfold the section.
-private struct SidebarSectionHeader: View {
+private struct SidebarSectionHeader<Accessory: View>: View {
     let title: String
     let count: Int
     @Binding var isExpanded: Bool
+    /// A button of the section's own, next to the chevron.
+    @ViewBuilder var accessory: () -> Accessory
     @State private var hovered = false
 
     var body: some View {
+        toggle.overlay(alignment: .trailing) {
+            accessory()
+                .padding(.top, 6)
+                .padding(.trailing, 18)
+        }
+    }
+
+    private var toggle: some View {
         let look = Look.shared
-        Button {
+        return Button {
             isExpanded.toggle()
         } label: {
             HStack(spacing: 5) {
@@ -466,6 +493,12 @@ private struct SidebarSectionHeader: View {
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
         .help(isExpanded ? "Hide the \(title.lowercased())" : "Show the \(title.lowercased())")
+    }
+}
+
+extension SidebarSectionHeader where Accessory == EmptyView {
+    init(title: String, count: Int, isExpanded: Binding<Bool>) {
+        self.init(title: title, count: count, isExpanded: isExpanded) { EmptyView() }
     }
 }
 
@@ -633,6 +666,15 @@ private struct ReferenceSidebarRow: View {
                 store.checkout(reference)
             }
             .disabled(store.isLoading)
+
+            if reference.kind != .tag {
+                Button {
+                    store.showNewBranchSheet(from: reference)
+                } label: {
+                    Label("New Branch from “\(reference.name)”…", systemImage: "arrow.triangle.branch")
+                }
+                .disabled(store.isLoading)
+            }
 
             if reference.kind == .localBranch {
                 Button {

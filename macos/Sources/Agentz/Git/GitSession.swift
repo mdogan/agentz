@@ -56,6 +56,18 @@ final class GitSession: PaneContent {
         }
     }
 
+    /// Where the repository stands, for the session list. It is as of the
+    /// last read, as `title` is: a tab reads only while it shows.
+    var status: GitRowStatus {
+        let conflicts = store.changes.filter(\.isConflicted).count
+        return GitRowStatus(
+            ahead: store.ahead,
+            behind: store.behind,
+            changes: store.changes.count - conflicts,
+            conflicts: conflicts
+        )
+    }
+
     var paneView: NSView { host }
 
     var isFocused: Bool {
@@ -182,9 +194,9 @@ private struct GitSessionBar: View {
             ToolbarSeparator()
             ToolbarIconButton(
                 "New Branch", systemImage: "arrow.triangle.branch", badge: "plus.circle.fill",
-                help: "Create a branch at HEAD and switch to it"
+                help: "Create a branch at HEAD"
             ) {
-                store.isShowingNewBranchSheet = true
+                store.showNewBranchSheet()
             }
             .disabled(store.isLoading)
             ToolbarIconButton("Refresh", systemImage: "arrow.clockwise", help: "Read the repository again (⌘R)") {
@@ -291,7 +303,7 @@ struct GitDialogs: ViewModifier {
             }
             .animation(.snappy, value: store.operationLabel)
             .sheet(isPresented: $store.isShowingNewBranchSheet) {
-                BranchSheet(isPresented: $store.isShowingNewBranchSheet)
+                BranchSheet(start: store.newBranchStart, isPresented: $store.isShowingNewBranchSheet)
                     .environmentObject(store)
                     .lookWindowStyle()
             }
@@ -316,7 +328,7 @@ struct GitDialogs: ViewModifier {
                     .lookWindowStyle()
             }
             .alert(
-                "Switch to \(store.pendingCheckout?.reference.name ?? "the Branch")?",
+                "Switch to \(store.pendingCheckout?.destination ?? "the Branch")?",
                 isPresented: Binding(
                     get: { store.pendingCheckout != nil },
                     set: { if !$0 { store.cancelCheckout() } }

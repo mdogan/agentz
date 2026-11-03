@@ -108,6 +108,8 @@ struct Row: Identifiable, Equatable {
     var active = false
     /// Where it is in a split, on screen or not.
     var pane: SplitPane?
+    /// A git tab's repository, in place of when it last ran.
+    var git: GitRowStatus?
     /// The list draws a split's two rows in one box: this row's half of it,
     /// when the other row is right next to it.
     var box: BoxHalf?
@@ -727,7 +729,7 @@ final class Workspace {
         // Sessions we started that have no transcript yet, and shells. A
         // shell running an agent is shown as that agent's session.
         for r in tabs where !rows.contains(where: { r.shows($0.key) }) {
-            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.spawnedAt, pinned: r.pinned, active: true))
+            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.spawnedAt, pinned: r.pinned, active: true, git: r.git?.status))
         }
         if panes.split != nil || !hiddenSplits.isEmpty {
             for i in rows.indices where rows[i].active {

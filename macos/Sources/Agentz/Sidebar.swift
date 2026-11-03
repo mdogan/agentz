@@ -733,8 +733,17 @@ private struct RowView: View {
                 }
             }
             .lineLimit(1)
-            Text(" · \(age(now: now, row.updated))")
-                .fixedSize()
+            if let git = row.git {
+                // When a git tab was opened says nothing about the repository.
+                if !git.summary.isEmpty {
+                    Text(" · \(git.summary)")
+                        .fixedSize()
+                        .help(git.help)
+                }
+            } else {
+                Text(" · \(age(now: now, row.updated))")
+                    .fixedSize()
+            }
             if let pr = row.pr {
                 Text(" · ").fixedSize()
                 PullRequestLink(pr: pr, look: look)

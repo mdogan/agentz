@@ -187,8 +187,13 @@ struct BranchToolbarBadge: View {
 struct BranchSheet: View {
     @FocusState private var isFieldFocused: Bool
     @EnvironmentObject private var store: RepositoryStore
+    /// Where the branch starts. Without one, it starts at HEAD.
+    let start: GitReference?
     @Binding var isPresented: Bool
+    /// Called when the branch is on its way, not when the sheet is cancelled.
+    var onCreate: () -> Void = {}
     @State private var name = ""
+    @State private var checksOut = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -196,8 +201,10 @@ struct BranchSheet: View {
                 VStack(alignment: .leading) {
                     Text("Create New Branch")
                         .font(.headline)
-                    Text("The branch starts at the current HEAD.")
+                    Text(start.map { "The branch starts at “\($0.name)”." } ?? "The branch starts at the current HEAD.")
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
 
@@ -205,6 +212,9 @@ struct BranchSheet: View {
                 .focused($isFieldFocused)
                 .onSubmit { create() }
                 .lookField(isFocused: isFieldFocused)
+
+            Toggle("Check out the new branch", isOn: $checksOut)
+                .toggleStyle(.checkbox)
 
             HStack {
                 Spacer()
@@ -214,23 +224,27 @@ struct BranchSheet: View {
                 Button {
                     create()
                 } label: {
-                    Text("Create & Checkout")
+                    Text(checksOut ? "Create & Checkout" : "Create")
                 }
                 .buttonStyle(.borderedProminent)
-                .help("Create the branch at HEAD and check it out")
-                .disabled(
-                    name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || store.isLoading
-                )
+                .help(checksOut ? "Create the branch and check it out" : "Create the branch and stay on \(store.branch)")
+                .disabled(!canCreate)
             }
         }
         .padding(20)
         .frame(width: 440)
+        .onAppear { isFieldFocused = true }
+    }
+
+    private var canCreate: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.isLoading
     }
 
     private func create() {
-        store.createBranch(named: name)
+        guard canCreate else { return }
+        store.createBranch(named: name, from: start, checkout: checksOut)
         isPresented = false
+        onCreate()
     }
 }
 

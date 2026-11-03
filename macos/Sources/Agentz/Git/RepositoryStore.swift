@@ -56,8 +56,10 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var pendingBranchMove: GitBranchMove?
     @Published var isConfirmingPush = false
     @Published var isShowingBranchPicker = false
-    /// The sheet that names a new branch at HEAD.
+    /// The sheet that names a new branch.
     @Published var isShowingNewBranchSheet = false
+    /// Where the sheet's branch starts. Without one, it starts at HEAD.
+    @Published private(set) var newBranchStart: GitReference?
     @Published var isShowingPathHistoryPicker = false
     @Published var isShowingCommitHashPicker = false
     @Published var isShowingKeyboardShortcuts = false
@@ -194,6 +196,12 @@ final class RepositoryStore: ObservableObject {
     func showBranchPicker() {
         guard repositoryURL != nil else { return }
         isShowingBranchPicker = true
+    }
+
+    func showNewBranchSheet(from start: GitReference? = nil) {
+        guard repositoryURL != nil else { return }
+        newBranchStart = start
+        isShowingNewBranchSheet = true
     }
 
     /// Resolves a hash without changing what the window shows, so the commit
@@ -859,19 +867,31 @@ final class RepositoryStore: ObservableObject {
     func checkoutDespiteAgents() {
         guard let pending = pendingCheckout, case .agentsWorking = pending.reason, !isLoading else { return }
         pendingCheckout = nil
-        performCheckout(pending.reference)
+        performCheckout(pending.reference, newBranch: pending.newBranch)
     }
 
-    private func performCheckout(_ reference: GitReference) {
-        mutate("Switching to \(reference.name)") { root in
+    private func performCheckout(_ reference: GitReference, newBranch: String? = nil) {
+        mutate("Switching to \(newBranch ?? reference.name)") { root in
             do {
-                try await self.client.checkout(at: root, reference: reference)
+                try await self.switchTo(reference, newBranch: newBranch, at: root)
             } catch let error as CheckoutOverwriteError {
-                self.pendingCheckout = PendingCheckout(reference: reference, reason: .overwrites(error.files))
+                self.pendingCheckout = PendingCheckout(
+                    reference: reference,
+                    newBranch: newBranch,
+                    reason: .overwrites(error.files)
+                )
                 return
             }
             self.selectedReference = nil
             self.historyScope = .all
+        }
+    }
+
+    private func switchTo(_ reference: GitReference, newBranch: String?, at root: URL) async throws {
+        if let newBranch {
+            try await client.createBranch(at: root, name: newBranch, from: reference)
+        } else {
+            try await client.checkout(at: root, reference: reference)
         }
     }
 
@@ -880,15 +900,14 @@ final class RepositoryStore: ObservableObject {
     func stashAndCheckout() {
         guard let pending = pendingCheckout, case .overwrites = pending.reason, !isLoading else { return }
         pendingCheckout = nil
-        let reference = pending.reference
-        let message = "Before switching to \(reference.name)"
-        mutate("Stashing and switching to \(reference.name)") { root in
+        let message = "Before switching to \(pending.destination)"
+        mutate("Stashing and switching to \(pending.destination)") { root in
             try await self.client.stash(at: root, message: message, scope: .all)
             do {
-                try await self.client.checkout(at: root, reference: reference)
+                try await self.switchTo(pending.reference, newBranch: pending.newBranch, at: root)
             } catch {
                 throw GitOperationError(
-                    command: "git switch \(reference.name)",
+                    command: "git switch \(pending.destination)",
                     message: "\(error.localizedDescription)\n\nYour changes are in the stash “\(message)”."
                 )
             }
@@ -901,14 +920,28 @@ final class RepositoryStore: ObservableObject {
         pendingCheckout = nil
     }
 
-    func createBranch(named name: String) {
+    /// Makes a branch at `start`, or at HEAD without one, and switches to it
+    /// if `checkout`. A switch that changes files asks first, as `checkout`
+    /// does; if the user cancels, the branch isn't made.
+    func createBranch(named name: String, from start: GitReference? = nil, checkout: Bool = true) {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanName.isEmpty else { return }
-        mutate("Creating \(cleanName)") { root in
-            try await self.client.createBranch(at: root, name: cleanName)
-            self.selectedReference = nil
-            self.historyScope = .all
+        let head = references.first(where: \.isCurrent)
+        guard checkout, let start, start.target != head?.target else {
+            mutate("Creating \(cleanName)") { root in
+                try await self.client.createBranch(at: root, name: cleanName, from: start, checkout: checkout)
+                if checkout {
+                    self.selectedReference = nil
+                    self.historyScope = .all
+                }
+            }
+            return
         }
+        if let root = repositoryURL, let agents = agentsWorking?(root), !agents.isEmpty {
+            pendingCheckout = PendingCheckout(reference: start, newBranch: cleanName, reason: .agentsWorking(agents))
+            return
+        }
+        performCheckout(start, newBranch: cleanName)
     }
 
     func rename(_ reference: GitReference, to name: String) {

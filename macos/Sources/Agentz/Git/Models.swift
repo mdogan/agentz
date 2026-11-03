@@ -671,6 +671,39 @@ struct CheckoutOverwriteError: LocalizedError, Sendable {
     }
 }
 
+/// What a git tab's row in the session list says about its repository.
+/// A repository with nothing to report says nothing.
+struct GitRowStatus: Equatable, Sendable {
+    var ahead = 0
+    var behind = 0
+    var changes = 0
+    var conflicts = 0
+
+    /// Such as `↑2 ↓1 · 3 changes · 1 conflict`.
+    var summary: String {
+        var parts: [String] = []
+        let tracking = [ahead > 0 ? "↑\(ahead)" : nil, behind > 0 ? "↓\(behind)" : nil].compactMap(\.self)
+        if !tracking.isEmpty { parts.append(tracking.joined(separator: " ")) }
+        if changes > 0 { parts.append(Self.count(changes, "change")) }
+        if conflicts > 0 { parts.append(Self.count(conflicts, "conflict")) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// `summary` in words.
+    var help: String {
+        var parts: [String] = []
+        if ahead > 0 { parts.append("\(Self.count(ahead, "commit")) to push") }
+        if behind > 0 { parts.append("\(Self.count(behind, "commit")) to pull") }
+        if changes > 0 { parts.append("\(Self.count(changes, "uncommitted change"))") }
+        if conflicts > 0 { parts.append("\(Self.count(conflicts, "file")) in conflict") }
+        return parts.joined(separator: "\n")
+    }
+
+    private static func count(_ count: Int, _ noun: String) -> String {
+        "\(count) \(noun)\(count == 1 ? "" : "s")"
+    }
+}
+
 /// A switch that waits for the user to say what to do.
 struct PendingCheckout: Equatable, Sendable {
     enum Reason: Equatable, Sendable {
@@ -682,7 +715,13 @@ struct PendingCheckout: Equatable, Sendable {
     }
 
     let reference: GitReference
+    /// The new branch to make from `reference` and switch to, instead of
+    /// switching to `reference` itself.
+    var newBranch: String?
     let reason: Reason
+
+    /// The branch the switch ends up on.
+    var destination: String { newBranch ?? reference.name }
 }
 
 /// Raised when `git worktree remove` refuses because the worktree holds

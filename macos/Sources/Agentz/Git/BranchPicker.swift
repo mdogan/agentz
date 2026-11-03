@@ -65,6 +65,8 @@ struct BranchPickerSheet: View {
     @FocusState private var isSearchFocused: Bool
     @State private var searchText = ""
     @State private var selectedBranch: GitReference?
+    /// The branch a new one starts at, while the sheet that names it shows.
+    @State private var newBranchStart: GitReference?
 
     private var branches: [GitReference] {
         BranchPickerSearch.filter(store.references, query: searchText)
@@ -160,6 +162,12 @@ struct BranchPickerSheet: View {
             Divider()
 
             HStack(spacing: 12) {
+                Button("New Branch…") {
+                    newBranchStart = selectedBranch
+                }
+                .help(selectedBranch.map { "Create a branch that starts at \($0.name)" } ?? "Pick a branch to start from")
+                .disabled(selectedBranch == nil || store.isLoading)
+
                 Spacer()
 
                 HStack(spacing: 10) {
@@ -207,7 +215,22 @@ struct BranchPickerSheet: View {
             }
             .padding(16)
         }
-        .frame(width: 520, height: 420)
+        .frame(width: 600, height: 420)
+        .sheet(item: $newBranchStart) { start in
+            BranchSheet(
+                start: start,
+                isPresented: Binding(
+                    get: { newBranchStart != nil },
+                    set: { if !$0 { newBranchStart = nil } }
+                ),
+                onCreate: {
+                    isDone = true
+                    dismiss()
+                }
+            )
+            .environmentObject(store)
+            .lookWindowStyle()
+        }
         .onAppear {
             reconcileSelection()
             isSearchFocused = true

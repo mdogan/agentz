@@ -120,3 +120,27 @@ struct BranchPickerTests {
         )
     }
 }
+
+struct GitRowStatusTests {
+    @Test
+    func saysNothingWhenThereIsNothingToSay() {
+        #expect(GitRowStatus().summary.isEmpty)
+        #expect(GitRowStatus().help.isEmpty)
+    }
+
+    @Test
+    func leavesOutWhatIsZero() {
+        #expect(GitRowStatus(ahead: 2).summary == "↑2")
+        #expect(GitRowStatus(behind: 1).summary == "↓1")
+        #expect(GitRowStatus(changes: 1).summary == "1 change")
+        #expect(GitRowStatus(conflicts: 2).summary == "2 conflicts")
+        #expect(
+            GitRowStatus(ahead: 2, behind: 1, changes: 3, conflicts: 1).summary
+                == "↑2 ↓1 · 3 changes · 1 conflict"
+        )
+        #expect(
+            GitRowStatus(ahead: 1, behind: 2, changes: 1, conflicts: 2).help
+                == "1 commit to push\n2 commits to pull\n1 uncommitted change\n2 files in conflict"
+        )
+    }
+}

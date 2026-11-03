@@ -3474,6 +3474,96 @@ struct GitParserTests {
     }
 
     @Test
+    func newBranchStartsAtThePickedBranchAndChecksOutOnlyIfAsked() async throws {
+        let root = try prepareBranches(named: "new-branch")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try runGit(["update-ref", "refs/remotes/origin/feature", "feature"], at: root)
+        func output(_ arguments: [String]) throws -> String {
+            try runGitCommand(arguments, at: root).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let featureHash = try output(["rev-parse", "feature"])
+        let mainHash = try output(["rev-parse", "main"])
+        let feature = GitReference(
+            name: "feature", fullName: "refs/heads/feature", kind: .localBranch,
+            target: featureHash, isCurrent: false
+        )
+        let remote = GitReference(
+            name: "origin/feature", fullName: "refs/remotes/origin/feature", kind: .remoteBranch,
+            target: featureHash, isCurrent: false
+        )
+        let client = GitClient()
+
+        // Without the checkout, HEAD stays.
+        try await client.createBranch(at: root, name: "stays", from: feature, checkout: false)
+        #expect(try output(["rev-parse", "stays"]) == featureHash)
+        #expect(try output(["branch", "--show-current"]) == "main")
+
+        // At HEAD, without the checkout.
+        try await client.createBranch(at: root, name: "at-head", checkout: false)
+        #expect(try output(["rev-parse", "at-head"]) == mainHash)
+        #expect(try output(["branch", "--show-current"]) == "main")
+
+        // From a remote branch: it doesn't take that branch as its upstream.
+        try await client.createBranch(at: root, name: "from-remote", from: remote, checkout: false)
+        #expect(try output(["rev-parse", "from-remote"]) == featureHash)
+        #expect(try output(["for-each-ref", "--format=%(upstream)", "refs/heads/from-remote"]).isEmpty)
+
+        try await client.createBranch(at: root, name: "moved", from: remote)
+        #expect(try output(["branch", "--show-current"]) == "moved")
+        #expect(try output(["rev-parse", "HEAD"]) == featureHash)
+        #expect(try output(["for-each-ref", "--format=%(upstream)", "refs/heads/moved"]).isEmpty)
+    }
+
+    @Test
+    @MainActor
+    func newBranchWithCheckoutAsksLikeASwitch() async throws {
+        let root = try prepareBranches(named: "new-branch-asks")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "local\n".write(to: root.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+
+        let store = try await openedStore(root)
+        store.agentsWorking = { _ in ["Claude “Fix it”"] }
+        let feature = try #require(store.references.first { $0.name == "feature" })
+        let main = try #require(store.references.first { $0.isCurrent })
+
+        // No switch, or a switch that changes no files: nothing to ask.
+        store.createBranch(named: "stays", from: feature, checkout: false)
+        #expect(store.pendingCheckout == nil)
+        try await settle(store)
+        #expect(store.branch == "main")
+        #expect(store.references.contains { $0.name == "stays" })
+        store.createBranch(named: "same-files", from: main)
+        #expect(store.pendingCheckout == nil)
+        try await settle(store)
+        #expect(store.branch == "same-files")
+        try runGit(["switch", "main"], at: root)
+        try await settle(store)
+        store.refresh()
+        try await settle(store)
+
+        // Agents work there: it asks, and nothing happened yet.
+        store.createBranch(named: "moved", from: feature)
+        #expect(store.pendingCheckout == PendingCheckout(reference: feature, newBranch: "moved", reason: .agentsWorking(["Claude “Fix it”"])))
+        #expect(store.pendingCheckout?.destination == "moved")
+        #expect(!store.references.contains { $0.name == "moved" })
+
+        // Switch Anyway meets the changes in the way, and asks about those.
+        store.checkoutDespiteAgents()
+        try await settle(store)
+        #expect(store.pendingCheckout == PendingCheckout(reference: feature, newBranch: "moved", reason: .overwrites(["a.txt"])))
+        #expect(store.branch == "main")
+        #expect(!store.references.contains { $0.name == "moved" })
+
+        // Stash and Switch ends on the new branch, with the changes stashed.
+        store.stashAndCheckout()
+        try await settle(store)
+        #expect(store.errorMessage == nil)
+        #expect(store.pendingCheckout == nil)
+        #expect(store.branch == "moved")
+        #expect(store.stashes.count == 1)
+    }
+
+    @Test
     @MainActor
     func switchingToTheCurrentBranchDoesNothing() async throws {
         let root = try prepareBranches(named: "current")

@@ -29,6 +29,13 @@ struct GitCommandLogTests {
 
     @Test
     func classifiesWriteCommands() {
+        let start = GitReference(
+            name: "origin/main",
+            fullName: "refs/remotes/origin/main",
+            kind: .remoteBranch,
+            target: "abcdef",
+            isCurrent: false
+        )
         let writes: [[String]] = [
             GitClient.commitArguments(message: "Message", amend: false, signWithGPG: true),
             ["add", "--", "file"],
@@ -42,6 +49,10 @@ struct GitCommandLogTests {
             ["branch", "--move", "old", "new"],
             ["branch", "feature"],
             ["tag", "v1.0"],
+            GitClient.createBranchArguments(name: "feature", from: nil, checkout: false),
+            GitClient.createBranchArguments(name: "feature", from: nil, checkout: true),
+            GitClient.createBranchArguments(name: "feature", from: start, checkout: false),
+            GitClient.createBranchArguments(name: "feature", from: start, checkout: true),
             GitClient.stashArguments(message: "WIP", scope: .all),
             GitClient.applyStashArguments(selector: "stash@{0}"),
             ["config", "user.name", "Name"],

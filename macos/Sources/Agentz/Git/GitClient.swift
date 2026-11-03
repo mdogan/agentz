@@ -1065,8 +1065,39 @@ struct GitClient: Sendable {
         }
     }
 
-    func createBranch(at root: URL, name: String) async throws {
-        _ = try await run(["switch", "-c", name], in: root)
+    /// Makes the branch `name` at `start`, or at HEAD without one, and
+    /// switches to it if `checkout`. Throws `CheckoutOverwriteError` when the
+    /// switch would overwrite uncommitted changes; the branch isn't made then.
+    func createBranch(
+        at root: URL,
+        name: String,
+        from start: GitReference? = nil,
+        checkout: Bool = true
+    ) async throws {
+        do {
+            _ = try await run(
+                Self.createBranchArguments(name: name, from: start, checkout: checkout),
+                in: root
+            )
+        } catch let error as GitOperationError {
+            guard let files = Self.overwrittenFiles(in: error.message) else { throw error }
+            throw CheckoutOverwriteError(files: files, message: error.message)
+        }
+    }
+
+    /// With `--no-track`, a branch made from `origin/main` doesn't get
+    /// `origin/main` as its upstream: its first push makes its own.
+    static func createBranchArguments(
+        name: String,
+        from start: GitReference?,
+        checkout: Bool
+    ) -> [String] {
+        let startPoint = start.map { ["--no-track", "--", $0.fullName] }
+        if checkout {
+            return ["switch", "-c", name] + (startPoint ?? [])
+        }
+        guard let start else { return ["branch", "--", name] }
+        return ["branch", "--no-track", "--", name, start.fullName]
     }
 
     func rename(at root: URL, reference: GitReference, to name: String) async throws {
