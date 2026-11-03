@@ -1069,8 +1069,8 @@ struct FolderApp: Identifiable {
     }
 }
 
-/// The buttons on a hovered row: start a new session in its folder, and
-/// stop the session's agent or shell, like File › Close Session.
+/// The buttons on a hovered row: start a new session or open Git in its
+/// folder, and stop the session's agent or shell, like File › Close Session.
 private struct RowButtons: View {
     let look: Look
     let closable: Bool
@@ -1080,12 +1080,12 @@ private struct RowButtons: View {
     static let size: CGFloat = 22
 
     static func width(closable: Bool) -> CGFloat {
-        size * (closable ? 4 : 3)
+        size * (closable ? 5 : 4)
     }
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach([Agent.claude, .codex, .shell], id: \.self) { agent in
+            ForEach([Agent.claude, .codex, .git, .shell], id: \.self) { agent in
                 RowButton(look: look, help: agent.newHere, action: { start(agent) }) { _ in
                     agent.icon
                         .font(.system(size: 13))
