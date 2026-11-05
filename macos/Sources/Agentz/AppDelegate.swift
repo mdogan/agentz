@@ -18,6 +18,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private var hotKey: HotKey?
     /// Notices that come at the same moment become one notification.
     private var notices = NoticeBatcher()
+    /// View > Theme.
+    private var themeMenu: NSMenu?
+    /// The wait before a theme highlighted in that menu shows.
+    private var themePreview: Task<Void, Never>?
 
     // MARK: - Launch
 
@@ -564,24 +568,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc func selectTheme(_ sender: NSMenuItem) {
+        themePreview?.cancel()
         look?.selectTheme(sender.representedObject as? String)
         if let issue = GhosttyApp.configIssue {
             workspace?.setStatus("Your Ghostty config was not used: \(issue)")
         }
     }
 
-    /// View > Theme: follow the Ghostty config, or pick any Ghostty theme
-    /// from the Light and Dark submenus. Filled each time it opens, so new
-    /// themes show up.
+    /// View > Theme: follow the Ghostty config, or pick a Ghostty theme from
+    /// the Light and Dark submenus, without the ones that look like another.
+    /// Filled each time it opens, so new themes show up.
     func menuNeedsUpdate(_ menu: NSMenu) {
-        guard let look else { return }
+        guard menu === themeMenu, let look else { return }
         look.refreshThemes()
         let selected = look.selectedTheme
         menu.removeAllItems()
         add(menu, "Follow Ghostty", #selector(selectTheme(_:))).state = selected == nil ? .on : .off
         menu.addItem(.separator())
-        let light = look.themes.filter { !$0.isDark }
-        let dark = look.themes.filter(\.isDark)
+        // The picked theme stays, so the menu can show its check mark.
+        let shown = look.themes.filter { !$0.isLookalike || $0.name == selected }
+        let light = shown.filter { !$0.isDark }
+        let dark = shown.filter(\.isDark)
         // Without Ghostty.app there are usually no themes; say so instead
         // of showing empty submenus.
         if light.isEmpty && dark.isEmpty {
@@ -589,11 +596,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
         for (title, themes) in [("Light", light), ("Dark", dark)] where !themes.isEmpty {
             let side = submenu(menu, title)
+            side.delegate = self
             for theme in themes {
                 let item = add(side, theme.name, #selector(selectTheme(_:)))
                 item.representedObject = theme.name
                 item.state = theme.name == selected ? .on : .off
             }
+        }
+    }
+
+    /// A highlighted theme shows in the whole app. Anything else in these
+    /// menus, or nothing, goes back to the picked theme.
+    func menu(_: NSMenu, willHighlight item: NSMenuItem?) {
+        if let item, item.action == #selector(selectTheme(_:)) {
+            previewTheme(item.representedObject as? String)
+        } else {
+            previewTheme(GhosttyApp.pickedTheme)
+        }
+    }
+
+    /// Closing goes back to the picked theme. A click on a theme sends its
+    /// action after this, and that cancels going back.
+    func menuDidClose(_ menu: NSMenu) {
+        if menu === themeMenu { previewTheme(GhosttyApp.pickedTheme) }
+    }
+
+    /// Previews `name` after a short wait, so moving across the menu only
+    /// loads the theme the pointer stops on.
+    private func previewTheme(_ name: String?) {
+        themePreview?.cancel()
+        themePreview = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            if !Task.isCancelled { self?.look?.previewTheme(name) }
         }
     }
 
@@ -741,7 +775,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             quick.keyEquivalentModifierMask = menuModifiers(trigger.modifiers)
         }
         view.addItem(.separator())
-        submenu(view, "Theme").delegate = self
+        let themes = submenu(view, "Theme")
+        themes.delegate = self
+        themeMenu = themes
 
         // For the git tab in the focused pane, else for the Changes panel's
         // repository. GitFork's keys, where agentz has no other use for them.

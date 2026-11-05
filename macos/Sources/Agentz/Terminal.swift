@@ -501,22 +501,31 @@ enum GhosttyApp {
         return dirs
     }()
 
-    /// The user's config with the picked theme, if any, in place of its
-    /// colors. Nil without either. A picked theme that is no longer on
-    /// disk is left out, so the config's colors show.
-    private static var themedUserText: String? {
-        let picked = UserDefaults.standard.string(forKey: selectedThemeKey)
-            .flatMap { GhosttyThemes.path(of: $0, in: themeDirectories) }
-        guard let picked else { return userText }
-        return GhosttyThemes.config(userText ?? "", using: picked)
+    /// The name of the picked theme, even if it is no longer on disk.
+    static var pickedTheme: String? {
+        UserDefaults.standard.string(forKey: selectedThemeKey)
+    }
+
+    /// The user's config with theme `name`, if any, in place of its colors.
+    /// Nil without either. A theme that is no longer on disk is left out,
+    /// so the config's colors show.
+    private static func themedUserText(_ name: String?) -> String? {
+        guard let path = name.flatMap({ GhosttyThemes.path(of: $0, in: themeDirectories) }) else { return userText }
+        return GhosttyThemes.config(userText ?? "", using: path)
     }
 
     /// Uses `name`'s colors in every terminal from now on, or the Ghostty
     /// config's when `nil`.
     static func selectTheme(_ name: String?) {
         UserDefaults.standard.set(name, forKey: selectedThemeKey)
+        showTheme(name)
+    }
+
+    /// Shows `name`'s colors in every terminal until the next launch or
+    /// change, without picking the theme.
+    static func showTheme(_ name: String?) {
         configIssue = nil
-        if let user = themedUserText {
+        if let user = themedUserText(name) {
             let text = defaults + "\n" + user
             _ = controller.setTheme(TerminalTheme())
             if controller.updateConfigSource(.generated(text)) {
@@ -548,7 +557,7 @@ enum GhosttyApp {
         let file = userConfigFile()
         userFile = file ?? ""
         userText = file.map(forTerminals)
-        guard let user = themedUserText else {
+        guard let user = themedUserText(pickedTheme) else {
             return TerminalController(configSource: .generated(defaults), theme: .default)
         }
         // Ours first, so their own settings and keybinds win.

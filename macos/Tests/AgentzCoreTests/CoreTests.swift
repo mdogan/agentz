@@ -380,6 +380,47 @@ final class ThemeColorTests: XCTestCase {
             GhosttyTheme(name: "Bare", isDark: true),
         ])
     }
+
+    func testMarksThemesThatLookTheSame() throws {
+        let (dirs, cleanup) = try themeDirectories()
+        defer { cleanup() }
+        let accents = "palette = 1=#ff5555\npalette = 2=#50fa7b\npalette = 3=#f1fa8c\npalette = 4=#bd93f9\npalette = 5=#ff79c6"
+        let night = "background = #1e1e2e\nforeground = #e0e0e0\n" + accents
+        for (dir, name, text) in [
+            (dirs[1], "Night", night),
+            (dirs[1], "Night Copy", night),
+            (dirs[1], "Night Close", "background = #1f1f2f\nforeground = #e2e2e2\n" + accents),
+            // A plainly different tint, text or accent is not the same.
+            (dirs[1], "Night Purple", "background = #2a1436\nforeground = #e0e0e0\n" + accents),
+            (dirs[1], "Night Amber", "background = #1e1e2e\nforeground = #ffb000\n" + accents),
+            (dirs[1], "Night Accents", night + "\npalette = 4=#00ff00"),
+            // Without accents it leaves them to Ghostty, which differs too.
+            (dirs[1], "Night Bare", "background = #1e1e2e\nforeground = #e0e0e0"),
+            // The same colors, but the user's own or well known: both stay.
+            (dirs[0], "Night Mine", night),
+            (dirs[1], "Nord", night),
+        ] {
+            try text.write(toFile: dir + "/" + name, atomically: true, encoding: .utf8)
+        }
+        let names = GhosttyThemes.names(in: dirs)
+        let themes = GhosttyThemes.themes(named: names, in: dirs, own: [dirs[0]])
+        XCTAssertEqual(Set(themes.filter(\.isLookalike).map(\.name)), ["Night", "Night Copy", "Night Close"])
+        XCTAssertEqual(Set(themes.filter { !$0.isLookalike }.map(\.name)), [
+            "Night Purple", "Night Amber", "Night Accents", "Night Bare", "Night Mine", "Nord",
+        ])
+        // Without `own`, Night Mine is only another lookalike of Nord.
+        XCTAssertTrue(GhosttyThemes.themes(named: names, in: dirs).contains { $0.name == "Night Mine" && $0.isLookalike })
+    }
+
+    func testShortestNameOfALookalikeGroupStays() throws {
+        let (dirs, cleanup) = try themeDirectories()
+        defer { cleanup() }
+        for name in ["Slate Tritanopia", "Slate", "Slate Soft"] {
+            try "background = #101418".write(toFile: dirs[1] + "/" + name, atomically: true, encoding: .utf8)
+        }
+        let themes = GhosttyThemes.themes(named: GhosttyThemes.names(in: dirs), in: dirs)
+        XCTAssertEqual(themes.filter { !$0.isLookalike }.map(\.name), ["Slate"])
+    }
 }
 
 final class WorktreeTests: XCTestCase {

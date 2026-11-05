@@ -27,6 +27,21 @@ public struct RGB: Equatable, Sendable {
     public func mixed(with other: RGB, _ amount: Double) -> RGB {
         RGB(r + (other.r - r) * amount, g + (other.g - g) * amount, b + (other.b - b) * amount)
     }
+
+    /// This color in OKLab, where equal distances look about equally
+    /// different.
+    fileprivate var oklab: (l: Double, a: Double, b: Double) {
+        func linear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        let (r, g, b) = (linear(r), linear(g), linear(b))
+        let l = cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+        let m = cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+        let s = cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+        return (
+            0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+        )
+    }
 }
 
 public struct TerminalColors: Equatable, Sendable {
@@ -107,16 +122,19 @@ public struct TerminalColors: Equatable, Sendable {
 public struct GhosttyTheme: Hashable, Sendable {
     public var name: String
     public var isDark: Bool
+    /// Looks the same in agentz as another theme, so the Theme menu leaves
+    /// it out. It still works when picked or named in the Ghostty config.
+    public var isLookalike: Bool
 
-    public init(name: String, isDark: Bool) {
-        (self.name, self.isDark) = (name, isDark)
+    public init(name: String, isDark: Bool, isLookalike: Bool = false) {
+        (self.name, self.isDark, self.isLookalike) = (name, isDark, isLookalike)
     }
 }
 
 /// The Ghostty themes on disk, and configs that use one of them.
 public enum GhosttyThemes {
-    /// Where Ghostty looks for themes by name. User themes come first.
-    public static func directories(
+    /// Where the user's own themes live.
+    public static func ownDirectories(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         home: String = NSHomeDirectory()
     ) -> [String] {
@@ -124,6 +142,15 @@ public enum GhosttyThemes {
         return [
             xdg + "/ghostty/themes",
             home + "/Library/Application Support/com.mitchellh.ghostty/themes",
+        ]
+    }
+
+    /// Where Ghostty looks for themes by name. User themes come first.
+    public static func directories(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = NSHomeDirectory()
+    ) -> [String] {
+        ownDirectories(environment: environment, home: home) + [
             "/Applications/Ghostty.app/Contents/Resources/ghostty/themes",
             home + "/Applications/Ghostty.app/Contents/Resources/ghostty/themes",
         ]
@@ -155,14 +182,59 @@ public enum GhosttyThemes {
     }
 
     /// Each named theme with whether its background is dark, for the Light
-    /// and Dark theme menus. A theme without a background keeps Ghostty's
-    /// dark one.
-    public static func themes(named names: [String], in directories: [String] = directories()) -> [GhosttyTheme] {
-        names.map { name in
-            let text = path(of: name, in: directories).flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
-            let colors = TerminalColors.from(config: text ?? "", dark: true) { _ in nil }
-            return GhosttyTheme(name: name, isDark: colors.isDark)
+    /// and Dark theme menus, and whether it is a lookalike of another one.
+    /// A theme without a background keeps Ghostty's dark one. Themes in
+    /// `own` are never lookalikes.
+    public static func themes(
+        named names: [String],
+        in directories: [String] = directories(),
+        own: [String] = []
+    ) -> [GhosttyTheme] {
+        var alwaysKept = wellKnown
+        let colors = names.map { name in
+            let path = path(of: name, in: directories)
+            if let path, own.contains(where: { path.hasPrefix($0 + "/") }) { alwaysKept.insert(name) }
+            let text = path.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
+            return TerminalColors.from(config: text ?? "", dark: true) { _ in nil }
         }
+        let lookalikes = lookalikes(names: names, colors: colors, alwaysKept: alwaysKept)
+        return zip(names, colors).map { name, colors in
+            GhosttyTheme(name: name, isDark: colors.isDark, isLookalike: lookalikes.contains(name))
+        }
+    }
+
+    /// Popular themes people look for by name. They stay in the menu even
+    /// when they look like another theme.
+    static let wellKnown: Set<String> = [
+        "Atom One Dark", "Atom One Light", "Ayu", "Ayu Light", "Ayu Mirage",
+        "Catppuccin Frappe", "Catppuccin Latte", "Catppuccin Macchiato", "Catppuccin Mocha",
+        "Claude", "Claude Light", "Dracula", "Everforest Dark Hard", "Ghostty Default Style Dark",
+        "GitHub Dark Default", "GitHub Light Default", "Gruvbox Dark", "Gruvbox Light",
+        "Kanagawa Dragon", "Kanagawa Lotus", "Kanagawa Wave", "Monokai Pro", "Night Owl", "Nightfox", "Nord",
+        "One Half Dark", "One Half Light", "Rose Pine", "Rose Pine Dawn", "Rose Pine Moon",
+        "TokyoNight", "TokyoNight Day", "TokyoNight Moon", "TokyoNight Storm",
+    ]
+
+    /// The names of themes that look the same as a theme kept before them.
+    /// `alwaysKept` go first, then short names, as "Modus Vivendi" is the one
+    /// to keep over "Modus Vivendi Tritanopia".
+    private static func lookalikes(names: [String], colors: [TerminalColors], alwaysKept: Set<String>) -> Set<String> {
+        let looks = colors.map(ThemeLook.init)
+        let order = names.indices.sorted {
+            let (a, b) = (alwaysKept.contains(names[$0]), alwaysKept.contains(names[$1]))
+            if a != b { return a }
+            return (names[$0].count, $0) < (names[$1].count, $1)
+        }
+        var kept: [ThemeLook] = []
+        var lookalikes = Set<String>()
+        for i in order {
+            if !alwaysKept.contains(names[i]), kept.contains(where: { $0.isSame(as: looks[i]) }) {
+                lookalikes.insert(names[i])
+            } else {
+                kept.append(looks[i])
+            }
+        }
+        return lookalikes
     }
 
     /// Settings a theme sets, which a picked theme replaces.
@@ -179,5 +251,48 @@ public enum GhosttyThemes {
             return !colorKeys.contains(key)
         }
         return (kept + ["theme = " + path]).joined(separator: "\n")
+    }
+}
+
+/// The colors agentz shows of a theme: the background and text everywhere,
+/// the first ANSI colors for status and accents, in OKLab.
+private struct ThemeLook {
+    typealias Lab = (l: Double, a: Double, b: Double)
+
+    /// How far apart colors can be and still look the same, picked by
+    /// comparing the themes Ghostty ships side by side. Accents are small
+    /// and can differ the most.
+    static let maxBackground = 0.035
+    static let maxForeground = 0.07
+    static let maxAccent = 0.2
+    /// A tint gives a background its character but measures small on dark
+    /// and pale colors, so it counts this many times over.
+    static let tintWeight = 3.0
+
+    let isDark: Bool
+    let background, foreground: Lab
+    /// Nil where a theme leaves the color to Ghostty.
+    let accents: [Lab?]
+
+    init(_ colors: TerminalColors) {
+        isDark = colors.isDark
+        background = colors.background.oklab
+        foreground = colors.foreground.oklab
+        accents = (1 ... 5).map { colors.palette[$0]?.oklab }
+    }
+
+    func isSame(as other: ThemeLook) -> Bool {
+        isDark == other.isDark
+            && Self.distance(background, other.background, tint: Self.tintWeight) < Self.maxBackground
+            && Self.distance(foreground, other.foreground, tint: Self.tintWeight) < Self.maxForeground
+            && zip(accents, other.accents).allSatisfy { a, b in
+                guard let a, let b else { return a == nil && b == nil }
+                return Self.distance(a, b, tint: 1) < Self.maxAccent
+            }
+    }
+
+    private static func distance(_ x: Lab, _ y: Lab, tint: Double) -> Double {
+        let (l, a, b) = (x.l - y.l, tint * (x.a - y.a), tint * (x.b - y.b))
+        return (l * l + a * a + b * b).squareRoot()
     }
 }

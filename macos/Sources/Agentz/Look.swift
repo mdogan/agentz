@@ -15,10 +15,14 @@ final class Look {
     private(set) var colors: TerminalColors
     /// Every Ghostty theme on disk, for the Theme menu.
     @ObservationIgnored private(set) var themes: [GhosttyTheme] = []
+    /// The theme whose colors show: the picked one, or another one the
+    /// Theme menu is previewing.
+    @ObservationIgnored private var shownTheme: String?
     @ObservationIgnored private var observation: NSKeyValueObservation?
 
     init() {
         colors = GhosttyApp.colors(dark: Self.systemIsDark)
+        shownTheme = GhosttyApp.pickedTheme
         observation = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.update() }
         }
@@ -36,13 +40,23 @@ final class Look {
     /// The name of the picked theme, or nil when following the config or
     /// when the picked one is no longer on disk.
     var selectedTheme: String? {
-        let name = UserDefaults.standard.string(forKey: GhosttyApp.selectedThemeKey)
+        let name = GhosttyApp.pickedTheme
         return themes.contains { $0.name == name } ? name : nil
     }
 
     /// Uses `name`'s colors from now on, or the Ghostty config's when `nil`.
     func selectTheme(_ name: String?) {
         GhosttyApp.selectTheme(name)
+        shownTheme = name
+        update()
+    }
+
+    /// Shows `name`'s colors, or the Ghostty config's when `nil`, without
+    /// picking the theme.
+    func previewTheme(_ name: String?) {
+        guard name != shownTheme else { return }
+        GhosttyApp.showTheme(name)
+        shownTheme = name
         update()
     }
 
@@ -52,7 +66,7 @@ final class Look {
     func refreshThemes() {
         let dirs = GhosttyApp.themeDirectories
         let names = GhosttyThemes.names(in: dirs)
-        if names != themes.map(\.name) { themes = GhosttyThemes.themes(named: names, in: dirs) }
+        if names != themes.map(\.name) { themes = GhosttyThemes.themes(named: names, in: dirs, own: GhosttyThemes.ownDirectories()) }
     }
 
     var isDark: Bool { colors.isDark }
