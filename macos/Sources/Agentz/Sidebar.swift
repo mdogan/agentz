@@ -1158,8 +1158,12 @@ private struct UsageView: View {
 
     private func line(_ label: String, _ w: AgentzCore.Window) -> some View {
         let left = w.left(now)
-        let color = left < 10 ? look.red : left < 20 ? look.yellow : look.green
-        let reset = w.resetsAt > now ? until(w.resetsAt - now) : ""
+        // The window started over after the agent last reported it, so
+        // the real numbers are not known until its next reply: gray.
+        let stale = w.resetsAt <= now
+        let color = stale ? look.faint : left < 10 ? look.red : left < 20 ? look.yellow : look.green
+        let reset = stale ? "" : until(w.resetsAt - now)
+        let name = label == "5h" ? "5-hour" : "weekly"
         return GridRow {
             Text(label)
                 .foregroundStyle(look.secondary)
@@ -1167,14 +1171,18 @@ private struct UsageView: View {
                 .frame(height: 5)
             Text("\(Int(left.rounded()))%")
                 .monospacedDigit()
-                .foregroundStyle(left < 20 ? color : look.text)
+                .foregroundStyle(stale ? look.faint : left < 20 ? color : look.text)
                 .gridColumnAlignment(.trailing)
-            Text(reset)
+            // Never empty: a Grid whose last column holds only empty texts
+            // lays out wider than the sidebar, under the full-width header.
+            Text(stale ? "–" : reset)
                 .monospacedDigit()
-                .foregroundStyle(look.secondary)
+                .foregroundStyle(stale ? look.faint : look.secondary)
                 .gridColumnAlignment(.trailing)
         }
-        .help("\(Int(left.rounded()))% of the \(label == "5h" ? "5-hour" : "weekly") limit left" + (reset.isEmpty ? "" : ", starts over in \(reset)"))
+        .help(stale
+            ? "The \(name) limit started over since the agent last reported it. New numbers come with its next reply."
+            : "\(Int(left.rounded()))% of the \(name) limit left, starts over in \(reset)")
     }
 }
 
