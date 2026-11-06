@@ -279,10 +279,10 @@ struct SidebarView: View {
                             .id(row.key)
                         if dividerAfter.contains(row.key) {
                             Rectangle()
-                                .fill(look.divider)
+                                .fill(look.faint)
                                 .frame(height: 1)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
+                                .padding(.horizontal, 2)
+                                .padding(.vertical, 8)
                         }
                     }
                 }
