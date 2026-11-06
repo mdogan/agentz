@@ -17,6 +17,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 mod action;
+mod export;
 mod procs;
 mod project;
 mod sessions;
@@ -26,7 +27,7 @@ mod usage;
 mod worktree;
 
 use procs::{Leftover, RunningElsewhere};
-use sessions::{Session, SessionKey};
+use sessions::{Agent, Session, SessionKey};
 use state::{SavedState, SavedTab};
 use turns::{TerminalSignal, TurnUpdate};
 use usage::Limits;
@@ -335,6 +336,14 @@ pub fn claude_running_elsewhere(id: String, quick_shell: Option<i32>) -> Option<
 #[uniffi::export]
 pub fn stop_leftovers(leftovers: Vec<Leftover>) -> u32 {
     u32::try_from(procs::stop(&leftovers)).unwrap_or(u32::MAX)
+}
+
+/// The conversation of the Claude or Codex session `id` as Markdown, from
+/// its transcript. None for shells and git tabs, and before the agent wrote
+/// its transcript.
+#[uniffi::export]
+pub fn transcript_markdown(agent: Agent, id: String) -> Option<String> {
+    export::markdown(agent, &id)
 }
 
 /// The process's current directory, even when its shell does not report

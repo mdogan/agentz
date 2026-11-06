@@ -130,6 +130,29 @@ final class Terminal: NSObject {
         (view.window?.firstResponder as? NSView)?.isDescendant(of: view) == true
     }
 
+    // MARK: - Text
+
+    /// The screen and its scrollback as plain text; nil when there is none.
+    /// A program on the alternate screen, like Claude in fullscreen mode or
+    /// Codex, leaves only the rows that show.
+    func screenText() -> String? {
+        // Ghostty writes the file, then asks the app to open it, before
+        // the action returns. Only for that moment is the catcher the
+        // view's delegate: Terminal leaves opening to Ghostty, which opens
+        // links that programs print with care.
+        let catcher = ScreenFileCatcher()
+        view.delegate = catcher
+        view.performBindingAction("write_screen_file:open,plain")
+        view.delegate = self
+        guard let path = catcher.path else { return nil }
+        defer {
+            // The file is alone in a folder of its own.
+            try? FileManager.default.removeItem(atPath: path)
+            rmdir((path as NSString).deletingLastPathComponent)
+        }
+        return try? String(contentsOfFile: path, encoding: .utf8)
+    }
+
     // MARK: - Find
 
     /// The find bar shows.
@@ -319,6 +342,17 @@ extension Terminal:
             textView.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
         }
         return scroll
+    }
+}
+
+/// Takes the path of the file `write_screen_file:open` wrote, instead of
+/// opening it.
+@MainActor
+private final class ScreenFileCatcher: TerminalSurfaceOpenURLDelegate {
+    var path: String?
+
+    func terminalDidRequestOpenURL(_ url: String, kind _: TerminalOpenURLKind) {
+        path = url
     }
 }
 

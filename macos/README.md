@@ -112,10 +112,13 @@ The **Git** menu works on the git tab in the focused pane, or else on the Change
 | ⌘P / ⌘B | the changes / switch to another branch |
 | ⌘R / ⇧⌘L | read the repository again / the git command log |
 | ⌘+ / ⌘- / ⌘0 | bigger / smaller / default font in every terminal (**View** menu), kept across launches |
+| ⌘S / ⌥⌘C | save / copy the shown session's contents |
 | ⌘K | clear the screen |
 | ⌘/ | list all shortcuts (**Help › Keyboard Shortcuts**) |
 
 **Edit › Find…** (⌘F) finds text in the terminal you work in, as in Ghostty: a bar at its top right takes the text, and Ghostty highlights every match on the screen and in the scrollback. ↩ or ⌘G goes up to the next match, starting at the newest, and scrolls there; ⇧↩ or ⇧⌘G goes back down. Short text waits a moment before it is searched for. ⎋ closes the bar and ends the search; ⌘F brings it back with the same text. Each terminal has its own bar, the quick terminal too. Only what is in the terminal's buffer can be found: a program that draws a screen of its own, like an editor, keeps the rest of its text to itself.
+
+**File › Save Session Contents…** (⌘S) saves the shown session to a file, and **Copy Session Contents** (⌥⌘C) copies it; a session's right-click menu has both too. For Claude and Codex this is the conversation, as Markdown, from the session's transcript: what you typed, what the agent answered, and a line for each tool it called (its thinking and what the tools returned are left out). The terminal can't give that when the agent draws on the alternate screen, as Codex and Claude's fullscreen mode (`"tui": "fullscreen"`) do: then it only has the rows on screen, which is also all that ⌘A selects. For a shell, the quick terminal, or an agent that has not written its transcript yet, it is the terminal's text, with the scrollback.
 
 When an agent finishes or waits for your permission while you are not looking at it, you get a notification. Click it to go to that session. Several at the same moment become one notification ("3 sessions need you"), and a click on it goes to the next one. A notification goes away once you looked at its sessions. If notifications are off, the session list shows a button to turn them on.
 

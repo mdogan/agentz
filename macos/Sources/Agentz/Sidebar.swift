@@ -32,6 +32,9 @@ struct SidebarActions {
     var notificationSettings: () -> Void
     /// Asks first, then stops these programs that were left running.
     var stopLeftovers: ([Leftover]) -> Void
+    /// Asks where, then saves the session's conversation or terminal text.
+    var saveContents: (SessionKey) -> Void
+    var copyContents: (SessionKey) -> Void
 }
 
 struct SidebarView: View {
@@ -453,6 +456,11 @@ struct SidebarView: View {
         }
         if key.agent != .shell, !key.id.hasPrefix("new-") {
             Button("Copy Session ID") { copy(key.id) }
+        }
+        if workspace.hasContents(key) {
+            Divider()
+            Button("Save Session Contents…") { actions.saveContents(key) }
+            Button("Copy Session Contents") { actions.copyContents(key) }
         }
     }
 

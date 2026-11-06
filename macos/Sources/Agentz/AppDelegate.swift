@@ -95,7 +95,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 recentFolders: { [weak self] in self?.recentFolders ?? [] },
                 clearRecentFolders: { UserDefaults.standard.removeObject(forKey: Self.recentsKey) },
                 notificationSettings: { [weak self] in self?.notificationSettings(nil) },
-                stopLeftovers: { [weak self] leftovers in self?.stopLeftovers(leftovers) }
+                stopLeftovers: { [weak self] leftovers in self?.stopLeftovers(leftovers) },
+                saveContents: { [weak self] key in
+                    guard let workspace = self?.workspace else { return }
+                    workspace.contents(of: key)?.save(in: workspace)
+                },
+                copyContents: { [weak self] key in
+                    guard let workspace = self?.workspace else { return }
+                    workspace.contents(of: key)?.copy(in: workspace)
+                }
             ),
             autoHide: SmokeTest.logPath == nil && UserDefaults.standard.bool(forKey: Self.autoHideKey)
         )
@@ -443,6 +451,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
     }
 
+    /// The contents of the quick terminal while it has the keyboard, or
+    /// else of the shown session.
+    private func currentContents() -> SessionContents? {
+        guard let workspace else { return nil }
+        if let quick = quickTerminal, quick.isKey {
+            guard let terminal = quick.terminal else { return nil }
+            let contents = SessionContents(title: "Quick Terminal", terminal: terminal)
+            if contents == nil { workspace.setStatus("The terminal has no text.") }
+            return contents
+        }
+        return workspace.currentTab.flatMap { workspace.contents(of: $0.linked ?? $0.key) }
+    }
+
+    @objc func saveContents(_: Any?) {
+        guard let workspace else { return }
+        currentContents()?.save(in: workspace)
+    }
+
+    @objc func copyContents(_: Any?) {
+        guard let workspace else { return }
+        currentContents()?.copy(in: workspace)
+    }
+
     @objc func togglePin(_: Any?) {
         guard let workspace, let tab = workspace.currentTab else { return }
         workspace.setPinned(tab.key, !tab.pinned)
@@ -671,6 +702,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return workspace.currentTab != nil
         case #selector(find(_:)):
             return activeTerminal != nil
+        case #selector(saveContents(_:)), #selector(copyContents(_:)):
+            return activeTerminal != nil
         case #selector(findNext(_:)), #selector(findPrevious(_:)):
             return activeTerminal?.isFinding == true
         case #selector(splitRight(_:)):
@@ -735,6 +768,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         add(file, "New Shell…", #selector(newShell(_:)), "t")
         file.addItem(.separator())
         add(file, "Open Folder…", #selector(openFolder(_:)), "o")
+        file.addItem(.separator())
+        add(file, "Save Session Contents…", #selector(saveContents(_:)), "s")
+        add(file, "Copy Session Contents", #selector(copyContents(_:)), "c").keyEquivalentModifierMask = [.command, .option]
         file.addItem(.separator())
         add(file, "Pin Session", #selector(togglePin(_:)))
         add(file, "Close Session", #selector(closeCurrent(_:)), "w")

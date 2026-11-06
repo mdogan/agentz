@@ -549,6 +549,7 @@ final class SmokeTest {
         await runningElsewhere(tmp)
         await wheelWithoutClick(tmp)
         await find(tmp)
+        await selectAndCopyAll(tmp)
         await fontSize(tmp)
         await quickTerminal(tmp)
         await gitPanel(tmp)
@@ -879,6 +880,58 @@ final class SmokeTest {
         (t.view.window?.firstResponder as? NSTextView)?.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
         check("⎋ closes it, and the terminal has the keyboard again",
               !t.isFinding && t.view.window?.firstResponder === t.view && !app.validateMenuItem(findNext))
+        ws.close(shell.key)
+    }
+
+    /// ⌘A selects the scrollback too, not only the lines on screen, and ⌘C
+    /// copies all of it. ⌥⌘C copies it all with no selection.
+    private func selectAndCopyAll(_ tmp: String) async {
+        let ws = workspace
+        ws.newSession(.shell, cwd: tmp)
+        guard let shell = ws.currentTab else { return check("start a shell to select in", false) }
+        let t = shell.terminal!
+        _ = await wait(5) { t.pid != nil }
+        t.focus()
+        _ = await wait(1) { t.isFocused }
+        t.run("echo select-me-first; seq 300; echo select-me-last")
+        check("the output scrolls past the screen", await wait(5) { (t.scrollbar?.total ?? 0) > 300 }, "\(String(describing: t.scrollbar))")
+        let pasteboard = NSPasteboard.general
+        let saved = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let saved { pasteboard.setString(saved, forType: .string) }
+        }
+        pasteboard.clearContents()
+        func key(_ chars: String, _ code: UInt16, option: Bool = false) {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: option ? [.command, .option] : [.command],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: t.view.window?.windowNumber ?? 0,
+                context: nil, characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code
+            ) else { return }
+            NSApp.sendEvent(event)
+        }
+        key("a", 0)
+        key("c", 8)
+        let copied = { pasteboard.string(forType: .string) ?? "" }
+        _ = await wait(2) { !copied().isEmpty }
+        let text = copied()
+        check("⌘A then ⌘C copies the lines above the screen too",
+              text.contains("select-me-first") && text.contains("select-me-last"),
+              "\(text.split(separator: "\n").count) lines, starting \(text.prefix(40).debugDescription)")
+
+        // ⌥⌘C: File › Copy Session Contents, with no selection needed. A
+        // shell gives its terminal's text, and Ghostty's file of it is gone
+        // after.
+        let leftBefore = Set((try? FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory())) ?? [])
+        pasteboard.clearContents()
+        key("c", 8, option: true)
+        let all = pasteboard.string(forType: .string) ?? ""
+        check("⌥⌘C copies the terminal's text, scrollback too",
+              all.contains("select-me-first") && all.contains("select-me-last") && all.contains("\n300\n"),
+              "\(all.split(separator: "\n").count) lines")
+        let leftAfter = Set((try? FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory())) ?? [])
+        check("and leaves no file behind", leftAfter.subtracting(leftBefore).isEmpty, "\(leftAfter.subtracting(leftBefore))")
+        check("the shell's row has the same", ws.hasContents(shell.key) && ws.contents(of: shell.key)?.text == all)
         ws.close(shell.key)
     }
 
