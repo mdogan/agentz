@@ -549,6 +549,7 @@ final class SmokeTest {
         await runningElsewhere(tmp)
         await wheelWithoutClick(tmp)
         await find(tmp)
+        await fontSize(tmp)
         await quickTerminal(tmp)
         await gitPanel(tmp)
         await gitTab(tmp)
@@ -879,6 +880,50 @@ final class SmokeTest {
         check("⎋ closes it, and the terminal has the keyboard again",
               !t.isFinding && t.view.window?.firstResponder === t.view && !app.validateMenuItem(findNext))
         ws.close(shell.key)
+    }
+
+    /// ⌘+ (or ⌘=), ⌘- and ⌘0 from the View menu change the font of every
+    /// terminal, also with a terminal focused, and new ones start at it.
+    private func fontSize(_ tmp: String) async {
+        let ws = workspace
+        let defaults = UserDefaults.standard
+        let saved = defaults.object(forKey: "terminalFontSize")
+        defer {
+            defaults.set(saved, forKey: "terminalFontSize")
+            Terminal.setFontSize(GhosttyApp.fontSize)
+        }
+        GhosttyApp.resetFontSize()
+        ws.newSession(.shell, cwd: tmp)
+        guard let first = ws.currentTab, let a = first.terminal else { return check("start a shell for the font size", false) }
+        _ = await wait(5) { a.view.fontSize != nil }
+        guard let base = a.view.fontSize else { return check("the terminal has a font size", false) }
+        a.focus()
+        _ = await wait(1) { a.isFocused }
+        func key(_ chars: String, _ code: UInt16, shift: Bool = false) {
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: shift ? [.command, .shift] : [.command],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: a.view.window?.windowNumber ?? 0,
+                context: nil, characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code
+            ) else { return }
+            NSApp.sendEvent(event)
+        }
+        key("=", 24)
+        check("⌘= makes the focused terminal's font bigger", await wait(2) { a.view.fontSize == base + 1 }, "\(base) → \(String(describing: a.view.fontSize))")
+        key("+", 24, shift: true)
+        check("⌘+ too", await wait(2) { a.view.fontSize == base + 2 }, "\(String(describing: a.view.fontSize))")
+        ws.newSession(.shell, cwd: tmp)
+        guard let second = ws.currentTab, let b = second.terminal else { return check("start a second shell", false) }
+        check("a new terminal starts at that size", await wait(5) { b.view.fontSize == base + 2 }, "\(String(describing: b.view.fontSize))")
+        key("-", 27)
+        check("⌘- makes every terminal's font smaller", await wait(2) { a.view.fontSize == base + 1 && b.view.fontSize == base + 1 },
+              "\(String(describing: a.view.fontSize)) \(String(describing: b.view.fontSize))")
+        check("the size is kept", GhosttyApp.fontSize == base + 1)
+        key("0", 29)
+        check("⌘0 puts every terminal back at the config's size", await wait(2) { a.view.fontSize == base && b.view.fontSize == base && GhosttyApp.fontSize == nil })
+        let shortcuts = shortcutGroups(NSApp.mainMenu!).flatMap(\.rows).filter { $0.action == "Increase Font Size" }
+        check("the shortcuts list ⌘+ once", shortcuts.map(\.keys) == ["⌘+"], "\(shortcuts.map(\.keys))")
+        ws.close(second.key)
+        ws.close(first.key)
     }
 
     /// The quick terminal: a shell of its own, in no tab, that slides in

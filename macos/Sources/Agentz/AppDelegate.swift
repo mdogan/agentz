@@ -489,6 +489,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
     }
 
+    @objc func increaseFontSize(_: Any?) { GhosttyApp.changeFontSize(by: 1) }
+    @objc func decreaseFontSize(_: Any?) { GhosttyApp.changeFontSize(by: -1) }
+    @objc func resetFontSize(_: Any?) { GhosttyApp.resetFontSize() }
+
     @objc func findNext(_: Any?) { activeTerminal?.findNext() }
     @objc func findPrevious(_: Any?) { activeTerminal?.findPrevious() }
 
@@ -696,6 +700,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return gitStore.map { !$0.isLoading } ?? false
         case #selector(toggleQuickTerminal(_:)):
             item.state = quickTerminal?.isShown == true ? .on : .off
+        case #selector(increaseFontSize(_:)), #selector(decreaseFontSize(_:)):
+            return GhosttyApp.fontSize != nil || Terminal.fontSize != nil
+        case #selector(resetFontSize(_:)):
+            return GhosttyApp.fontSize != nil
         default:
             break
         }
@@ -774,6 +782,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             quick.keyEquivalent = key
             quick.keyEquivalentModifierMask = menuModifiers(trigger.modifiers)
         }
+        view.addItem(.separator())
+        // For every terminal at once. ⌘= does what ⌘+ does, as in Ghostty,
+        // since + needs Shift on most keyboards.
+        add(view, "Increase Font Size", #selector(increaseFontSize(_:)), "+")
+        let equal = add(view, "Increase Font Size", #selector(increaseFontSize(_:)), "=")
+        equal.isHidden = true
+        equal.allowsKeyEquivalentWhenHidden = true
+        add(view, "Decrease Font Size", #selector(decreaseFontSize(_:)), "-")
+        add(view, "Reset Font Size", #selector(resetFontSize(_:)), "0")
         view.addItem(.separator())
         let themes = submenu(view, "Theme")
         themes.delegate = self

@@ -24,7 +24,7 @@ struct ShortcutGroup: Identifiable {
 func shortcutGroups(_ menu: NSMenu) -> [ShortcutGroup] {
     let fromMenus = menu.items.compactMap { item -> ShortcutGroup? in
         let rows = (item.submenu?.items ?? [])
-            .filter { !$0.keyEquivalent.isEmpty }
+            .filter { !$0.keyEquivalent.isEmpty && !$0.isHidden }
             .map { (shortcut($0), $0.title) }
         return rows.isEmpty ? nil : ShortcutGroup(item.title, rows)
     }
@@ -69,7 +69,6 @@ func shortcutGroups(_ menu: NSMenu) -> [ShortcutGroup] {
             ("⎋", "Close the find bar"),
         ]),
         ShortcutGroup("Terminal", [
-            ("⌘+ / ⌘- / ⌘0", "Bigger / smaller / default font"),
             ("⌘K", "Clear the screen"),
             ("⌘← / ⌘→", "Go to the start / end of the line"),
             ("⌘⌫", "Delete to the start of the line"),

@@ -111,7 +111,7 @@ The **Git** menu works on the git tab in the focused pane, or else on the Change
 | ⌥⌘G | open the git tab of the shown session's repository |
 | ⌘P / ⌘B | the changes / switch to another branch |
 | ⌘R / ⇧⌘L | read the repository again / the git command log |
-| ⌘+ / ⌘- / ⌘0 | font size |
+| ⌘+ / ⌘- / ⌘0 | bigger / smaller / default font in every terminal (**View** menu), kept across launches |
 | ⌘K | clear the screen |
 | ⌘/ | list all shortcuts (**Help › Keyboard Shortcuts**) |
 

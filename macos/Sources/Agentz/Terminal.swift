@@ -38,6 +38,8 @@ final class Terminal: NSObject {
     private var knownPid: Int32?
     private var exitWatch: DispatchSourceProcess?
     private let startedAt = Date()
+    /// Every terminal alive, so a font size change reaches them all.
+    private static let all = NSHashTable<Terminal>.weakObjects()
 
     /// `command` is run by `bash -c`, so quote its arguments. `env` is added
     /// to this app's environment.
@@ -47,11 +49,28 @@ final class Terminal: NSObject {
         view.onFocus = { [weak self] in self?.onFocus?() }
         view.controller = GhosttyApp.controller
         view.configuration = TerminalSurfaceOptions(
+            fontSize: GhosttyApp.fontSize,
             workingDirectory: cwd,
             envVars: env,
             command: command
         )
         view.autoresizingMask = [.width, .height]
+        Self.all.add(self)
+    }
+
+    /// The font size of the terminals, in points: any one's, since they
+    /// all have the same. Nil while none has a surface yet.
+    static var fontSize: Float? {
+        all.allObjects.lazy.compactMap(\.view.fontSize).first
+    }
+
+    /// Puts every terminal at `points`, or at the Ghostty config's size
+    /// when nil.
+    static func setFontSize(_ points: Float?) {
+        let action = points.map { "set_font_size:" + String(format: "%g", $0) } ?? "reset_font_size"
+        for terminal in all.allObjects {
+            terminal.view.performBindingAction(action)
+        }
     }
 
     /// The program's process id, once Ghostty has started it.
@@ -514,6 +533,32 @@ enum GhosttyApp {
         return GhosttyThemes.config(userText ?? "", using: path)
     }
 
+    /// The `UserDefaults` key of the terminals' font size in points;
+    /// absent for the Ghostty config's size.
+    private static let fontSizeKey = "terminalFontSize"
+
+    /// The font size every terminal uses, across launches. Nil for the
+    /// Ghostty config's size.
+    static var fontSize: Float? {
+        let points = UserDefaults.standard.float(forKey: fontSizeKey)
+        return points > 0 ? points : nil
+    }
+
+    /// Makes every terminal's font `step` points bigger, or smaller when
+    /// negative, within Ghostty's bounds (1 to 255).
+    static func changeFontSize(by step: Float) {
+        guard let current = fontSize ?? Terminal.fontSize else { return }
+        let points = min(max(current + step, 1), 255)
+        UserDefaults.standard.set(points, forKey: fontSizeKey)
+        Terminal.setFontSize(points)
+    }
+
+    /// Puts every terminal back at the Ghostty config's font size.
+    static func resetFontSize() {
+        UserDefaults.standard.removeObject(forKey: fontSizeKey)
+        Terminal.setFontSize(nil)
+    }
+
     /// Uses `name`'s colors in every terminal from now on, or the Ghostty
     /// config's when `nil`.
     static func selectTheme(_ name: String?) {
@@ -574,7 +619,7 @@ enum GhosttyApp {
     }()
 
     /// Ghostty.app's macOS bindings (as of 1.3), except for windows, tabs,
-    /// splits, search and the like. Those belong to the app's menu here, or
+    /// splits, search, font size and the like. Those belong to the app's menu here, or
     /// the embedded terminal can't do them, and a key bound here never
     /// reaches the menu. Paste and select all go through the Edit menu.
     private static let defaults = """
@@ -584,10 +629,6 @@ enum GhosttyApp {
     # Copies the terminal's selection. Without one, the program gets the
     # key: Claude selects text by itself and copies it on cmd+c.
     keybind = performable:super+c=copy_to_clipboard:mixed
-    keybind = super+equal=increase_font_size:1
-    keybind = super+plus=increase_font_size:1
-    keybind = super+minus=decrease_font_size:1
-    keybind = super+zero=reset_font_size
     keybind = super+k=clear_screen
     keybind = super+home=scroll_to_top
     keybind = super+end=scroll_to_bottom
