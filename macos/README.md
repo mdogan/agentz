@@ -92,7 +92,7 @@ The **Git** menu works on the git tab in the focused pane, or else on the Change
 - It follows Ghostty's `quick-terminal-position`, `quick-terminal-size`, `quick-terminal-screen`, `quick-terminal-animation-duration`, `quick-terminal-autohide` and `quick-terminal-space-behavior`.
 - A global key for `toggle_quick_terminal` in your Ghostty config, e.g. `keybind = global:ctrl+grave_accent=toggle_quick_terminal`, shows and hides it from any app. The menu item shows it. Ghostty needs the Accessibility permission for global keys; agentz does not. agentz and Ghostty.app read the same config, so with both running, both want the key. To give agentz a key of its own, point `AGENTZ_GHOSTTY_CONFIG` at another file.
 
-**View › All Actions…** (⇧⌘P) opens the command palette. Type to search commands by name or menu, then use ↑ / ↓ and ↩, or click a command, to run it. Each command shows its shortcut on the right when it has one. Unavailable commands are dimmed; ⎋ closes the palette.
+**View › All Actions…** (⇧⌘P) opens the command palette. It lists agentz's own commands, not standard macOS ones such as Copy, Hide or Start Dictation. Type to search commands by name or menu, then use ↑ / ↓ and ↩, or click a command, to run it. Each command shows its shortcut on the right when it has one. Unavailable commands are dimmed; ⎋ closes the palette.
 
 | Shortcut | Action |
 | --- | --- |
@@ -112,7 +112,8 @@ The **Git** menu works on the git tab in the focused pane, or else on the Change
 | ⌃⌘S | hide or show the session list |
 | ⇧⌘C | show or hide the Changes panel |
 | ⌥⌘G | open the git tab of the shown session's repository |
-| ⌘P / ⌘B | the changes / switch to another branch |
+| ⌘P | in a git tab, its changes; elsewhere, show or hide the Changes panel |
+| ⌘B | switch to another branch |
 | ⌘R / ⇧⌘L | read the repository again / the git command log |
 | ⌘+ / ⌘- / ⌘0 | bigger / smaller / default font in every terminal (**View** menu), kept across launches |
 | ⌘S / ⌥⌘C | save / copy the shown session's contents |

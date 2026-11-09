@@ -25,18 +25,21 @@ struct PaletteCommand: Identifiable {
 
     /// Refreshes dynamic menus, including themes, and snapshots availability
     /// before the palette takes the keyboard from the original responder.
-    static func collect(from menu: NSMenu, excluding action: Selector) -> [PaletteCommand] {
+    /// Lists only the app's own commands, the ones targeting `owner`, so
+    /// standard macOS items such as Copy, Hide or Minimize, and the ones
+    /// AppKit adds by itself, stay out.
+    static func collect(from menu: NSMenu, owner: AnyObject, excluding action: Selector) -> [PaletteCommand] {
         func visit(_ menu: NSMenu, path: [String]) -> [PaletteCommand] {
             menu.delegate?.menuNeedsUpdate?(menu)
             menu.update()
-            // Put the application menu's About, Hide and Quit commands last.
+            // Put the application menu's commands last.
             let items = path.isEmpty ? Array(menu.items.dropFirst()) + Array(menu.items.prefix(1)) : menu.items
             return items.flatMap { item -> [PaletteCommand] in
                 guard !item.isSeparatorItem, !item.isHidden else { return [] }
                 if let submenu = item.submenu {
                     return visit(submenu, path: path + [item.title])
                 }
-                guard let selector = item.action, selector != action else { return [] }
+                guard item.target === owner, let selector = item.action, selector != action else { return [] }
                 return [PaletteCommand(item: item, category: path.joined(separator: " › "))]
             }
         }
@@ -98,8 +101,8 @@ enum PaletteSearch {
     }
 }
 
-/// Restore the original responder before dispatching, so Copy, Paste and
-/// Find apply to the view the user opened the palette from. A sheet can
+/// Restore the original responder before dispatching, so Find and Copy
+/// Session Contents apply to the view the user opened the palette from. A sheet can
 /// also belong to the quick terminal or another app window.
 @MainActor
 final class CommandPalette {
@@ -107,9 +110,9 @@ final class CommandPalette {
 
     var isShown: Bool { sheet != nil }
 
-    func show(in parent: NSWindow, menu: NSMenu, excluding action: Selector) {
+    func show(in parent: NSWindow, menu: NSMenu, owner: AnyObject, excluding action: Selector) {
         guard sheet == nil, parent.sheetParent == nil, parent.attachedSheet == nil else { return }
-        let commands = PaletteCommand.collect(from: menu, excluding: action)
+        let commands = PaletteCommand.collect(from: menu, owner: owner, excluding: action)
         let responder = parent.firstResponder
         var chosen: PaletteCommand?
         let host = NSHostingController(rootView: CommandPaletteView(commands: commands) { [weak self, weak parent] command in

@@ -33,7 +33,13 @@ struct CommandPaletteTests {
         let disabled = item("Unavailable", target: target)
         disabled.tag = -1
         view.addItem(disabled)
-        let commands = PaletteCommand.collect(from: menu, excluding: #selector(PaletteTestTarget.palette(_:)))
+        // Standard macOS items, and ones AppKit adds itself, have no target
+        // or another one.
+        view.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        let dictation = NSMenuItem(title: "Start Dictation…", action: #selector(PaletteTestTarget.run(_:)), keyEquivalent: "")
+        dictation.target = PaletteTestTarget()
+        view.addItem(dictation)
+        let commands = PaletteCommand.collect(from: menu, owner: target, excluding: #selector(PaletteTestTarget.palette(_:)))
 
         #expect(commands.map(\.title) == ["Split Right", "Sample Theme", "Unavailable"])
         #expect(commands[0].category == "View")

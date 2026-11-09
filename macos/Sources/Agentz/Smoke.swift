@@ -1086,6 +1086,10 @@ final class SmokeTest {
         guard let shell = ws.currentTab else { return check("start a shell for the git panel", false) }
         _ = await wait(5) { shell.terminal!.pid != nil }
         check("the git panel starts hidden here", !git.isShown && app.validateMenuItem(item) && item.state == .off)
+        app.showGitChanges(nil)
+        check("⌘P shows it", window.isGitShown && git.isShown)
+        app.showGitChanges(nil)
+        check("⌘P hides it again", !window.isGitShown && !git.isShown)
         app.toggleGit(nil)
         _ = app.validateMenuItem(item)
         check("⇧⌘C shows it", window.isGitShown && git.isShown && item.state == .on)
@@ -1480,38 +1484,14 @@ final class SmokeTest {
             check("the palette can open again", false)
         }
 
-        // A responder-chain command must act on the original view, rather
-        // than on the palette's search field. Use synthetic text here.
-        if let terminal = workspace.currentTab?.terminal?.view {
-            let text = NSTextView(frame: NSRect(x: 10, y: 10, width: 220, height: 30))
-            text.string = "Command palette selection"
-            terminal.addSubview(text)
-            parent.makeKey()
-            parent.makeFirstResponder(text)
-            text.setSelectedRange(NSRange(location: 0, length: 0))
-            let editMenu = NSApp.mainMenu?.item(withTitle: "Edit")?.submenu
-            editMenu?.update()
-            let selectAll = editMenu?.items.first { $0.action == #selector(NSText.selectAll(_:)) }
-            check("Select All is available in the original text view", selectAll?.isEnabled == true)
-            app.showCommandPalette(nil)
-            if let field = await pickerField(), let sheet = parent.attachedSheet {
-                field.stringValue = "select all"
-                (field.currentEditor() as? NSTextView)?.string = "select all"
-                field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
-                try? await Task.sleep(for: .milliseconds(100))
-                press(.down, in: sheet)
-                press(.up, in: sheet)
-                press(.return, in: sheet)
-                check("arrow keys and Return run Select All on the original view", await wait(3) {
-                    parent.attachedSheet == nil && parent.firstResponder === text
-                        && text.selectedRange() == NSRange(location: 0, length: text.string.utf16.count)
-                }, "sheet=\(parent.attachedSheet != nil) query=\(field.stringValue.debugDescription) selection=\(text.selectedRange())")
-                if parent.attachedSheet === sheet { press(.escape, in: sheet) }
-            } else {
-                check("the palette opens from an editable view", false)
-            }
-            text.removeFromSuperview()
-            window.focusTerminal()
+        // Only agentz's own commands: none of the standard macOS ones, nor
+        // the ones AppKit adds by itself, such as Start Dictation.
+        if let menu = NSApp.mainMenu {
+            let titles = Set(PaletteCommand.collect(from: menu, owner: app, excluding: #selector(AppDelegate.showCommandPalette(_:))).map(\.title))
+            let standard: Set = ["About Agentz", "Hide Agentz", "Quit Agentz", "Cut", "Copy", "Paste", "Select All",
+                                 "Start Dictation…", "Emoji & Symbols", "Minimize", "Zoom", "Bring All to Front"]
+            check("the palette lists no standard macOS commands", titles.isDisjoint(with: standard) && titles.contains("Split Right"),
+                  "\(titles.intersection(standard).sorted())")
         }
     }
 

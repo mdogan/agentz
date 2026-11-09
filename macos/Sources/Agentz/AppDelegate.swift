@@ -558,12 +558,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         workspace.openGit(folder)
     }
 
-    /// In a git tab, its changes; elsewhere, the Changes panel.
+    /// In a git tab, its changes; elsewhere, shows or hides the Changes panel.
     @objc func showGitChanges(_: Any?) {
         if let gitTab {
             gitTab.store.selectChanges()
         } else {
-            windowController?.setGitShown(true)
+            windowController?.toggleGit()
         }
     }
 
@@ -587,7 +587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         guard let menu = NSApp.mainMenu,
               let parent = NSApp.keyWindow ?? windowController?.window
         else { return }
-        commandPalette.show(in: parent, menu: menu, excluding: #selector(showCommandPalette(_:)))
+        commandPalette.show(in: parent, menu: menu, owner: self, excluding: #selector(showCommandPalette(_:)))
     }
 
     @objc func showShortcuts(_: Any?) {
