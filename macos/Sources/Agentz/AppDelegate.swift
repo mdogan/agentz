@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private var tickTimer: Timer?
     private var keyMonitor: Any?
     private var shortcutsWindow: ShortcutsWindowController?
+    private let commandPalette = CommandPalette()
     private var quickTerminal: QuickTerminal?
     /// The quick terminal's global key, from the Ghostty config.
     private var hotKey: HotKey?
@@ -582,6 +583,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         GitWindows.openCommandLog()
     }
 
+    @objc func showCommandPalette(_: Any?) {
+        guard let menu = NSApp.mainMenu,
+              let parent = NSApp.keyWindow ?? windowController?.window
+        else { return }
+        commandPalette.show(in: parent, menu: menu, excluding: #selector(showCommandPalette(_:)))
+    }
+
     @objc func showShortcuts(_: Any?) {
         guard let menu = NSApp.mainMenu else { return }
         if shortcutsWindow == nil { shortcutsWindow = ShortcutsWindowController(menu: menu) }
@@ -684,6 +692,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let inQuickTerminal = quickTerminal?.isKey == true
         if inQuickTerminal, let action = item.action, Self.sessionActions.contains(action) { return false }
         switch item.action {
+        case #selector(showCommandPalette(_:)):
+            return !commandPalette.isShown && NSApp.keyWindow?.sheetParent == nil
+                && (NSApp.keyWindow ?? windowController?.window)?.attachedSheet == nil
         case #selector(newClaude(_:)), #selector(newCodex(_:)), #selector(newShell(_:)):
             // One asks already, or something else does.
             return windowController?.window?.attachedSheet == nil
@@ -786,6 +797,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         add(edit, "Find Previous", #selector(findPrevious(_:)), "G")
 
         let view = submenu(main, "View")
+        add(view, "All Actions…", #selector(showCommandPalette(_:)), "P")
+        view.addItem(.separator())
         for (i, range) in SessionRange.allCases.enumerated() {
             if range == .all {
                 add(view, range.title, #selector(toggleAllSessions(_:)), "I")

@@ -106,8 +106,10 @@ final class SmokeTest {
         lines.append("info command finished: " + (finished.map { "exit \($0.exitCode.map(String.init) ?? "?") after \(elapsed($0.seconds))" } ?? "not reported by \(Launch.shellName)"))
         check("shell name back", await wait(8) { shell.title == Launch.shellName }, shell.title)
 
-        // ⌘T asks where to start; ⎋ starts nothing.
         let app = NSApp.delegate as! AppDelegate
+        await commandPalette(app)
+
+        // ⌘T asks where to start; ⎋ starts nothing.
         let tabCount = ws.tabs.count
         app.newShell(nil)
         check("⌘T asks where to start", await pickerField() != nil)
@@ -867,8 +869,15 @@ final class SmokeTest {
         check("Find Next works while it shows", app.validateMenuItem(findNext))
         editor?.insertText("find-me", replacementRange: NSRange(location: NSNotFound, length: 0))
         let atBottom = { t.scrollbar.map { $0.offset + $0.len >= $0.total } ?? true }
-        editor?.doCommand(by: #selector(NSResponder.insertNewline(_:)))
-        check("↩ scrolls up to the match", await wait(3) { !atBottom() }, "\(String(describing: t.scrollbar))")
+        // Ghostty searches on its own thread, so the first ↩ can come before
+        // it has found the match. Press again every half second until then.
+        var polls = 0
+        check("↩ scrolls up to the match", await wait(3) {
+            if !atBottom() { return true }
+            if polls % 5 == 0 { editor?.doCommand(by: #selector(NSResponder.insertNewline(_:))) }
+            polls += 1
+            return false
+        }, "\(String(describing: t.scrollbar))")
         // Clicks reach the terminal under the bar, and the bar's field.
         click(t.view, at: NSPoint(x: 40, y: 40))
         check("a click in the terminal takes the keyboard, and the bar stays", t.view.window?.firstResponder === t.view && t.isFinding)
@@ -1412,9 +1421,103 @@ final class SmokeTest {
         }
     }
 
-    private func snapshot(_ name: String? = nil) {
+    private func commandPalette(_ app: AppDelegate) async {
+        guard let parent = window.window else { return }
+        window.focusTerminal()
+        let responder = parent.firstResponder
+        let tabs = workspace.tabs.count
+        if let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command, .shift],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: parent.windowNumber,
+            context: nil, characters: "P", charactersIgnoringModifiers: "P", isARepeat: false, keyCode: 35
+        ) {
+            NSApp.sendEvent(event)
+        }
+        guard let field = await pickerField(), field.placeholderString == "Search commands…",
+              let sheet = parent.attachedSheet
+        else {
+            check("⇧⌘P opens All Actions with the search field focused", false)
+            return
+        }
+        check("⇧⌘P opens All Actions with the search field focused", true)
+        snapshot("command-palette", of: sheet)
+        app.showCommandPalette(nil)
+        check("the palette cannot open over itself", parent.attachedSheet === sheet && sheet.attachedSheet == nil)
+
+        func search(_ text: String) {
+            field.stringValue = text
+            (field.currentEditor() as? NSTextView)?.string = text
+            field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+        }
+        search("no command has this name")
+        try? await Task.sleep(for: .milliseconds(100))
+        press(.return, in: sheet)
+        check("Return with no matches keeps the palette open", parent.attachedSheet === sheet)
+        search("unsplit")
+        try? await Task.sleep(for: .milliseconds(100))
+        press(.return, in: sheet)
+        check("an unavailable command cannot run", parent.attachedSheet === sheet && workspace.panes.split == nil)
+        press(.escape, in: sheet)
+        check("Escape returns focus to the original view", await wait(3) {
+            parent.attachedSheet == nil && parent.firstResponder === responder
+        })
+        check("closing the palette runs nothing", workspace.tabs.count == tabs)
+
+        app.showCommandPalette(nil)
+        if let field = await pickerField(), let sheet = parent.attachedSheet {
+            field.stringValue = "new shell"
+            (field.currentEditor() as? NSTextView)?.string = "new shell"
+            field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+            try? await Task.sleep(for: .milliseconds(100))
+            press(.return, in: sheet)
+            check("a command can open its own sheet after the palette closes", await wait(3) {
+                guard let next = parent.attachedSheet else { return false }
+                return next !== sheet
+            })
+            if let next = parent.attachedSheet { press(.escape, in: next) }
+            _ = await wait(3) { parent.attachedSheet == nil && parent.isKeyWindow }
+        } else {
+            check("the palette can open again", false)
+        }
+
+        // A responder-chain command must act on the original view, rather
+        // than on the palette's search field. Use synthetic text here.
+        if let terminal = workspace.currentTab?.terminal?.view {
+            let text = NSTextView(frame: NSRect(x: 10, y: 10, width: 220, height: 30))
+            text.string = "Command palette selection"
+            terminal.addSubview(text)
+            parent.makeKey()
+            parent.makeFirstResponder(text)
+            text.setSelectedRange(NSRange(location: 0, length: 0))
+            let editMenu = NSApp.mainMenu?.item(withTitle: "Edit")?.submenu
+            editMenu?.update()
+            let selectAll = editMenu?.items.first { $0.action == #selector(NSText.selectAll(_:)) }
+            check("Select All is available in the original text view", selectAll?.isEnabled == true)
+            app.showCommandPalette(nil)
+            if let field = await pickerField(), let sheet = parent.attachedSheet {
+                field.stringValue = "select all"
+                (field.currentEditor() as? NSTextView)?.string = "select all"
+                field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+                try? await Task.sleep(for: .milliseconds(100))
+                press(.down, in: sheet)
+                press(.up, in: sheet)
+                press(.return, in: sheet)
+                check("arrow keys and Return run Select All on the original view", await wait(3) {
+                    parent.attachedSheet == nil && parent.firstResponder === text
+                        && text.selectedRange() == NSRange(location: 0, length: text.string.utf16.count)
+                }, "sheet=\(parent.attachedSheet != nil) query=\(field.stringValue.debugDescription) selection=\(text.selectedRange())")
+                if parent.attachedSheet === sheet { press(.escape, in: sheet) }
+            } else {
+                check("the palette opens from an editable view", false)
+            }
+            text.removeFromSuperview()
+            window.focusTerminal()
+        }
+    }
+
+    private func snapshot(_ name: String? = nil, of target: NSWindow? = nil) {
         guard var path = ProcessInfo.processInfo.environment["AGENTZ_SMOKE_SNAPSHOT"],
-              let view = window.window?.contentView?.superview,
+              let view = (target ?? window.window)?.contentView?.superview,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)
         else { return }
         if let name { path = (path as NSString).deletingPathExtension + "-\(name).png" }
@@ -1529,11 +1632,12 @@ private func scroll(_ view: NSView) {
     window.sendEvent(event)
 }
 
-/// A key without modifiers, sent to `window` like a real one.
+/// A key without user modifiers, sent to `window` like a real one.
 @MainActor
 private func press(_ key: Key, in window: NSWindow) {
     guard let event = NSEvent.keyEvent(
-        with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+        with: .keyDown, location: .zero, modifierFlags: key == .up || key == .down ? [.function, .numericPad] : [],
+        timestamp: ProcessInfo.processInfo.systemUptime,
         windowNumber: window.windowNumber, context: nil, characters: key.characters,
         charactersIgnoringModifiers: key.characters, isARepeat: false, keyCode: key.code
     ) else { return }
@@ -1541,10 +1645,25 @@ private func press(_ key: Key, in window: NSWindow) {
 }
 
 private enum Key {
-    case `return`, escape
+    case `return`, escape, up, down
 
-    var characters: String { self == .return ? "\r" : "\u{1b}" }
-    var code: UInt16 { self == .return ? 36 : 53 }
+    var characters: String {
+        switch self {
+        case .return: "\r"
+        case .escape: "\u{1b}"
+        case .up: "\u{f700}"
+        case .down: "\u{f701}"
+        }
+    }
+
+    var code: UInt16 {
+        switch self {
+        case .return: 36
+        case .escape: 53
+        case .up: 126
+        case .down: 125
+        }
+    }
 }
 
 /// The mouse moving to `point` in `view`, with no button down.

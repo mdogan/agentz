@@ -250,9 +250,9 @@ struct StartPicker: View {
     }
 }
 
-/// The picker's filter. ↑ and ↓ move in the list, ↩ starts and ⎋ closes,
+/// The picker's filter. ↑ and ↓ move in the list, ↩ submits and ⎋ closes,
 /// while the keyboard stays in the field.
-private struct PickerField: NSViewRepresentable {
+struct PickerField: NSViewRepresentable {
     @Binding var text: String
     let prompt: String
     let move: (Int) -> Void
@@ -265,6 +265,7 @@ private struct PickerField: NSViewRepresentable {
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
+        field.setAccessibilityLabel(prompt)
         field.delegate = context.coordinator
         return field
     }

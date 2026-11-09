@@ -92,8 +92,11 @@ The **Git** menu works on the git tab in the focused pane, or else on the Change
 - It follows Ghostty's `quick-terminal-position`, `quick-terminal-size`, `quick-terminal-screen`, `quick-terminal-animation-duration`, `quick-terminal-autohide` and `quick-terminal-space-behavior`.
 - A global key for `toggle_quick_terminal` in your Ghostty config, e.g. `keybind = global:ctrl+grave_accent=toggle_quick_terminal`, shows and hides it from any app. The menu item shows it. Ghostty needs the Accessibility permission for global keys; agentz does not. agentz and Ghostty.app read the same config, so with both running, both want the key. To give agentz a key of its own, point `AGENTZ_GHOSTTY_CONFIG` at another file.
 
+**View › All Actions…** (⇧⌘P) opens the command palette. Type to search commands by name or menu, then use ↑ / ↓ and ↩, or click a command, to run it. Each command shows its shortcut on the right when it has one. Unavailable commands are dimmed; ⎋ closes the palette.
+
 | Shortcut | Action |
 | --- | --- |
+| ⇧⌘P | all actions: search commands, ↑ / ↓ to select, ↩ to run, ⎋ to close |
 | ⌘N / ⇧⌘N | new Claude / Codex session: asks where, and takes the place of the shown shell if it is idle |
 | ⌘T | new shell: asks where |
 | ⌘W | close the shown session (asks first if it is working) |
