@@ -1220,7 +1220,7 @@ final class SmokeTest {
             _ = await wait(0.5) { false }
             let theme = NSColor(Look.shared.colors.background).usingColorSpace(.sRGB)
             check("the new session sheet has the theme's background",
-                  sheet.backgroundColor.usingColorSpace(.sRGB) == theme, "\(sheet.backgroundColor)")
+                  sheet.backgroundColor.usingColorSpace(.sRGB) == theme, String(describing: sheet.backgroundColor))
             sheet.contentViewController?.dismiss(nil)
             _ = await wait(1) { self.window.window?.attachedSheet == nil }
         }
