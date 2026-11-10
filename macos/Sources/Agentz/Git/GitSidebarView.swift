@@ -200,6 +200,7 @@ struct GitSidebarView: View {
 
 private struct WorktreeSidebarRow: View {
     private enum Action {
+        case switchTo
         case delete
         case prune
     }
@@ -210,6 +211,12 @@ private struct WorktreeSidebarRow: View {
 
     let worktree: GitWorktree
 
+    /// The current worktree is already the one shown, and a stale one has
+    /// no folder to show.
+    private var canSwitch: Bool {
+        !worktree.isCurrent && !worktree.isPrunable && !worktree.isBare
+    }
+
     var body: some View {
         SidebarRow(
             title: worktree.displayName,
@@ -218,11 +225,14 @@ private struct WorktreeSidebarRow: View {
             isEnabled: !worktree.isPrunable,
             isProminent: worktree.isCurrent
         ) {
-            open(.claude)
+            // A single click does nothing; a double click asks to switch.
         } badge: {
             Text(worktree.branchName ?? (worktree.isDetached ? "Detached" : ""))
                 .lineLimit(1)
         }
+        .simultaneousGesture(TapGesture(count: 2).onEnded {
+            if canSwitch { confirm(.switchTo) }
+        })
         .help(worktree.path)
         .contextMenu {
             ForEach([Agent.claude, .codex, .shell, .git], id: \.self) { agent in
@@ -264,6 +274,10 @@ private struct WorktreeSidebarRow: View {
                     store.forceDelete(worktree)
                 }
                 .disabled(store.isLoading)
+            } else if pendingAction == .switchTo {
+                Button("Switch") {
+                    open(.git)
+                }
             } else if pendingAction == .delete {
                 Button("Delete Worktree", role: .destructive) {
                     store.delete(worktree)
@@ -306,6 +320,8 @@ private struct WorktreeSidebarRow: View {
             return "Force Delete Worktree “\(worktree.displayName)”?"
         }
         switch pendingAction {
+        case .switchTo:
+            return "Switch to Worktree “\(worktree.displayName)”?"
         case .delete:
             return "Delete Worktree “\(worktree.displayName)”?"
         case .prune:
@@ -323,6 +339,8 @@ private struct WorktreeSidebarRow: View {
             """
         }
         switch pendingAction {
+        case .switchTo:
+            return "This opens the git view of \(worktree.path)."
         case .delete:
             return """
             This removes the worktree directory and its Git registration. Git will refuse \
