@@ -959,10 +959,14 @@ fn codex_threads_by_pid(
 /// Codex holds `thread-writer-locks/<thread-id>.lock` while a thread is
 /// open and removes it after.
 fn open_codex_threads(sessions: &[Session]) -> Vec<OpenThread> {
-    let Some(dir) = codex_home().map(|h| h.join("thread-writer-locks")) else {
+    let Some(home) = codex_home() else {
         return Vec::new();
     };
-    let Ok(entries) = fs::read_dir(dir) else {
+    open_codex_threads_in(&home, sessions)
+}
+
+fn open_codex_threads_in(home: &Path, sessions: &[Session]) -> Vec<OpenThread> {
+    let Ok(entries) = fs::read_dir(home.join("thread-writer-locks")) else {
         return Vec::new();
     };
     entries
@@ -981,7 +985,15 @@ fn open_codex_threads(sessions: &[Session]) -> Vec<OpenThread> {
                     .canonicalize()
                     .unwrap_or_else(|_| session.cwd.clone()),
                 opened: e.metadata().ok()?.modified().ok()?,
-                tui: session.originator.as_deref() == Some("codex-tui"),
+                // The originator is a client label, and a terminal session
+                // can carry another client's label. Codex also leaves a
+                // marker for threads its TUI can reference. Keep the old
+                // label check for versions that did not write that marker.
+                tui: session.originator.as_deref() == Some("codex-tui")
+                    || home
+                        .join("tui-thread-reference-capabilities")
+                        .join(id)
+                        .is_file(),
             })
         })
         .collect()
@@ -1589,6 +1601,102 @@ mod tests {
         let process = process(3, 1, 2, Some(2), &["/usr/local/bin/codex", "exec"]);
         assert!(!is_codex_tui(&process));
         assert!(is_codex_noninteractive_thread(&process));
+    }
+
+    #[test]
+    fn terminal_marker_links_codex_with_a_different_originator() {
+        let home = std::env::temp_dir().join(format!("agentz-codex-{}", uuid::Uuid::new_v4()));
+        let locks = home.join("thread-writer-locks");
+        let markers = home.join("tui-thread-reference-capabilities");
+        fs::create_dir_all(&locks).unwrap();
+        fs::create_dir_all(&markers).unwrap();
+        let cwd = home.canonicalize().unwrap();
+        let started = SystemTime::now() - Duration::from_secs(5);
+        let session = |id: &str, originator: &str| Session {
+            agent: Agent::Codex,
+            id: id.into(),
+            title: "Fix session titles".into(),
+            cwd: cwd.clone(),
+            originator: Some(originator.into()),
+            created: started,
+            updated: started,
+            in_project: true,
+            branch: None,
+            pr: None,
+            limit: None,
+            turn_started: None,
+            action: None,
+            context: None,
+        };
+        let sessions = vec![
+            session("terminal", "claude-code-bridge"),
+            session("exec", "codex_exec"),
+            session("old-terminal", "codex-tui"),
+        ];
+        fs::write(locks.join("terminal.lock"), "").unwrap();
+        fs::write(locks.join("exec.lock"), "").unwrap();
+        let running = || {
+            vec![CodexProcess {
+                pid: 100,
+                cwd: cwd.clone(),
+                started,
+                tui: true,
+            }]
+        };
+        assert!(
+            pair_codex_threads(
+                &mut CodexLinks::default(),
+                running(),
+                open_codex_threads_in(&home, &sessions)
+            )
+            .is_empty()
+        );
+
+        fs::write(markers.join("terminal"), "").unwrap();
+        let links = pair_codex_threads(
+            &mut CodexLinks::default(),
+            running(),
+            open_codex_threads_in(&home, &sessions),
+        );
+        assert_eq!(links, HashMap::from([(100, "terminal".into())]));
+
+        // A manually launched Codex can sit below a wrapper in a shell.
+        let procs = HashMap::from([
+            (10, process(10, 1, 10, Some(20), &["fish"])),
+            (
+                20,
+                process(
+                    20,
+                    10,
+                    20,
+                    Some(20),
+                    &["node", "/home/me/.local/share/hinoki/cli.mjs", "codex"],
+                ),
+            ),
+            (
+                100,
+                process(100, 20, 20, Some(20), &["codex", "--profile", "hinoki"]),
+            ),
+        ]);
+        let shells = shell_processes_from_table(&[10], &procs, None, &mut || links.clone());
+        assert_eq!(
+            shells[0].agent.as_ref().map(|key| key.id.as_str()),
+            Some("terminal")
+        );
+
+        // Older Codex versions still work without the terminal marker.
+        fs::write(locks.join("old-terminal.lock"), "").unwrap();
+        let threads = open_codex_threads_in(&home, &sessions);
+        assert!(threads.iter().find(|t| t.id == "old-terminal").unwrap().tui);
+        assert!(!threads.iter().find(|t| t.id == "exec").unwrap().tui);
+        // A marker alone must not keep a closed session eligible.
+        fs::remove_file(locks.join("terminal.lock")).unwrap();
+        assert!(
+            !open_codex_threads_in(&home, &sessions)
+                .iter()
+                .any(|t| t.id == "terminal")
+        );
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
