@@ -162,29 +162,56 @@ struct SessionNotesTests {
 }
 
 @MainActor
-struct NoteMarkdownTests {
-    @Test func rendersHeadingsListsCodeAndInlineStyles() throws {
-        let rendered = NoteMarkdown.render("# Heading\n\n**Bold** and *italic*\n\n- one\n- two\n\n```swift\nlet x = 1\n```")
-        let text = rendered.string as NSString
-        #expect(text.contains("Heading\n\nBold and italic"))
-        #expect(text.contains("• one"))
-        #expect(text.contains("• two"))
-        #expect(text.contains("let x = 1"))
-        let heading = try #require(rendered.attribute(.font, at: 0, effectiveRange: nil) as? NSFont)
-        #expect(heading.pointSize == 24)
-        let bold = try #require(rendered.attribute(.font, at: text.range(of: "Bold").location, effectiveRange: nil) as? NSFont)
-        #expect(NSFontManager.shared.traits(of: bold).contains(.boldFontMask))
-        let italic = try #require(rendered.attribute(.font, at: text.range(of: "italic").location, effectiveRange: nil) as? NSFont)
-        #expect(NSFontManager.shared.traits(of: italic).contains(.italicFontMask))
+struct NoteLiveStyleTests {
+    private func styled(_ source: String, active: NSRange? = nil) -> NSMutableAttributedString {
+        let text = NSMutableAttributedString(string: source)
+        NoteLiveStyle.apply(to: text, active: active)
+        return text
     }
 
-    @Test func keepsOrderedListNumbersAndOnlyWebOrMailLinks() {
-        let rendered = NoteMarkdown.render("1. first\n2. second\n\n[web](https://example.com) [local](file:///tmp/private) [script](javascript:alert)")
-        let text = rendered.string as NSString
-        #expect(text.contains("1. first"))
-        #expect(text.contains("2. second"))
-        #expect(rendered.attribute(.link, at: text.range(of: "web").location, effectiveRange: nil) as? URL == URL(string: "https://example.com"))
-        #expect(rendered.attribute(.link, at: text.range(of: "local").location, effectiveRange: nil) == nil)
-        #expect(rendered.attribute(.link, at: text.range(of: "script").location, effectiveRange: nil) == nil)
+    private func font(_ text: NSAttributedString, at word: String) throws -> NSFont {
+        try #require(text.attribute(.font, at: (text.string as NSString).range(of: word).location, effectiveRange: nil) as? NSFont)
+    }
+
+    private func hidden(_ text: NSAttributedString, at index: Int) -> Bool {
+        (text.attribute(.font, at: index, effectiveRange: nil) as? NSFont)?.pointSize ?? 13 < 1
+    }
+
+    @Test func keepsTheSourceAndStylesHeadingsBoldItalicAndCode() throws {
+        let source = "# Heading\n\n**Bold** and *italic* and `code`\n\n```swift\nlet x = 1\n```"
+        let text = styled(source)
+        #expect(text.string == source)
+        #expect(try font(text, at: "Heading").pointSize == 22)
+        #expect(NSFontManager.shared.traits(of: try font(text, at: "Bold")).contains(.boldFontMask))
+        #expect(NSFontManager.shared.traits(of: try font(text, at: "italic")).contains(.italicFontMask))
+        #expect(try font(text, at: "code").isFixedPitch)
+        #expect(try font(text, at: "let x").isFixedPitch)
+        #expect(hidden(text, at: 0))
+        #expect(hidden(text, at: (source as NSString).range(of: "**Bold").location))
+        #expect(!hidden(text, at: (source as NSString).range(of: "```").location))
+    }
+
+    @Test func showsMarksOnlyOnTheLineBeingEdited() {
+        let source = "# One\n# Two"
+        let text = styled(source, active: NSRange(location: 8, length: 0))
+        #expect(hidden(text, at: 0))
+        #expect(!hidden(text, at: 6))
+    }
+
+    @Test func linksOnlyWebOrMailTargets() {
+        let source = "[web](https://example.com) [local](file:///tmp/private) [script](javascript:alert) https://agentz.dev"
+        let text = styled(source)
+        let ns = source as NSString
+        #expect(text.attribute(.noteLink, at: ns.range(of: "web").location, effectiveRange: nil) as? URL == URL(string: "https://example.com"))
+        #expect(text.attribute(.noteLink, at: ns.range(of: "local").location, effectiveRange: nil) == nil)
+        #expect(text.attribute(.noteLink, at: ns.range(of: "script").location, effectiveRange: nil) == nil)
+        #expect(text.attribute(.noteLink, at: ns.range(of: "agentz.dev").location, effectiveRange: nil) as? URL == URL(string: "https://agentz.dev"))
+        #expect(text.attribute(.link, at: ns.range(of: "web").location, effectiveRange: nil) == nil)
+    }
+
+    @Test func leavesSnakeCaseAndCodeContentsAlone() throws {
+        let text = styled("snake_case_name and `**not bold**`")
+        #expect(!NSFontManager.shared.traits(of: try font(text, at: "case")).contains(.italicFontMask))
+        #expect(!NSFontManager.shared.traits(of: try font(text, at: "not bold")).contains(.boldFontMask))
     }
 }

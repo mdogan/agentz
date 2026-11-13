@@ -9,7 +9,6 @@ struct NoteEditorView: View {
     let look: Look
     var close: (() -> Void)?
     var onFocus: () -> Void = {}
-    @State private var preview = false
     @State private var formatting = NoteFormatting()
     @State private var confirmDelete = false
 
@@ -17,59 +16,38 @@ struct NoteEditorView: View {
         if let note = notes.note(id) {
             VStack(spacing: 0) {
                 Rectangle().fill(look.divider).frame(height: 1)
-                HStack(spacing: 10) {
-                    Label("Notes", systemImage: "note.text").font(.system(size: 12, weight: .semibold))
-                    Picker("Mode", selection: $preview) {
-                        Text("Edit").tag(false)
-                        Text("Preview").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 140)
-                    .onChange(of: preview) { NSApp.keyWindow?.makeFirstResponder(nil) }
-                    Spacer(minLength: 0)
-                    Menu {
-                        Button("Export Markdown…") { export(note) }
-                        Button("Delete Note…", role: .destructive) { confirmDelete = true }
-                            .disabled(notes.isReadOnly)
-                    } label: { Image(systemName: "ellipsis.circle") }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("Note actions")
-                }
-                .padding(.horizontal, 12).padding(.vertical, 7)
-                if !preview {
-                    HStack(spacing: 12) {
-                        format("Bold", symbol: "bold", prefix: "**", suffix: "**")
-                        format("Italic", symbol: "italic", prefix: "*", suffix: "*")
-                        format("Link", symbol: "link", prefix: "[", suffix: "](https://)")
-                        format("Code", symbol: "chevron.left.forwardslash.chevron.right", prefix: "`", suffix: "`")
-                        Spacer()
-                        Text("Markdown").font(.system(size: 10)).foregroundStyle(look.secondary)
+                HStack(spacing: 4) {
+                    Group {
+                        tool("Bold", symbol: "bold") { formatting.insert("**", "**") }
+                        tool("Italic", symbol: "italic") { formatting.insert("*", "*") }
+                        tool("Link", symbol: "link") { formatting.insert("[", "](https://)") }
+                        tool("Code", symbol: "chevron.left.forwardslash.chevron.right") { formatting.insert("`", "`") }
                     }
                     .disabled(notes.isReadOnly)
-                    .padding(.horizontal, 12).padding(.bottom, 5)
+                    Spacer(minLength: 8)
+                    tool("Export Markdown…", symbol: "square.and.arrow.up") { export(note) }
+                    tool("Delete Note…", symbol: "trash") { confirmDelete = true }
+                        .disabled(notes.isReadOnly)
                 }
-                ZStack {
-                    NoteTextEditor(text: Binding(get: { notes.note(id)?.text ?? "" }, set: { notes.update(id, text: $0) }),
-                                   formatting: formatting, look: look, readOnly: notes.isReadOnly, onFocus: onFocus)
-                        .opacity(preview ? 0 : 1)
-                        .allowsHitTesting(!preview)
-                        .accessibilityHidden(preview)
-                    if preview { NotePreview(text: note.text, look: look) }
-                }
+                .frame(height: 26)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                Rectangle().fill(look.divider).frame(height: 1)
+                NoteTextEditor(text: Binding(get: { notes.note(id)?.text ?? "" }, set: { notes.update(id, text: $0) }),
+                               formatting: formatting, look: look, readOnly: notes.isReadOnly, onFocus: onFocus)
                 if let problem = notes.problem {
                     HStack {
                         Text(problem).font(.caption).foregroundStyle(look.red).textSelection(.enabled)
                         if !notes.isReadOnly { Button("Retry") { notes.flush() } }
                     }.padding(8)
                 } else {
-                    HStack {
+                    HStack(spacing: 4) {
+                        Image(systemName: notes.isDirty ? "arrow.triangle.2.circlepath" : "checkmark")
                         Text(notes.isDirty ? "Saving…" : "Saved locally")
                         Spacer()
+                        Text("⌘-click opens links")
                     }
-                    .font(.system(size: 10)).foregroundStyle(look.secondary)
-                    .padding(.horizontal, 12).padding(.bottom, 6)
+                    .font(.system(size: 10.5)).foregroundStyle(look.faint)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
                 }
             }
             .foregroundStyle(look.text).background(look.sidebar).tint(look.accent)
@@ -81,11 +59,6 @@ struct NoteEditorView: View {
         }
     }
 
-    private func format(_ title: String, symbol: String, prefix: String, suffix: String) -> some View {
-        Button { formatting.insert(prefix, suffix) } label: { Image(systemName: symbol) }
-            .buttonStyle(.plain).help(title).accessibilityLabel(title)
-    }
-
     private func export(_ note: SessionNote) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
@@ -93,6 +66,18 @@ struct NoteEditorView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do { try note.text.write(to: url, atomically: true, encoding: .utf8) }
         catch { NSAlert(error: error).runModal() }
+    }
+
+    private func tool(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(look.secondary)
+                .frame(width: 22, height: 22)
+        }
+        .buttonStyle(GitForkHoverButtonStyle(.icon))
+        .instantHelp(title)
+        .accessibilityLabel(title)
     }
 }
 
@@ -108,6 +93,7 @@ struct AllNotesView: View {
     let look: Look
     @Bindable var selection: NotesSelection
     let showSession: (SessionKey) -> Void
+    @FocusState private var searchFocused: Bool
 
     private var notes: [SessionNote] {
         workspace.notes.notes.filter { $0.matches(selection.query) }.sorted { $0.updated > $1.updated }
@@ -116,7 +102,11 @@ struct AllNotesView: View {
     var body: some View {
         HSplitView {
             VStack(spacing: 0) {
-                TextField("Search notes", text: $selection.query).textFieldStyle(.roundedBorder).padding(10)
+                TextField("Search notes", text: $selection.query)
+                    .font(.system(size: 12))
+                    .focused($searchFocused)
+                    .lookField(isFocused: searchFocused, systemImage: "magnifyingglass")
+                    .padding(10)
                 List(selection: $selection.id) {
                     ForEach(notes) { note in
                         VStack(alignment: .leading, spacing: 4) {
@@ -127,22 +117,22 @@ struct AllNotesView: View {
                     }
                 }
                 .scrollContentBackground(.hidden)
-                Text("\(notes.count) notes").font(.caption).foregroundStyle(look.secondary).padding(8)
+                Text("\(notes.count) notes").font(.system(size: 11)).foregroundStyle(look.secondary).padding(8)
             }
             .frame(minWidth: 210, idealWidth: 260, maxWidth: 380)
             if let id = selection.id, let note = workspace.notes.note(id) {
                 VStack(alignment: .leading, spacing: 0) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(note.title).font(.headline).textSelection(.enabled)
+                        Text(note.title).font(.system(size: 14, weight: .semibold)).lineLimit(1).textSelection(.enabled)
                         Text("\(note.key?.agent.displayName ?? "Session") · \(tilde(note.folder))")
-                            .font(.caption).foregroundStyle(look.secondary).textSelection(.enabled)
+                            .font(.system(size: 11)).foregroundStyle(look.secondary).lineLimit(1).textSelection(.enabled)
                         if let key = note.key, workspace.hasNoteSession(key) {
                             Button("Show Session") { showSession(key) }
                         } else {
                             Text(workspace.allLoaded ? "Session unavailable · Your note is kept" : "Looking for session…")
                                 .font(.caption).foregroundStyle(look.secondary)
                         }
-                    }.padding(12)
+                    }.padding(.horizontal, 12).padding(.vertical, 10)
                     NoteEditorView(notes: workspace.notes, id: id, look: look).id(id)
                 }.frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -161,7 +151,7 @@ struct AllNotesView: View {
 }
 
 /// Escape follows the same save-and-close path as the window's close button,
-/// including when a native text editor or Markdown preview has the focus.
+/// including when the note editor has the focus.
 private final class NotesWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, event.keyCode == 53,
@@ -234,10 +224,10 @@ private struct SingleNoteView: View {
         if let id = selection.id, let note = notes.note(id) {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(note.title).font(.headline).textSelection(.enabled)
+                    Text(note.title).font(.system(size: 14, weight: .semibold)).lineLimit(1).textSelection(.enabled)
                     Text("\(note.key?.agent.displayName ?? "Session") · \(tilde(note.folder))")
-                        .font(.caption).foregroundStyle(look.secondary).textSelection(.enabled)
-                }.padding(12)
+                        .font(.system(size: 11)).foregroundStyle(look.secondary).lineLimit(1).textSelection(.enabled)
+                }.padding(.horizontal, 12).padding(.vertical, 10)
                 NoteEditorView(notes: notes, id: id, look: look, close: close).id(id)
             }
             .foregroundStyle(look.text).background(look.sidebar).tint(look.accent)
