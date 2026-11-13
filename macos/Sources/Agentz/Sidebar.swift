@@ -35,6 +35,8 @@ struct SidebarActions {
     /// Asks where, then saves the session's conversation or terminal text.
     var saveContents: (SessionKey) -> Void
     var copyContents: (SessionKey) -> Void
+    var editNote: (SessionKey) -> Void
+    var allNotes: () -> Void
 }
 
 struct SidebarView: View {
@@ -115,28 +117,38 @@ struct SidebarView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
-            HStack(spacing: 4) {
-                Text("\(workspace.rows.count) sessions")
-                if let repo = workspace.repo {
-                    Text("in \(repo.name)").foregroundStyle(look.accent)
-                }
-                Text("·")
-                Text("\(workspace.runningCount) running")
-                if !workspace.busyKeys.isEmpty {
-                    Text("·")
-                    Text("\(workspace.busyKeys.count) working").foregroundStyle(look.yellow)
-                }
-                let attention = workspace.attentionKeys.count
-                if attention > 0 {
-                    Text("·")
-                    Button { workspace.showNextAttention() } label: {
-                        Text(attention == 1 ? "1 needs you" : "\(attention) need you")
-                            .fontWeight(.semibold)
-                            .foregroundStyle(look.accent)
+            HStack(spacing: 8) {
+                HStack(spacing: 4) {
+                    Text("\(workspace.rows.count) sessions")
+                    if let repo = workspace.repo {
+                        Text("in \(repo.name)").foregroundStyle(look.accent)
                     }
-                    .buttonStyle(.plain)
-                    .help("Go to the next session that needs you (⇧⌘A)")
+                    Text("·")
+                    Text("\(workspace.runningCount) running")
+                    if !workspace.busyKeys.isEmpty {
+                        Text("·")
+                        Text("\(workspace.busyKeys.count) working").foregroundStyle(look.yellow)
+                    }
+                    let attention = workspace.attentionKeys.count
+                    if attention > 0 {
+                        Text("·")
+                        Button { workspace.showNextAttention() } label: {
+                            Text(attention == 1 ? "1 needs you" : "\(attention) need you")
+                                .fontWeight(.semibold)
+                                .foregroundStyle(look.accent)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Go to the next session that needs you (⇧⌘A)")
+                    }
                 }
+                .lineLimit(1)
+                Spacer(minLength: 0)
+                Button(action: actions.allNotes) {
+                    Label("All Notes", systemImage: "note.text")
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
+                .help("All Notes (⇧⌘M)")
             }
             .font(.system(size: 11))
             .foregroundStyle(look.secondary)
@@ -359,7 +371,9 @@ struct SidebarView: View {
             closable: closable,
             hovered: hovered == row.key,
             now: workspace.now,
-            toggleContinue: running ? { workspace.setContinueAtReset(row.key, !workspace.continueAtReset.contains(row.key)) } : nil
+            toggleContinue: running ? { workspace.setContinueAtReset(row.key, !workspace.continueAtReset.contains(row.key)) } : nil,
+            note: workspace.notes.note(for: row.key),
+            editNote: { actions.editNote(row.key) }
         )
         // Onto the terminal, to show it in a split.
         .onDrag { SessionDrag.provider(row.key) }
@@ -407,6 +421,9 @@ struct SidebarView: View {
         let running = workspace.runningKeys.contains(key)
         let pinned = workspace.isPinned(key)
         Button(running ? "Show" : workspace.elsewhere[key] != nil ? "Fork…" : "Resume") { workspace.open(key) }
+        if let key = workspace.noteKey(key) {
+            Button(workspace.notes.note(for: key) == nil ? "Add Note" : "Edit Note") { actions.editNote(key) }
+        }
         // A git tab is never in a split.
         if key.agent != .git {
             let splittable = workspace.canOpenInSplit(key)
@@ -649,6 +666,8 @@ private struct RowView: View {
     let now: Date
     /// Turns `continues` on or off; nil when no agent of ours runs it.
     let toggleContinue: (() -> Void)?
+    var note: SessionNote? = nil
+    var editNote: () -> Void = {}
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
@@ -662,6 +681,14 @@ private struct RowView: View {
                         .font(.system(size: 12.5, weight: isCurrent || inOtherPane || attention != nil ? .semibold : .regular))
                         .foregroundStyle(running || selected || attention != nil ? look.text : look.text.opacity(0.75))
                         .lineLimit(1)
+                    if let note {
+                        Button(action: editNote) { Image(systemName: "note.text") }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 10))
+                            .foregroundStyle(look.accent)
+                            .help(note.preview.isEmpty ? "Edit note" : note.preview)
+                            .accessibilityLabel("Edit note")
+                    }
                     if let pane = row.pane {
                         Image(systemName: pane.symbol)
                             .font(.system(size: 10))

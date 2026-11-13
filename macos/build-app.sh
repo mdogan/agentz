@@ -4,6 +4,10 @@ set -eu
 
 config=${1:-release}
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Xcode's SDK metadata cache can spend minutes waiting for FSEvents during
+# validation. Use normal filesystem lookups instead; compiled modules and
+# incremental build outputs are still cached. This affects only this build.
+export EnableSDKStatCaching="${EnableSDKStatCaching:-0}"
 swift build --package-path "$dir" -c "$config"
 bin=$(swift build --package-path "$dir" -c "$config" --show-bin-path)
 app="$dir/.build/Agentz.app"

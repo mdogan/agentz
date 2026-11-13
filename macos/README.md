@@ -94,9 +94,18 @@ The **Git** menu works on the git tab in the focused pane, or else on the Change
 
 **View › All Actions…** (⇧⌘P) opens the command palette. It lists agentz's own commands, not standard macOS ones such as Copy, Hide or Start Dictation. Type to search commands by name or menu, then use ↑ / ↓ and ↩, or click a command, to run it. Each command shows its shortcut on the right when it has one. Unavailable commands are dimmed; ⎋ closes the palette.
 
+**Session notes.** Click the small note button at the bottom-right of an agent terminal to add or edit its Markdown note in a separate popup window. Each split pane has its own buttons: Note, Open in Zed, and Open Git. Zed and Git open that pane's folder. You can also right-click a Claude or Codex session and choose **Add Note** or **Edit Note**, or use **File › Edit Session Note** (⌥⌘N). A session with a note has a small note icon beside its title; click it to edit, or hover for a preview. Opening a note never starts its agent.
+
+- Write Markdown in **Edit**, with buttons for bold, italic, links, and inline code. **Preview** renders headings, lists, quotes, code blocks, and inline formatting. The editor supports normal text undo/redo and keeps pasted Markdown as plain text.
+- Changes save automatically. ⌘S while editing a note saves immediately. The note's menu exports a `.md` file or deletes the note. Escape saves and closes the note window. Closing its editor keeps nonempty notes; empty or whitespace-only notes are removed.
+- **All Notes** at the right of the sidebar session counts or **View › All Notes** (⇧⌘M) opens a searchable list across all projects and dates. Session filtering also searches note text, within the current session filters.
+- Notes are local, personal annotations; nothing is sent to the agent. They live in `~/Library/Application Support/Agentz/notes.json`, independently of tabs and transcripts. Closing a session, deleting its transcript, or archiving it does not delete the note. All Notes keeps the last known session title and folder and shows **Session unavailable** when Agentz cannot find it.
+- Resuming a session keeps its note. A fork has its own note. A draft written in a new Codex tab follows the real session ID when Agentz discovers it. Notes on an agent running inside a shell belong to that agent session.
+
 | Shortcut | Action |
 | --- | --- |
 | ⇧⌘P | all actions: search commands, ↑ / ↓ to select, ↩ to run, ⎋ to close |
+| ⌥⌘N / ⇧⌘M | edit the selected session's note / open All Notes |
 | ⌘N / ⇧⌘N | new Claude / Codex session: asks where, and takes the place of the shown shell if it is idle |
 | ⌘T | new shell: asks where |
 | ⌘W | close the shown session (asks first if it is working) |

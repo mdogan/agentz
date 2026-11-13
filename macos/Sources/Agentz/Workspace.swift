@@ -383,11 +383,41 @@ final class Workspace {
     /// What `savePins` got last.
     @ObservationIgnored private var savedPins: [SavedTab]?
 
-    init(projectDir: String) {
+    let notes: SessionNotes
+
+    init(projectDir: String, notes: SessionNotes? = nil) {
+        self.notes = notes ?? SessionNotes()
         let dir = URL(fileURLWithPath: projectDir).standardizedFileURL.path
         self.projectDir = dir
         root = dir
+        self.notes.onChange = { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                self?.rebuildRows()
+                self?.onLayout?()
+            }
+        }
         findRoot()
+    }
+
+    /// Resolve a shell to the agent currently running inside it. Bare shells
+    /// and Git tabs do not own agent-session notes.
+    func noteKey(_ key: SessionKey) -> SessionKey? {
+        let key = tabs.first(where: { $0.key == key })?.linked ?? key
+        return key.agent == .claude || key.agent == .codex ? key : nil
+    }
+
+    var selectedNoteKey: SessionKey? { (selection ?? currentLinked ?? current).flatMap(noteKey) }
+
+    func hasNoteSession(_ key: SessionKey) -> Bool {
+        sessions.contains { $0.key == key } || tabs.contains { $0.shows(key) }
+    }
+
+    func ensureNote(_ key: SessionKey) -> UUID? {
+        guard let key = noteKey(key) else { return nil }
+        let session = sessions.first { $0.key == key }
+        let tab = tabs.first { $0.shows(key) }
+        return notes.create(for: key, title: session?.title ?? tab?.title ?? key.agent.displayName,
+                            folder: session?.cwd ?? tab?.cwd ?? projectDir)
     }
 
     var currentTab: Tab? {
@@ -618,6 +648,7 @@ final class Workspace {
         if elsewhere != self.elsewhere { self.elsewhere = elsewhere }
         linkShells(scan.shells)
         bindNewCodexSessions(scan.codexThreads)
+        notes.refreshMetadata(sessions)
         let stops = limitInfo()
         if stops != limitStops { limitStops = stops }
         let left = owners(of: scan.leftovers)
@@ -671,6 +702,7 @@ final class Workspace {
     /// Attaches each shell to the session of the agent the user started in
     /// it, so that session's row opens the shell instead of a second copy.
     private func linkShells(_ shells: [ShellProcess]) {
+        var changed = false
         for r in tabs where r.key.agent == .shell {
             let found = r.terminal?.pid.flatMap { pid in shells.first { $0.pid == pid } }
             r.foreground = found?.foreground
@@ -688,8 +720,11 @@ final class Workspace {
                 r.turns.forgetReportedBusy()
                 r.busy = false
             }
+            if r.linked != linked { changed = true }
             r.linked = linked
         }
+        // Pane actions follow the linked agent when a shell is reused.
+        if changed { onLayout?() }
     }
 
     /// Codex does not let us choose the id of a new session. Once the
@@ -702,6 +737,7 @@ final class Workspace {
             guard !tabs.contains(where: { $0 !== r && $0.shows(key) }) else { continue }
             let old = r.key
             r.key = key
+            notes.rebind(from: old, to: key)
             if let pane = panes.keys.firstIndex(of: old) { panes.keys[pane] = key }
             for i in hiddenSplits.indices {
                 if let pane = hiddenSplits[i].keys.firstIndex(of: old) { hiddenSplits[i].keys[pane] = key }
@@ -743,6 +779,7 @@ final class Workspace {
             let q = filter.lowercased()
             rows = rows.filter {
                 $0.title.lowercased().contains(q) || $0.cwd.lowercased().contains(q) || $0.key.agent.name.contains(q)
+                    || notes.note(for: $0.key)?.text.localizedStandardContains(filter) == true
             }
         }
         rows.sort { $0.group != $1.group ? $0.group < $1.group : $0.order > $1.order }
@@ -1402,8 +1439,9 @@ final class Workspace {
             key = SessionKey(.codex, id)
             args = ["resume", id]
         case (.codex, nil):
-            key = SessionKey(.codex, "new-\(nextNewId)")
-            nextNewId += 1
+            // Draft notes may outlive the process, so provisional IDs must
+            // not be reused on the next app launch.
+            key = SessionKey(.codex, "new-\(UUID().uuidString.lowercased())")
         case (.shell, _):
             key = SessionKey(.shell, "shell-\(nextNewId)")
             nextNewId += 1

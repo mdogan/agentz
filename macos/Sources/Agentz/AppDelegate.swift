@@ -13,6 +13,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private var tickTimer: Timer?
     private var keyMonitor: Any?
     private var shortcutsWindow: ShortcutsWindowController?
+    private var notesWindow: NotesWindowController?
+    private var noteWindow: NoteWindowController?
     private let commandPalette = CommandPalette()
     private var quickTerminal: QuickTerminal?
     /// The quick terminal's global key, from the Ghostty config.
@@ -71,7 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             ?? NSHomeDirectory()
         UserDefaults.standard.set(dir, forKey: "project")
 
-        let workspace = Workspace(projectDir: isDirectory(dir) ? dir : NSHomeDirectory())
+        let notes = SessionNotes(url: SmokeTest.logPath == nil ? SessionNotes.defaultURL : nil)
+        let workspace = Workspace(projectDir: isDirectory(dir) ? dir : NSHomeDirectory(), notes: notes)
         self.workspace = workspace
         let look = Look.shared
         self.look = look
@@ -104,7 +107,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 copyContents: { [weak self] key in
                     guard let workspace = self?.workspace else { return }
                     workspace.contents(of: key)?.copy(in: workspace)
-                }
+                },
+                editNote: { [weak self] key in self?.editNote(key) },
+                allNotes: { [weak self] in self?.showAllNotes(nil) }
             ),
             autoHide: SmokeTest.logPath == nil && UserDefaults.standard.bool(forKey: Self.autoHideKey)
         )
@@ -136,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
         let scanner = Scanner(workspace)
         self.scanner = scanner
-        scanner.start()
+        if !SmokeTest.notesOnly { scanner.start() }
         tickTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak workspace, weak quick] _ in
             MainActor.assumeIsolated {
                 workspace?.tick()
@@ -292,6 +297,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 button: "Quit Anyway"
             ) else { return .terminateCancel }
         }
+        if !workspace.notes.flush() {
+            guard confirm("Could not save notes.",
+                          "\(workspace.notes.problem ?? "")\n\nQuitting now loses unsaved note changes.",
+                          button: "Quit Anyway") else { return .terminateCancel }
+        }
         return .terminateNow
     }
 
@@ -310,6 +320,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     // MARK: - Actions
+
+    private func editNote(_ key: SessionKey) {
+        guard let workspace, let look, let id = workspace.ensureNote(key) else { return }
+        if noteWindow == nil { noteWindow = NoteWindowController(notes: workspace.notes, look: look) }
+        noteWindow?.show(id)
+    }
+
+    private var inNotesWindow: Bool {
+        notesWindow?.window?.isKeyWindow == true || noteWindow?.window?.isKeyWindow == true
+    }
+
+    @objc func editSessionNote(_: Any?) {
+        guard let key = workspace?.selectedNoteKey else { return }
+        editNote(key)
+    }
+
+    @objc func showAllNotes(_: Any?) {
+        guard let workspace, let look else { return }
+        if notesWindow == nil {
+            notesWindow = NotesWindowController(workspace: workspace, look: look) { [weak self] key in
+                self?.workspace?.open(key)
+                self?.windowController?.window?.makeKeyAndOrderFront(nil)
+            }
+        }
+        notesWindow?.show()
+    }
 
     @objc func newClaude(_: Any?) { askWhereToStart(.claude) }
     @objc func newCodex(_: Any?) { askWhereToStart(.codex) }
@@ -406,6 +442,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc func closeCurrent(_: Any?) {
+        if noteWindow?.window?.isKeyWindow == true { noteWindow?.close(); return }
+        if notesWindow?.window?.isKeyWindow == true { notesWindow?.close(); return }
         if let quick = quickTerminal, quick.isKey { return quick.closeShell() }
         guard let key = workspace?.currentTab?.key else { return }
         closeSession(key)
@@ -466,6 +504,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc func saveContents(_: Any?) {
+        if inNotesWindow || NSApp.keyWindow?.firstResponder is NoteSourceTextView {
+            workspace?.notes.flush()
+            return
+        }
         guard let workspace else { return }
         currentContents()?.save(in: workspace)
     }
@@ -677,6 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// What works on the session list and the shown session. It waits
     /// while the quick terminal has the keyboard.
     private static let sessionActions: Set<Selector> = [
+        #selector(editSessionNote(_:)),
         #selector(newClaude(_:)), #selector(newCodex(_:)), #selector(newShell(_:)), #selector(togglePin(_:)),
         #selector(toggleAllSessions(_:)), #selector(selectRange(_:)), #selector(focusList(_:)), #selector(focusFilter(_:)),
         #selector(focusTerminal(_:)), #selector(nextSession(_:)), #selector(previousSession(_:)), #selector(nextAttention(_:)),
@@ -690,7 +733,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let workspace else { return false }
         let inQuickTerminal = quickTerminal?.isKey == true
-        if inQuickTerminal, let action = item.action, Self.sessionActions.contains(action) { return false }
+        let inNotes = inNotesWindow
+        let editingNote = inNotes || NSApp.keyWindow?.firstResponder is NoteSourceTextView
+        if inQuickTerminal || inNotes, let action = item.action, Self.sessionActions.contains(action) { return false }
         switch item.action {
         case #selector(showCommandPalette(_:)):
             return !commandPalette.isShown && NSApp.keyWindow?.sheetParent == nil
@@ -706,17 +751,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item.title = workspace.currentTab?.pinned == true ? "Unpin Session" : "Pin Session"
             return workspace.currentTab != nil
         case #selector(closeCurrent(_:)):
+            if inNotes { item.title = "Close Notes"; return true }
             // ⌘W in the quick terminal ends its shell.
             item.title = inQuickTerminal ? "Close Quick Terminal" : "Close Session"
             return inQuickTerminal || workspace.currentTab != nil
         case #selector(focusTerminal(_:)):
             return workspace.currentTab != nil
+        case #selector(editSessionNote(_:)):
+            return workspace.selectedNoteKey != nil && !workspace.notes.isReadOnly
         case #selector(find(_:)):
-            return activeTerminal != nil
-        case #selector(saveContents(_:)), #selector(copyContents(_:)):
-            return activeTerminal != nil
+            return !editingNote && activeTerminal != nil
+        case #selector(saveContents(_:)):
+            item.title = editingNote ? "Save Notes" : "Save Session Contents…"
+            return editingNote || activeTerminal != nil
+        case #selector(copyContents(_:)):
+            return !editingNote && activeTerminal != nil
         case #selector(findNext(_:)), #selector(findPrevious(_:)):
-            return activeTerminal?.isFinding == true
+            return !editingNote && activeTerminal?.isFinding == true
         case #selector(splitRight(_:)):
             item.state = workspace.panes.split == .right ? .on : .off
             return workspace.canSplit
@@ -782,11 +833,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         file.addItem(.separator())
         add(file, "Save Session Contents…", #selector(saveContents(_:)), "s")
         add(file, "Copy Session Contents", #selector(copyContents(_:)), "c").keyEquivalentModifierMask = [.command, .option]
+        add(file, "Edit Session Note", #selector(editSessionNote(_:)), "n").keyEquivalentModifierMask = [.command, .option]
         file.addItem(.separator())
         add(file, "Pin Session", #selector(togglePin(_:)))
         add(file, "Close Session", #selector(closeCurrent(_:)), "w")
 
         let edit = submenu(main, "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
@@ -798,6 +853,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
         let view = submenu(main, "View")
         add(view, "All Actions…", #selector(showCommandPalette(_:)), "P")
+        add(view, "All Notes", #selector(showAllNotes(_:)), "M")
         view.addItem(.separator())
         for (i, range) in SessionRange.allCases.enumerated() {
             if range == .all {

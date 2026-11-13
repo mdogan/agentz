@@ -33,7 +33,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         self.look = look
         let focus = SidebarFocus()
         sidebarFocus = focus
-        pane = PaneViewController(workspace: workspace, look: look)
+        pane = PaneViewController(workspace: workspace, look: look, editNote: actions.editNote)
         sidebar = NSHostingController(rootView: SidebarView(workspace: workspace, look: look, focus: focus, actions: actions))
         sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
         let git = GitPanelModel()
@@ -487,6 +487,10 @@ final class PaneViewController: NSViewController {
     private let container = PaneContainer()
     /// The terminal views, under everything else.
     private let terminals = NSView()
+    private let editNote: (SessionKey) -> Void
+    private let noteButtons = [NSButton(), NSButton()]
+    private let zedButtons = [NSButton(), NSButton()]
+    private let gitButtons = [NSButton(), NSButton()]
     /// One per pane, shown while the pane has no terminal.
     private let placeholders: [PaneHostingView<EmptyPaneView>]
     /// Fades the pane the user does not work in, as Ghostty does.
@@ -498,9 +502,10 @@ final class PaneViewController: NSViewController {
     /// A session from the list is dragged over the pane area.
     var onSessionDrag: (() -> Void)?
 
-    init(workspace: Workspace, look: Look) {
+    init(workspace: Workspace, look: Look, editNote: @escaping (SessionKey) -> Void) {
         self.workspace = workspace
         self.look = look
+        self.editNote = editNote
         placeholders = [0, 1].map { PaneHostingView(rootView: EmptyPaneView(workspace: workspace, look: look, pane: $0)) }
         super.init(nibName: nil, bundle: nil)
     }
@@ -526,6 +531,29 @@ final class PaneViewController: NSViewController {
             container.addSubview(placeholder)
         }
         container.addSubview(fade)
+        for (buttons, name, symbol, label, action) in [
+            (noteButtons, "note", "square.and.pencil", "Add Note", #selector(openNote(_:))),
+            (zedButtons, "zed", "chevron.left.forwardslash.chevron.right", "Open in Zed", #selector(openZed(_:))),
+            (gitButtons, "git", "arrow.triangle.branch", "Open Git", #selector(openGit(_:))),
+        ] {
+            for (i, button) in buttons.enumerated() {
+                button.tag = i
+                button.identifier = NSUserInterfaceItemIdentifier("session-\(name)-\(i)")
+                button.title = ""
+                button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+                button.imagePosition = .imageOnly
+                button.isBordered = false
+                button.setButtonType(.momentaryChange)
+                button.wantsLayer = true
+                button.layer?.cornerRadius = 6
+                button.toolTip = label
+                button.setAccessibilityLabel(label)
+                button.target = self
+                button.action = action
+                button.isHidden = true
+                container.addSubview(button)
+            }
+        }
         container.addSubview(divider)
         container.addSubview(container.highlight)
         divider.onDrag = { [weak self] point in self?.moveDivider(to: point) }
@@ -621,6 +649,23 @@ final class PaneViewController: NSViewController {
         let layout = workspace.panes
         let rects = paneRects(layout.split, ratio: draggedRatio ?? layout.ratio)
         var empty = Set(layout.keys.indices)
+        for i in noteButtons.indices {
+            let tab = layout.keys.indices.contains(i) ? workspace.tabs.first { $0.key == layout.keys[i] } : nil
+            let key = tab.flatMap { workspace.noteKey($0.key) }
+            let note = key.flatMap { workspace.notes.note(for: $0) }
+            let button = noteButtons[i]
+            button.image = NSImage(systemSymbolName: note == nil ? "square.and.pencil" : "note.text", accessibilityDescription: nil)
+            let label = note == nil ? "Add Note" : "Edit Note"
+            button.toolTip = label
+            button.setAccessibilityLabel(label)
+            button.contentTintColor = note == nil ? NSColor(look.colors.foreground).withAlphaComponent(0.65) : NSColor(look.accent)
+            for (offset, control) in [gitButtons[i], zedButtons[i], button].enumerated() {
+                control.isHidden = key == nil
+                if i < rects.count {
+                    control.frame = NSRect(x: rects[i].maxX - 34 - CGFloat(offset * 30), y: rects[i].minY + 8, width: 26, height: 26)
+                }
+            }
+        }
         for (i, key) in layout.keys.enumerated() {
             guard let v = workspace.tabs.first(where: { $0.key == key })?.content.paneView else { continue }
             empty.remove(i)
@@ -646,6 +691,27 @@ final class PaneViewController: NSViewController {
         }
         fade.isHidden = false
         fade.frame = rects[1 - layout.focused]
+    }
+
+    @objc private func openNote(_ sender: NSButton) {
+        guard workspace.panes.keys.indices.contains(sender.tag),
+              let key = workspace.panes.keys[sender.tag] else { return }
+        workspace.focusPane(sender.tag)
+        editNote(key)
+    }
+
+    @objc private func openZed(_ sender: NSButton) {
+        workspace.focusPane(sender.tag)
+        let folder = URL(fileURLWithPath: workspace.shownFolder)
+        Task { [weak workspace] in
+            do { try await ZedLauncher().openRepository(at: folder) }
+            catch { workspace?.setStatus(error.localizedDescription) }
+        }
+    }
+
+    @objc private func openGit(_ sender: NSButton) {
+        workspace.focusPane(sender.tag)
+        workspace.openGit(workspace.shownFolder)
     }
 
     /// Each pane's frame, left or top first, with the divider's line
@@ -695,9 +761,14 @@ final class PaneViewController: NSViewController {
             divider.thickColor = NSColor(splitLook.divider ?? colors.background.mixed(with: colors.foreground, 0.35))
             fade.color = NSColor(splitLook.unfocusedFill ?? colors.background).withAlphaComponent(1 - splitLook.unfocusedOpacity)
             container.highlight.color = NSColor(look.accent)
+            for button in noteButtons + zedButtons + gitButtons {
+                button.layer?.backgroundColor = NSColor(colors.background).withAlphaComponent(0.92).cgColor
+                button.contentTintColor = NSColor(colors.foreground).withAlphaComponent(0.65)
+            }
         } onChange: { [weak self] in
             DispatchQueue.main.async { self?.restyle() }
         }
+        layoutPanes()
     }
 }
 

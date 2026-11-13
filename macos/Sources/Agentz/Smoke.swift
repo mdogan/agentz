@@ -1,5 +1,6 @@
 import AgentzCore
 import AppKit
+import SwiftUI
 
 /// A scripted check of the real app with real Ghostty terminals, started by
 /// `make smoke`. It opens shells and a stand-in `codex`, types commands and
@@ -17,6 +18,10 @@ final class SmokeTest {
 
     static var logPath: String? {
         ProcessInfo.processInfo.environment["AGENTZ_SMOKE_LOG"]
+    }
+
+    static var notesOnly: Bool {
+        logPath != nil && ProcessInfo.processInfo.environment["AGENTZ_SMOKE_NOTES"] == "1"
     }
 
     init(workspace: Workspace, window: MainWindowController, quick: QuickTerminal, logPath: String) {
@@ -57,7 +62,7 @@ final class SmokeTest {
             self?.notices.append((key, heading, message))
             notify?(heading, title, message, key)
         }
-        let tmp = (realPath(NSTemporaryDirectory()) ?? NSTemporaryDirectory()) + "/agentz-smoke-\(getpid())"
+        let tmp = "/tmp/codex-501/agentz-smoke-\(getpid())"
         let bin = tmp + "/bin"
         try? FileManager.default.createDirectory(atPath: bin, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(atPath: tmp) }
@@ -65,6 +70,13 @@ final class SmokeTest {
         FileManager.default.createFile(atPath: bin + "/claude", contents: Data(Self.fakeClaude.utf8), attributes: [.posixPermissions: 0o755])
         setenv("PATH", bin + ":" + (ProcessInfo.processInfo.environment["PATH"] ?? ""), 1)
         let envFile = tmp + "/env"
+
+        if Self.notesOnly {
+            workspace.requestScan = nil
+            await sessionNotes(in: tmp)
+            finish(nil)
+            return
+        }
 
         lines.append("info ghostty config: \(GhosttyApp.configIssue.map { "not used: \($0)" } ?? "used")")
 
@@ -1493,6 +1505,148 @@ final class SmokeTest {
             check("the palette lists no standard macOS commands", titles.isDisjoint(with: standard) && titles.contains("Split Right"),
                   "\(titles.intersection(standard).sorted())")
         }
+    }
+
+    private func sessionNotes(in folder: String) async {
+        let ws = workspace
+        let app = NSApp.delegate as! AppDelegate
+        func editors(in view: NSView?) -> [NoteSourceTextView] {
+            guard let view, !view.isHidden else { return [] }
+            return (view as? NoteSourceTextView).map { [$0] } ?? view.subviews.flatMap { editors(in: $0) }
+        }
+        func paneButtons(_ kind: String, in view: NSView?) -> [NSButton] {
+            guard let view, !view.isHidden else { return [] }
+            if let button = view as? NSButton, button.identifier?.rawValue.hasPrefix("session-\(kind)-") == true { return [button] }
+            return view.subviews.flatMap { paneButtons(kind, in: $0) }
+        }
+        func buttons(_ kind: String = "note") -> [NSButton] { paneButtons(kind, in: window.window?.contentView) }
+        func popup() -> NSWindow? { NSApp.windows.first { $0.identifier?.rawValue == "session-note-window" } }
+        func escape(_ target: NSWindow?) {
+            guard let target, let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: target.windowNumber, context: nil,
+                characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) else { return }
+            target.sendEvent(event)
+        }
+        func scan(_ sessions: [Session], threads: [Int32: String] = [:], shells: [ShellProcess] = []) -> Scan {
+            Scan(sessions: sessions, complete: true, shells: shells, codexThreads: threads, limits: Limits(), worktrees: [], elsewhere: [], leftovers: [])
+        }
+        // Git actions use disposable repositories, never the user's checkout.
+        let otherFolder = folder + "/other"
+        try? FileManager.default.createDirectory(atPath: otherFolder, withIntermediateDirectories: true)
+        for path in [folder, otherFolder] {
+            let git = Process()
+            git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            git.arguments = ["init", "-q", path]
+            try? git.run()
+            git.waitUntilExit()
+        }
+        ws.newSession(.codex, cwd: folder)
+        guard let tab = ws.currentTab else { check("created note session", false); return }
+        check("fake Codex starts", await wait(5) { tab.terminal?.pid != nil })
+        let provisional = tab.key
+        let terminalFrame = tab.content.paneView.frame
+        check("agent pane offers Add Note without creating a note", buttons().count == 1 && buttons().first?.toolTip == "Add Note" && ws.notes.notes.isEmpty)
+        check("Zed and Git buttons sit next to Note", buttons("zed").count == 1 && buttons("git").count == 1
+              && buttons().first!.frame.maxX < buttons("zed").first!.frame.minX
+              && buttons("zed").first!.frame.maxX < buttons("git").first!.frame.minX)
+        buttons().first?.performClick(nil)
+        check("note opens in a separate popup", await wait(3) { popup()?.isKeyWindow == true && !editors(in: popup()?.contentView).isEmpty })
+        check("opening a note preserves the terminal's size", editors(in: window.window?.contentView).isEmpty && tab.content.paneView.frame == terminalFrame)
+        popup()?.performClose(nil)
+        check("closing an untouched note removes it", ws.notes.note(for: provisional) == nil)
+        buttons().first?.performClick(nil)
+        check("an empty note can be opened again", await wait(3) { !editors(in: popup()?.contentView).isEmpty })
+        guard let editor = editors(in: popup()?.contentView).first,
+              let note = ws.notes.note(for: provisional) else { check("note editor exists", false); return }
+        popup()?.makeFirstResponder(editor)
+        let markdown = "# Reconnect checks\n\n**Ready for review**\n\n- Test reconnect after sleep\n- Check timeout handling\n\n```swift\nlet retries = 3\n```\n"
+        editor.insertText(markdown, replacementRange: NSRange(location: 0, length: 0))
+        check("editor changes reach the note store", ws.notes.note(note.id)?.text == markdown)
+        try? await Task.sleep(for: .milliseconds(150))
+        editor.breakUndoCoalescing()
+        editor.undoManager?.undo()
+        check("native undo updates the note", ws.notes.note(note.id)?.text == "")
+        editor.undoManager?.redo()
+        check("native redo restores Markdown", ws.notes.note(note.id)?.text == markdown)
+        escape(popup())
+        check("Escape saves and closes from the text editor, keeping the session", popup()?.isVisible == false && ws.tabs.contains { $0 === tab } && ws.notes.note(note.id)?.text == markdown && !ws.notes.isDirty)
+        buttons().first?.performClick(nil)
+        check("pane button reopens the existing note", await wait(3) { editors(in: popup()?.contentView).first?.string == markdown })
+        let real = SessionKey(.codex, "notes-smoke-thread")
+        let session = Session(agent: .codex, id: real.id, title: "Reconnect after sleep", cwd: folder, originator: nil,
+                              created: Date(), updated: Date(), inProject: true, branch: nil, pr: nil,
+                              limit: nil, turnStarted: nil, action: nil, context: nil)
+        if let pid = tab.terminal?.pid { ws.apply(scan([session], threads: [pid: real.id]), dir: ws.projectDir) }
+        check("Codex discovery migrates the draft", ws.notes.note(for: real)?.id == note.id && ws.notes.note(for: provisional) == nil)
+        check("the popup editor survives Codex discovery", editors(in: popup()?.contentView).first === editor)
+        ws.filter = "timeout handling"
+        check("session search includes notes", ws.rows.contains { $0.key == real })
+        ws.filter = ""
+        try? await Task.sleep(for: .milliseconds(300))
+        snapshot("note-popup", of: popup())
+        app.closeCurrent(nil)
+        ws.split(.right)
+        ws.newSession(.claude, cwd: otherFolder, inPlaceOfShell: true)
+        guard let claude = ws.currentTab, let second = ws.ensureNote(claude.key) else { check("second note session", false); return }
+        ws.notes.update(second, text: "# Review\n\nCheck the retry limit.")
+        check("each split pane has Note, Zed and Git buttons", buttons().count == 2 && buttons("zed").count == 2 && buttons("git").count == 2)
+        buttons().first { $0.tag == 1 }?.performClick(nil)
+        check("second pane opens its own note", await wait(3) { editors(in: popup()?.contentView).first?.string == ws.notes.note(second)?.text })
+        buttons().first { $0.tag == 0 }?.performClick(nil)
+        check("other pane opens and focuses the correct session's note", await wait(3) { ws.panes.focused == 0 && editors(in: popup()?.contentView).first?.string == markdown })
+        check("switching notes keeps both texts", ws.notes.note(second)?.text == "# Review\n\nCheck the retry limit." && ws.notes.note(note.id)?.text == markdown)
+        app.closeCurrent(nil)
+        snapshot("pane-actions")
+        let orphan = ws.notes.create(for: SessionKey(.claude, "missing-session"), title: "Archived investigation", folder: folder)!
+        ws.notes.update(orphan, text: "# Findings\n\nThis note remains after the session is gone.\n\n> Keep the retry delay bounded.\n\n[Reference](https://example.com)\n")
+        ws.selection = SessionKey(.claude, "missing-session")
+        app.editSessionNote(nil)
+        check("unavailable session opens its note without resuming an agent", await wait(3) { editors(in: popup()?.contentView).first?.string == ws.notes.note(orphan)?.text && ws.tabs.count == 2 })
+        app.closeCurrent(nil)
+        app.showAllNotes(nil)
+        check("All Notes opens separately", await wait(3) { NSApp.keyWindow?.title == "All Notes" })
+        (NSApp.keyWindow?.windowController as? NotesWindowController)?.show(orphan)
+        check("All Notes opens the selected orphan note", await wait(3) { editors(in: NSApp.keyWindow?.contentView).first?.string == ws.notes.note(orphan)?.text })
+        check("All Notes includes unavailable sessions", ws.notes.notes.count == 3 && !ws.hasNoteSession(SessionKey(.claude, "missing-session")))
+        check("All Notes close command is enabled", app.validateMenuItem(NSMenuItem(title: "Close", action: #selector(AppDelegate.closeCurrent(_:)), keyEquivalent: "w")))
+        try? await Task.sleep(for: .milliseconds(300))
+        snapshot("all-notes", of: NSApp.keyWindow)
+        let library = NSApp.keyWindow?.windowController as? NotesWindowController
+        let empty = ws.notes.create(for: SessionKey(.claude, "empty-library-note"), title: "Empty", folder: folder)!
+        library?.show(empty)
+        check("All Notes opens an empty draft", await wait(3) { editors(in: NSApp.keyWindow?.contentView).first?.string == "" })
+        ws.notes.update(empty, text: " \n\t")
+        library?.show(orphan)
+        check("switching notes removes a whitespace-only draft", await wait(3) { ws.notes.note(empty) == nil })
+        app.closeCurrent(nil)
+        check("closing All Notes keeps both agent tabs", ws.tabs.contains { $0 === tab } && ws.tabs.contains { $0 === claude })
+        ws.newSession(.shell, cwd: folder)
+        guard let shell = ws.currentTab else { check("shell for linked notes", false); return }
+        check("shell for linked notes starts", await wait(5) { shell.terminal?.pid != nil })
+        check("bare shell has no agent action buttons", !buttons().contains { $0.tag == ws.panes.focused } && !buttons("zed").contains { $0.tag == ws.panes.focused })
+        if let pid = shell.terminal?.pid {
+            let linked = SessionKey(.claude, "missing-session")
+            ws.apply(scan([session], shells: [ShellProcess(pid: pid, agent: linked, foreground: nil)]), dir: ws.projectDir)
+            buttons().first { $0.tag == ws.panes.focused }?.performClick(nil)
+            check("shell button opens its linked agent's note", await wait(3) { editors(in: popup()?.contentView).first?.string == ws.notes.note(orphan)?.text })
+            app.closeCurrent(nil)
+            let next = SessionKey(.claude, "another-session")
+            ws.apply(scan([session], shells: [ShellProcess(pid: pid, agent: next, foreground: nil)]), dir: ws.projectDir)
+            check("shell reuse updates the note button", buttons().first { $0.tag == ws.panes.focused }?.toolTip == "Add Note")
+            buttons().first { $0.tag == ws.panes.focused }?.performClick(nil)
+            check("shell reuse opens a separate note for the new agent", await wait(3) { editors(in: popup()?.contentView).first?.string == "" && ws.notes.note(for: next) != nil })
+            check("shell reuse keeps the original note", ws.notes.note(for: linked)?.id == orphan)
+            popup()?.makeFirstResponder(nil)
+            escape(popup())
+            check("Escape outside the editor closes and removes the empty note", popup()?.isVisible == false && ws.notes.note(for: next) == nil)
+        }
+        ws.open(real)
+        ws.focusPane(1)
+        buttons("git").first { $0.tag == 0 }?.performClick(nil)
+        check("Git button opens the clicked pane's repository", await wait(5) {
+            ws.currentTab?.key.agent == .git && ws.currentTab?.git?.store.repositoryURL?.standardizedFileURL.resolvingSymlinksInPath().path
+                == URL(fileURLWithPath: folder).standardizedFileURL.resolvingSymlinksInPath().path
+        })
     }
 
     private func snapshot(_ name: String? = nil, of target: NSWindow? = nil) {
