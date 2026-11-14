@@ -583,7 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         workspace.setStatus(workspace.range == .all ? "Showing all sessions" : "Showing today's sessions")
     }
 
-    /// The View menu items for the other ranges, by their tag.
+    /// The Sessions menu items for the other ranges, by their tag.
     @objc func selectRange(_ sender: NSMenuItem) {
         workspace?.range = SessionRange.allCases[sender.tag]
     }
@@ -930,22 +930,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         add(view, "All Actions…", #selector(showCommandPalette(_:)), "P")
         add(view, "All Notes", #selector(showAllNotes(_:)), "M")
         view.addItem(.separator())
-        for (i, range) in SessionRange.allCases.enumerated() {
-            if range == .all {
-                add(view, range.title, #selector(toggleAllSessions(_:)), "I")
-            } else {
-                add(view, range.title, #selector(selectRange(_:))).tag = i
-            }
-        }
-        view.addItem(.separator())
-        add(view, "Go to Session…", #selector(showSessionSwitcher(_:)), "e")
         add(view, "Go to Session List", #selector(focusList(_:)), "l")
         add(view, "Go to Terminal", #selector(focusTerminal(_:)), "j")
         add(view, "Go to Other Pane", #selector(focusOtherPane(_:)), "j").keyEquivalentModifierMask = [.command, .option]
-        add(view, "Filter Sessions", #selector(focusFilter(_:)), "F")
-        add(view, "Next Session", #selector(nextSession(_:)), "]")
-        add(view, "Previous Session", #selector(previousSession(_:)), "[")
-        add(view, "Next Session That Needs You", #selector(nextAttention(_:)), "A")
         view.addItem(.separator())
         let sidebar = add(view, "Toggle Session List", #selector(toggleSessionList(_:)), "s")
         sidebar.keyEquivalentModifierMask = [.command, .control]
@@ -975,6 +962,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let themes = submenu(view, "Theme")
         themes.delegate = self
         themeMenu = themes
+
+        let sessions = submenu(main, "Sessions")
+        add(sessions, "Go to Session…", #selector(showSessionSwitcher(_:)), "e")
+        add(sessions, "Next Session", #selector(nextSession(_:)), "]")
+        add(sessions, "Previous Session", #selector(previousSession(_:)), "[")
+        add(sessions, "Next Session That Needs You", #selector(nextAttention(_:)), "A")
+        sessions.addItem(.separator())
+        add(sessions, "Filter Sessions", #selector(focusFilter(_:)), "F")
+        for (i, range) in SessionRange.allCases.enumerated() {
+            if range == .all {
+                add(sessions, range.title, #selector(toggleAllSessions(_:)), "I")
+            } else {
+                add(sessions, range.title, #selector(selectRange(_:))).tag = i
+            }
+        }
 
         // For the git tab in the focused pane, else for the Changes panel's
         // repository. GitFork's keys, where agentz has no other use for them.
