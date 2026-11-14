@@ -68,6 +68,11 @@ func shortcutGroups(_ menu: NSMenu) -> [ShortcutGroup] {
             ("↩", "Run the selected command"),
             ("⎋", "Close the command palette"),
         ]),
+        ShortcutGroup("Go to Session", [
+            ("↑ / ↓", "Select the previous / next session"),
+            ("↩", "Show or resume the selected session"),
+            ("⎋", "Close the session switcher"),
+        ]),
         ShortcutGroup("Find Bar", [
             ("↩ / ↑", "Next match, up"),
             ("⇧↩ / ↓", "Previous match, down"),

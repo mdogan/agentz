@@ -67,18 +67,25 @@ enum PaletteSearch {
     /// Each word can match the command or its menu path. Title matches come
     /// first; a subsequence also matches, e.g. "splr" finds "Split Right".
     static func filter(_ commands: [PaletteCommand], query: String) -> [PaletteCommand] {
+        rank(commands, query: query, title: \.title, detail: \.category)
+    }
+
+    /// Each word can match an item's title or its detail. Title matches
+    /// come first; a subsequence of the title also matches. Equal matches
+    /// keep their order.
+    static func rank<Item>(_ items: [Item], query: String, title: (Item) -> String, detail: (Item) -> String) -> [Item] {
         let words = normalized(query).split(whereSeparator: \.isWhitespace)
-        guard !words.isEmpty else { return commands }
-        return commands.enumerated().compactMap { index, command -> (Int, Int, PaletteCommand)? in
-            let title = normalized(command.title)
-            let category = normalized(command.category)
+        guard !words.isEmpty else { return items }
+        return items.enumerated().compactMap { index, item -> (Int, Int, Item)? in
+            let title = normalized(title(item))
+            let detail = normalized(detail(item))
             var score = 0
             for word in words {
                 if title.hasPrefix(word) {
                     continue
                 } else if title.contains(word) {
                     score += 1
-                } else if category.contains(word) {
+                } else if detail.contains(word) {
                     score += 2
                 } else {
                     var remaining = word[...]
@@ -90,7 +97,7 @@ enum PaletteSearch {
                     score += 3
                 }
             }
-            return (score, index, command)
+            return (score, index, item)
         }
         .sorted { ($0.0, $0.1) < ($1.0, $1.1) }
         .map { $0.2 }
@@ -101,28 +108,33 @@ enum PaletteSearch {
     }
 }
 
-/// Restore the original responder before dispatching, so Find and Copy
-/// Session Contents apply to the view the user opened the palette from. A sheet can
-/// also belong to the quick terminal or another app window.
+/// A searchable list in a sheet, such as All Actions or Go to Session.
+/// What the user picked runs once the original responder has the keyboard
+/// back, so Find and Copy Session Contents apply to the view the user
+/// opened it from. A sheet can also belong to the quick terminal or another
+/// app window. Only one shows at a time.
 @MainActor
-final class CommandPalette {
+final class PaletteSheet {
     private(set) var sheet: NSWindow?
 
     var isShown: Bool { sheet != nil }
 
-    func show(in parent: NSWindow, menu: NSMenu, owner: AnyObject, excluding action: Selector) {
+    /// `content` gets a `close`, to call once with what to run after the
+    /// sheet, or with nil.
+    func show<Content: View>(in parent: NSWindow, title: String,
+                             content: (_ close: @escaping (_ then: (() -> Void)?) -> Void) -> Content)
+    {
         guard sheet == nil, parent.sheetParent == nil, parent.attachedSheet == nil else { return }
-        let commands = PaletteCommand.collect(from: menu, owner: owner, excluding: action)
         let responder = parent.firstResponder
-        var chosen: PaletteCommand?
-        let host = NSHostingController(rootView: CommandPaletteView(commands: commands) { [weak self, weak parent] command in
+        var then: (() -> Void)?
+        let host = NSHostingController(rootView: content { [weak self, weak parent] action in
             guard let sheet = self?.sheet else { return }
-            chosen = command
+            then = action
             parent?.endSheet(sheet)
         }.lookWindowStyle())
         host.sizingOptions = .preferredContentSize
         let sheet = NSPanel(contentViewController: host)
-        sheet.title = "All Actions"
+        sheet.title = title
         sheet.styleMask = [.titled, .fullSizeContentView]
         sheet.titleVisibility = .hidden
         sheet.titlebarAppearsTransparent = true
@@ -138,31 +150,64 @@ final class CommandPalette {
                 guard let parent, parent.isVisible else { return }
                 parent.makeKey()
                 if let responder { parent.makeFirstResponder(responder) }
-                if let chosen, !chosen.perform() { NSSound.beep() }
+                then?()
+            }
+        }
+    }
+
+    /// All Actions: the app's menu commands.
+    func showCommands(in parent: NSWindow, menu: NSMenu, owner: AnyObject, excluding action: Selector) {
+        let commands = PaletteCommand.collect(from: menu, owner: owner, excluding: action)
+        show(in: parent, title: "All Actions") { close in
+            PaletteView(
+                title: "All Actions", keys: "⇧⌘P", prompt: "Search commands…", empty: "No matching commands", verb: "run",
+                items: commands, search: PaletteSearch.filter, isEnabled: \.isEnabled,
+                label: { "\($0.category), \($0.title)" },
+                row: { CommandRow(command: $0) }
+            ) { command in
+                close(command.map { command in { if !command.perform() { NSSound.beep() } } })
             }
         }
     }
 }
 
-private struct CommandPaletteView: View {
-    let commands: [PaletteCommand]
-    let choose: (PaletteCommand?) -> Void
+/// The search field, list and key hints of a palette sheet.
+struct PaletteView<Item: Identifiable, Row: View>: View {
+    let title: String
+    /// The shortcut that opens it.
+    let keys: String
+    let prompt: String
+    /// What the list says when nothing matches.
+    let empty: String
+    /// What Return does to the selection, e.g. "run".
+    let verb: String
+    let items: [Item]
+    let search: (_ items: [Item], _ query: String) -> [Item]
+    var isEnabled: (Item) -> Bool = { _ in true }
+    /// The item to select first among the shown ones; nil selects the first
+    /// enabled one.
+    var start: ((_ shown: [Item], _ query: String) -> Item.ID?)?
+    /// For VoiceOver.
+    let label: (Item) -> String
+    let row: (Item) -> Row
+    /// Called once, with the picked item or nil.
+    let choose: (Item?) -> Void
     @State private var query = ""
-    @State private var selection: ObjectIdentifier?
+    @State private var selection: Item.ID?
     @State private var done = false
 
-    private var shown: [PaletteCommand] { PaletteSearch.filter(commands, query: query) }
+    private var shown: [Item] { search(items, query) }
 
     var body: some View {
         let look = Look.shared
         VStack(spacing: 0) {
             HStack {
-                Text("All Actions").font(.headline)
+                Text(title).font(.headline)
                 Spacer()
-                Text("⇧⌘P").font(.system(size: 12)).foregroundStyle(look.secondary)
+                Text(keys).font(.system(size: 12)).foregroundStyle(look.secondary)
             }
             .padding(.bottom, 12)
-            PickerField(text: $query, prompt: "Search commands…", move: move, submit: submit, cancel: cancel)
+            PickerField(text: $query, prompt: prompt, move: move, submit: submit, cancel: cancel)
                 .lookField(isFocused: true, systemImage: "magnifyingglass")
                 .padding(.bottom, 14)
             Divider()
@@ -170,7 +215,7 @@ private struct CommandPaletteView: View {
             Divider()
             HStack(spacing: 14) {
                 Text("↑ ↓ to select")
-                Text("↩ to run")
+                Text("↩ to \(verb)")
                 Spacer()
                 Button("Close", action: cancel)
                     .keyboardShortcut(.cancelAction)
@@ -183,8 +228,8 @@ private struct CommandPaletteView: View {
         }
         .padding(20)
         .frame(width: 620)
-        .onAppear { selection = shown.first(where: \.isEnabled)?.id }
-        .onChange(of: query) { selection = shown.first(where: \.isEnabled)?.id }
+        .onAppear(perform: selectFirst)
+        .onChange(of: query) { selectFirst() }
     }
 
     private var list: some View {
@@ -192,8 +237,8 @@ private struct CommandPaletteView: View {
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    ForEach(shown) { command in
-                        row(command).id(command.id)
+                    ForEach(shown) { item in
+                        button(item).id(item.id)
                     }
                 }
                 .padding(.vertical, 2)
@@ -201,7 +246,7 @@ private struct CommandPaletteView: View {
             .frame(height: 350)
             .overlay {
                 if shown.isEmpty {
-                    Text("No matching commands").foregroundStyle(Look.shared.secondary)
+                    Text(empty).foregroundStyle(Look.shared.secondary)
                 }
             }
             .onChange(of: selection) { _, id in
@@ -210,63 +255,78 @@ private struct CommandPaletteView: View {
         }
     }
 
-    private func row(_ command: PaletteCommand) -> some View {
+    private func button(_ item: Item) -> some View {
         let look = Look.shared
-        let selected = command.id == selection
+        let selected = item.id == selection
+        let enabled = isEnabled(item)
         return Button {
-            selection = command.id
+            selection = item.id
             submit()
         } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(look.accent)
-                    .opacity(command.isOn ? 1 : 0)
-                    .frame(width: 14)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(command.title).font(.system(size: 13)).foregroundStyle(look.text)
-                    Text(command.category).font(.system(size: 10)).foregroundStyle(look.secondary)
-                }
-                .lineLimit(1)
-                Spacer(minLength: 12)
-                if !command.keys.isEmpty {
-                    Text(command.keys)
-                        .font(.system(size: 11, design: .rounded))
-                        .foregroundStyle(look.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 4))
-                }
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 44)
-            .contentShape(Rectangle())
-            .background(selected ? look.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
-            .opacity(command.isEnabled ? 1 : 0.4)
+            row(item)
+                .padding(.horizontal, 8)
+                .frame(height: 44)
+                .contentShape(Rectangle())
+                .background(selected ? look.selection : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .opacity(enabled ? 1 : 0.4)
         }
         .buttonStyle(.plain)
-        .disabled(!command.isEnabled)
-        .accessibilityLabel("\(command.category), \(command.title)")
+        .disabled(!enabled)
+        .accessibilityLabel(label(item))
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .help(command.isEnabled ? command.category : "Unavailable in the current view")
+    }
+
+    private func selectFirst() {
+        let shown = shown
+        selection = start?(shown, query) ?? shown.first(where: isEnabled)?.id
     }
 
     private func move(_ delta: Int) {
-        let ids = shown.filter(\.isEnabled).map(\.id)
+        let ids = shown.filter(isEnabled).map(\.id)
         guard !ids.isEmpty else { return }
         let at = selection.flatMap { ids.firstIndex(of: $0) } ?? (delta > 0 ? -1 : ids.count)
         selection = ids[(at + delta + ids.count) % ids.count]
     }
 
     private func submit() {
-        guard !done, let command = shown.first(where: { $0.id == selection && $0.isEnabled }) else { return }
+        guard !done, let item = shown.first(where: { $0.id == selection && isEnabled($0) }) else { return }
         done = true
-        choose(command)
+        choose(item)
     }
 
     private func cancel() {
         guard !done else { return }
         done = true
         choose(nil)
+    }
+}
+
+private struct CommandRow: View {
+    let command: PaletteCommand
+
+    var body: some View {
+        let look = Look.shared
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(look.accent)
+                .opacity(command.isOn ? 1 : 0)
+                .frame(width: 14)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(command.title).font(.system(size: 13)).foregroundStyle(look.text)
+                Text(command.category).font(.system(size: 10)).foregroundStyle(look.secondary)
+            }
+            .lineLimit(1)
+            Spacer(minLength: 12)
+            if !command.keys.isEmpty {
+                Text(command.keys)
+                    .font(.system(size: 11, design: .rounded))
+                    .foregroundStyle(look.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 4))
+            }
+        }
+        .help(command.isEnabled ? command.category : "Unavailable in the current view")
     }
 }

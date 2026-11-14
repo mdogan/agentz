@@ -170,6 +170,7 @@ final class SmokeTest {
         ws.showNextAttention()
         check("switch to the agent", ws.current == codexKey)
         check("looking at it ends the attention", await wait(2) { ws.attentionKeys.isEmpty && ws.waitingMessages.isEmpty })
+        await sessionSwitcher(back: other.key, then: codexKey)
         codex.terminal!.run("")
         check("quit agent is replaced by a shell", await wait(5) {
             ws.currentTab?.key.agent == .shell && ws.currentTab?.placeholder == true && !ws.tabs.contains { $0.key == codexKey }
@@ -1504,6 +1505,36 @@ final class SmokeTest {
                                  "Start Dictation…", "Emoji & Symbols", "Minimize", "Zoom", "Bring All to Front"]
             check("the palette lists no standard macOS commands", titles.isDisjoint(with: standard) && titles.contains("Split Right"),
                   "\(titles.intersection(standard).sorted())")
+        }
+    }
+
+    /// ⌘E then Return goes to the session shown before, `back`, and again
+    /// to `then`, the one shown now.
+    private func sessionSwitcher(back: SessionKey, then: SessionKey) async {
+        guard let parent = window.window else { return }
+        func open() async -> NSWindow? {
+            if let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.command],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: parent.windowNumber,
+                context: nil, characters: "e", charactersIgnoringModifiers: "e", isARepeat: false, keyCode: 14
+            ) {
+                NSApp.sendEvent(event)
+            }
+            guard let field = await pickerField(), field.placeholderString == "Search sessions…" else { return nil }
+            return parent.attachedSheet
+        }
+        guard let sheet = await open() else { return check("⌘E opens Go to Session", false) }
+        check("⌘E opens Go to Session", true)
+        snapshot("session-switcher", of: sheet)
+        press(.escape, in: sheet)
+        check("closing Go to Session switches nothing", await wait(3) { parent.attachedSheet == nil } && workspace.current == then)
+        for (key, name) in [(back, "goes to the session shown before"), (then, "goes back to the first one")] {
+            guard let sheet = await open() else { return check("Go to Session opens again", false) }
+            try? await Task.sleep(for: .milliseconds(100))
+            press(.return, in: sheet)
+            check("Return in Go to Session \(name)", await wait(3) {
+                parent.attachedSheet == nil && workspace.current == key
+            }, "\(String(describing: workspace.current))")
         }
     }
 

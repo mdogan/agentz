@@ -69,6 +69,18 @@ struct CommandPaletteTests {
     }
 
     @Test
+    func ranksAnyItemsByTitleThenDetail() {
+        let sessions = [("Fix login bug", "api main"), ("Write docs", "website login"), ("Refactor", "api")]
+        func titles(_ query: String) -> [String] {
+            PaletteSearch.rank(sessions, query: query, title: \.0, detail: \.1).map(\.0)
+        }
+        #expect(titles("") == ["Fix login bug", "Write docs", "Refactor"])
+        #expect(titles("login") == ["Fix login bug", "Write docs"])
+        #expect(titles("api ref") == ["Refactor"])
+        #expect(titles("wdocs") == ["Write docs"])
+    }
+
+    @Test
     func keepsShortcutModifiersAndMenuSenderAndRevalidatesBeforeRunning() {
         _ = NSApplication.shared
         let target = PaletteTestTarget()

@@ -15,7 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private var shortcutsWindow: ShortcutsWindowController?
     private var notesWindow: NotesWindowController?
     private var noteWindow: NoteWindowController?
-    private let commandPalette = CommandPalette()
+    /// All Actions and Go to Session.
+    private let palette = PaletteSheet()
     private var quickTerminal: QuickTerminal?
     /// The quick terminal's global key, from the Ghostty config.
     private var hotKey: HotKey?
@@ -629,7 +630,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         guard let menu = NSApp.mainMenu,
               let parent = NSApp.keyWindow ?? windowController?.window
         else { return }
-        commandPalette.show(in: parent, menu: menu, owner: self, excluding: #selector(showCommandPalette(_:)))
+        palette.showCommands(in: parent, menu: menu, owner: self, excluding: #selector(showCommandPalette(_:)))
+    }
+
+    /// Searches every session, also the ones the list's range and filters
+    /// hide, and shows or resumes the picked one.
+    @objc func showSessionSwitcher(_: Any?) {
+        guard let workspace, let parent = windowController?.window else { return }
+        windowController?.showWindow(nil)
+        palette.showSessions(in: parent, workspace: workspace)
     }
 
     @objc func showShortcuts(_: Any?) {
@@ -719,7 +728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// What works on the session list and the shown session. It waits
     /// while the quick terminal has the keyboard.
     private static let sessionActions: Set<Selector> = [
-        #selector(editSessionNote(_:)),
+        #selector(editSessionNote(_:)), #selector(showSessionSwitcher(_:)),
         #selector(newClaude(_:)), #selector(newCodex(_:)), #selector(newShell(_:)), #selector(togglePin(_:)),
         #selector(toggleAllSessions(_:)), #selector(selectRange(_:)), #selector(focusList(_:)), #selector(focusFilter(_:)),
         #selector(focusTerminal(_:)), #selector(nextSession(_:)), #selector(previousSession(_:)), #selector(nextAttention(_:)),
@@ -738,8 +747,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if inQuickTerminal || inNotes, let action = item.action, Self.sessionActions.contains(action) { return false }
         switch item.action {
         case #selector(showCommandPalette(_:)):
-            return !commandPalette.isShown && NSApp.keyWindow?.sheetParent == nil
+            return !palette.isShown && NSApp.keyWindow?.sheetParent == nil
                 && (NSApp.keyWindow ?? windowController?.window)?.attachedSheet == nil
+        case #selector(showSessionSwitcher(_:)):
+            return !palette.isShown && windowController?.window?.attachedSheet == nil
         case #selector(newClaude(_:)), #selector(newCodex(_:)), #selector(newShell(_:)):
             // One asks already, or something else does.
             return windowController?.window?.attachedSheet == nil
@@ -863,6 +874,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             }
         }
         view.addItem(.separator())
+        add(view, "Go to Session…", #selector(showSessionSwitcher(_:)), "e")
         add(view, "Go to Session List", #selector(focusList(_:)), "l")
         add(view, "Go to Terminal", #selector(focusTerminal(_:)), "j")
         add(view, "Go to Other Pane", #selector(focusOtherPane(_:)), "j").keyEquivalentModifierMask = [.command, .option]

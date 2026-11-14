@@ -94,6 +94,8 @@ The **Git** menu works on the git tab in the focused pane, or else on the Change
 
 **View › All Actions…** (⇧⌘P) opens the command palette. It lists agentz's own commands, not standard macOS ones such as Copy, Hide or Start Dictation. Type to search commands by name or menu, then use ↑ / ↓ and ↩, or click a command, to run it. Each command shows its shortcut on the right when it has one. Unavailable commands are dimmed; ⎋ closes the palette.
 
+**View › Go to Session…** (⌘E) opens the session switcher. It lists every session, also the ones the list's range, repository and filter hide. The sessions you looked at most recently come first, and the one you looked at before the shown one is already selected, so ⌘E then ↩ goes back to it. Type to search titles, folders, branches, agents and notes. ↩ or a click shows the session if it runs, or resumes it; ⎋ closes the switcher.
+
 **Session notes.** Click the small note button at the bottom-right of an agent terminal to add or edit its Markdown note in a separate popup window. Each split pane has its own buttons: Note, Open in Zed, and Open Git. Zed and Git open that pane's folder. You can also right-click a Claude or Codex session and choose **Add Note** or **Edit Note**, or use **File › Edit Session Note** (⌥⌘N). A session with a note has a small note icon beside its title; click it to edit, or hover for a preview. Opening a note never starts its agent.
 
 - Write Markdown in **Edit**, with buttons for bold, italic, links, and inline code. **Preview** renders headings, lists, quotes, code blocks, and inline formatting. The editor supports normal text undo/redo and keeps pasted Markdown as plain text.
@@ -105,6 +107,7 @@ The **Git** menu works on the git tab in the focused pane, or else on the Change
 | Shortcut | Action |
 | --- | --- |
 | ⇧⌘P | all actions: search commands, ↑ / ↓ to select, ↩ to run, ⎋ to close |
+| ⌘E | go to session: search all sessions, ↩ to show or resume, ⎋ to close |
 | ⌥⌘N / ⇧⌘M | edit the selected session's note / open All Notes |
 | ⌘N / ⇧⌘N | new Claude / Codex session: asks where, and takes the place of the shown shell if it is idle |
 | ⌘T | new shell: asks where |

@@ -47,6 +47,9 @@ final class Tab {
     /// Can't be closed, stays when its program ends, and comes back on
     /// every launch.
     var pinned = false
+    /// When it last became the tab the user works in, for the session
+    /// switcher's order.
+    var shownAt: Date?
 
     init(key: SessionKey, content: PaneContent, cwd: String, title: String, resumed: Bool) {
         self.key = key
@@ -131,6 +134,18 @@ struct SplitPane: Equatable {
 }
 
 /// The top or bottom half of the box around a split's two rows.
+/// What a session's tab does, for the session switcher.
+enum TabState: Equatable {
+    /// No tab of ours runs it.
+    case notRunning
+    case running
+    case busy
+    /// The agent finished or asks something; what it said.
+    case waiting(String)
+    /// The agent quit while the user was away.
+    case quit
+}
+
 enum BoxHalf {
     case top, bottom
 }
@@ -265,6 +280,9 @@ final class Workspace {
         didSet {
             for r in tabs where panes.keys.contains(r.key) {
                 waiting[ObjectIdentifier(r)] = nil
+            }
+            if panes.current != oldValue.current, let r = tabs.first(where: { $0.key == panes.current }) {
+                r.shownAt = Date()
             }
             // The list marks the sessions of each split.
             if (panes.split != nil || oldValue.split != nil),
@@ -746,14 +764,16 @@ final class Workspace {
         }
     }
 
-    func rebuildRows() {
+    /// A row for each session, in the range unless `all`, and for each tab
+    /// with no session, in no order.
+    private func makeRows(all: Bool) -> [Row] {
         // Rows with a process of ours stay visible whatever the range, so a
         // running agent can't get lost, and so do sessions running elsewhere.
         let now = Date()
         var rows: [Row] = sessions.compactMap { s in
             let key = s.key
             let tab = tabs.first { $0.shows(key) }
-            guard tab != nil || elsewhere[key] != nil || range.includes(s.updated, now: now) else { return nil }
+            guard all || tab != nil || elsewhere[key] != nil || range.includes(s.updated, now: now) else { return nil }
             let order = tab?.spawnedAt ?? s.updated
             let place = place(s.cwd)
             return Row(
@@ -767,6 +787,25 @@ final class Workspace {
         for r in tabs where !rows.contains(where: { r.shows($0.key) }) {
             rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.spawnedAt, pinned: r.pinned, active: true, git: r.git?.status))
         }
+        return rows
+    }
+
+    /// Every session, whatever the range, repository and filter, for the
+    /// session switcher. The ones shown here most recently come first, so
+    /// the one before the current is second; then the list's order.
+    func switcherRows() -> [Row] {
+        let shown = makeRows(all: true).map { row in
+            (row, tabs.first { $0.shows(row.key) }?.shownAt ?? .distantPast)
+        }
+        return shown.sorted { a, b in
+            if a.1 != b.1 { return a.1 > b.1 }
+            return a.0.group != b.0.group ? a.0.group < b.0.group : a.0.order > b.0.order
+        }
+        .map(\.0)
+    }
+
+    func rebuildRows() {
+        var rows = makeRows(all: false)
         if panes.split != nil || !hiddenSplits.isEmpty {
             for i in rows.indices where rows[i].active {
                 rows[i].pane = splitPane(rows[i].key, rows: rows)
@@ -882,6 +921,15 @@ final class Workspace {
         sleepBlocker.setWorking(tabs.contains {
             $0.isBusy && ($0.key.agent != .shell || $0.linked != nil)
         } || elsewhere.values.contains { $0.busy })
+    }
+
+    /// What the session's tab does, also when the list's filters hide it.
+    func tabState(_ key: SessionKey) -> TabState {
+        guard let r = tabs.first(where: { $0.shows(key) && $0.isRunning }) else {
+            return tabs.contains { $0.shows(key) && quit.contains(ObjectIdentifier($0)) } ? .quit : .notRunning
+        }
+        if let message = waiting[ObjectIdentifier(r)] { return .waiting(message) }
+        return r.isBusy ? .busy : .running
     }
 
     func isCurrent(_ key: SessionKey) -> Bool {
