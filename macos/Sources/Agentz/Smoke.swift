@@ -120,6 +120,7 @@ final class SmokeTest {
 
         let app = NSApp.delegate as! AppDelegate
         await commandPalette(app)
+        await settings(app)
 
         // ⌘T asks where to start; ⎋ starts nothing.
         let tabCount = ws.tabs.count
@@ -1436,6 +1437,62 @@ final class SmokeTest {
         for r in ws.tabs where !tabsBefore.contains(r.key) {
             ws.close(r.key)
         }
+    }
+
+    /// Agentz › Settings: ⌘, opens it, a shortcut typed in it goes to the
+    /// menu and Help › Keyboard Shortcuts, ⌫ removes it, ⌘W closes it.
+    private func settings(_ app: AppDelegate) async {
+        guard let parent = window.window, let bindings = app.keyBindings else { return check("key bindings", false) }
+        window.focusTerminal()
+        let tabs = workspace.tabs.count
+        if let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: parent.windowNumber,
+            context: nil, characters: ",", charactersIgnoringModifiers: ",", isARepeat: false, keyCode: 43
+        ) {
+            NSApp.sendEvent(event)
+        }
+        check("⌘, opens Settings", await wait(3) { NSApp.keyWindow?.windowController is SettingsWindowController })
+        guard let settings = NSApp.keyWindow, let controller = settings.windowController as? SettingsWindowController else { return }
+        try? await Task.sleep(for: .milliseconds(300))
+        snapshot("settings-general", of: settings)
+        controller.show(.shortcuts)
+        try? await Task.sleep(for: .milliseconds(500))
+        snapshot("settings-shortcuts", of: settings)
+
+        let id = "focusList:"
+        let rows = { shortcutGroups(NSApp.mainMenu!).flatMap(\.rows).filter { $0.action == "Go to Session List" }.map(\.keys) }
+        check("Go to Session List starts at ⌘L", rows() == ["⌘L"], "\(rows())")
+        let recorder = KeyRecorder()
+        recorder.record = { bindings.set($0, $1) }
+        func type(_ chars: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags) {
+            if let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: settings.windowNumber,
+                context: nil, characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code
+            ) {
+                NSApp.postEvent(event, atStart: false)
+            }
+        }
+        recorder.start(id)
+        type("k", 40, [])
+        try? await Task.sleep(for: .milliseconds(200))
+        check("a key without ⌘ or ⌃ is not taken", recorder.id == id && !bindings.isChanged(id))
+        type("k", 40, [.control, .option])
+        check("a typed shortcut goes to the menu", await wait(2) { rows() == ["⌃⌥K"] }, "\(rows())")
+        recorder.start(id)
+        type("\u{7f}", 51, [])
+        check("⌫ removes it from the menu", await wait(2) { rows().isEmpty && bindings.combo(id).isNone }, "\(rows())")
+        bindings.resetAll()
+        check("Reset All brings ⌘L back", rows() == ["⌘L"], "\(rows())")
+        recorder.stop()
+
+        check("⌘W in Settings says Close Window", {
+            let item = NSMenuItem(title: "Close", action: #selector(AppDelegate.closeCurrent(_:)), keyEquivalent: "w")
+            return app.validateMenuItem(item) && item.title == "Close Window"
+        }())
+        app.closeCurrent(nil)
+        check("⌘W closes Settings, not a session", await wait(2) { !settings.isVisible } && workspace.tabs.count == tabs)
     }
 
     private func commandPalette(_ app: AppDelegate) async {

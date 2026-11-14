@@ -33,6 +33,14 @@ final class HotKey {
         }
     }
 
+    /// Gives the key back to macOS. It does nothing more after this.
+    func stop() {
+        if let ref { UnregisterEventHotKey(ref) }
+        if let handler { RemoveEventHandler(handler) }
+        ref = nil
+        handler = nil
+    }
+
     /// What a menu item shows for `trigger`: the character its key types
     /// on this keyboard. Nil for keys like F12 or space, which the menu
     /// does not show as text.

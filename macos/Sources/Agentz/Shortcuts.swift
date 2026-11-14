@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Help › Keyboard Shortcuts. Most rows come from the menus, so the list
-/// stays right when a shortcut changes; the rest are keys no menu shows.
+/// shows the shortcuts set in Settings; the rest are keys no menu shows.
 struct ShortcutGroup: Identifiable {
     struct Row: Identifiable {
         let keys: String
@@ -96,17 +96,7 @@ func shortcutGroups(_ menu: NSMenu) -> [ShortcutGroup] {
 /// A menu item's shortcut as macOS shows it, e.g. ⇧⌘N.
 @MainActor
 func shortcut(_ item: NSMenuItem) -> String {
-    var key = item.keyEquivalent
-    var mods = item.keyEquivalentModifierMask
-    // An uppercase key equivalent means Shift.
-    if key.lowercased() != key { mods.insert(.shift) }
-    key = key.uppercased()
-    var s = ""
-    if mods.contains(.control) { s += "⌃" }
-    if mods.contains(.option) { s += "⌥" }
-    if mods.contains(.shift) { s += "⇧" }
-    if mods.contains(.command) { s += "⌘" }
-    return s + key
+    KeyCombo(item: item).text
 }
 
 struct ShortcutsView: View {
@@ -148,6 +138,12 @@ final class ShortcutsWindowController: NSWindowController {
         window.setContentSize(NSSize(width: 420, height: 640))
         window.center()
         super.init(window: window)
+    }
+
+    /// Lists the menus' shortcuts as they are now, e.g. after one was
+    /// changed in Settings.
+    func reload(menu: NSMenu) {
+        (contentViewController as? NSHostingController<ShortcutsView>)?.rootView = ShortcutsView(groups: shortcutGroups(menu))
     }
 
     @available(*, unavailable)

@@ -13,6 +13,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private var tickTimer: Timer?
     private var keyMonitor: Any?
     private var shortcutsWindow: ShortcutsWindowController?
+    private var settingsWindow: SettingsWindowController?
+    /// The menus' shortcuts, as set in Settings.
+    private(set) var keyBindings: KeyBindings?
     private var notesWindow: NotesWindowController?
     private var noteWindow: NoteWindowController?
     /// All Actions and Go to Session.
@@ -43,7 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         // Before any terminal starts: they inherit this environment.
         ShellEnvironment.load()
         _ = GhosttyApp.controller
-        NSApp.mainMenu = buildMenu()
+        let menu = buildMenu()
+        NSApp.mainMenu = menu
+        let bindings = KeyBindings(menu: menu, store: SmokeTest.logPath == nil ? .standard : nil)
+        bindings.onChange = { [weak self] in self?.shortcutsChanged() }
+        keyBindings = bindings
         // The git panel's commands, kept for the Git Command Log window.
         if SmokeTest.logPath == nil {
             GitCommandLog.shared.startPersisting(to: GitCommandLogFile(url: GitCommandLogFile.defaultURL))
@@ -167,11 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             let failed = workspace.restore(saved)
             do { try saveTabs(failed) } catch { problem = "Could not keep unopened tabs: \(error)" }
         }
-        // Not in the smoke test: the user may be using the key meanwhile.
-        if let trigger = quick.settings.hotKey, SmokeTest.logPath == nil {
-            hotKey = HotKey(trigger) { [weak quick] in quick?.toggle() }
-            if hotKey == nil { problem = "The quick terminal's key \(trigger.description) could not be set up." }
-        }
+        if let issue = setUpHotKey() { problem = issue }
         if let issue = GhosttyApp.configIssue {
             problem = "Your Ghostty config was not used: \(issue)"
             NSLog("agentz: %@", problem!)
@@ -254,6 +257,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 if self.workspace?.notificationsOff != off { self.workspace?.notificationsOff = off }
             }
         }
+    }
+
+    /// Sets up the quick terminal's global key: the one picked in Settings,
+    /// or else the Ghostty config's. Says why it could not, if it could not.
+    @discardableResult
+    private func setUpHotKey() -> String? {
+        hotKey?.stop()
+        hotKey = nil
+        let id = KeyBindings.quickTerminalID
+        // Not in the smoke test: the user may be using the key meanwhile.
+        guard let quick = quickTerminal, let keyBindings, SmokeTest.logPath == nil else { return nil }
+        let picked = keyBindings.isChanged(id) ? keyBindings.combo(id) : nil
+        guard let trigger = picked.map(\.trigger) ?? quick.settings.hotKey else {
+            let problem = picked.map { $0.isNone ? nil : "\($0.text) can't be a key for every app." } ?? nil
+            keyBindings.setProblem(id, problem)
+            return problem
+        }
+        hotKey = HotKey(trigger) { [weak quick] in quick?.toggle() }
+        let problem = hotKey == nil ? "The quick terminal's key \(trigger.description) could not be set up." : nil
+        keyBindings.setProblem(id, problem)
+        return problem
+    }
+
+    /// A shortcut changed in Settings.
+    private func shortcutsChanged() {
+        setUpHotKey()
+        if let menu = NSApp.mainMenu { shortcutsWindow?.reload(menu: menu) }
+    }
+
+    @objc func showSettings(_: Any?) {
+        guard let keyBindings, let look else { return }
+        if settingsWindow == nil {
+            let general = GeneralSettings(look: look, actions: .init(
+                autoHide: { [weak self] in self?.windowController?.autoHide ?? false },
+                setAutoHide: { [weak self] on in
+                    if self?.windowController?.autoHide != on { self?.toggleAutoHide(nil) }
+                },
+                selectTheme: { [weak self] name in self?.pickTheme(name) },
+                notificationSettings: { [weak self] in self?.notificationSettings(nil) },
+                statusLine: { [weak self] install in self?.configureStatusLine(install ? "install" : "uninstall") }
+            ))
+            settingsWindow = SettingsWindowController(bindings: keyBindings, general: general)
+        }
+        settingsWindow?.show()
+    }
+
+    /// Settings or Help › Keyboard Shortcuts, when in front: ⌘W closes it.
+    private var keyPanelWindow: NSWindow? {
+        [settingsWindow?.window, shortcutsWindow?.window].compactMap { $0 }.first { $0.isKeyWindow }
     }
 
     @objc func notificationSettings(_: Any?) {
@@ -443,6 +495,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc func closeCurrent(_: Any?) {
+        if let window = keyPanelWindow { window.performClose(nil); return }
         if noteWindow?.window?.isKeyWindow == true { noteWindow?.close(); return }
         if notesWindow?.window?.isKeyWindow == true { notesWindow?.close(); return }
         if let quick = quickTerminal, quick.isKey { return quick.closeShell() }
@@ -643,7 +696,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     @objc func showShortcuts(_: Any?) {
         guard let menu = NSApp.mainMenu else { return }
-        if shortcutsWindow == nil { shortcutsWindow = ShortcutsWindowController(menu: menu) }
+        if let shortcutsWindow {
+            shortcutsWindow.reload(menu: menu)
+        } else {
+            shortcutsWindow = ShortcutsWindowController(menu: menu)
+        }
         shortcutsWindow?.showWindow(nil)
     }
 
@@ -662,8 +719,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc func selectTheme(_ sender: NSMenuItem) {
+        pickTheme(sender.representedObject as? String)
+    }
+
+    private func pickTheme(_ name: String?) {
         themePreview?.cancel()
-        look?.selectTheme(sender.representedObject as? String)
+        look?.selectTheme(name)
         if let issue = GhosttyApp.configIssue {
             workspace?.setStatus("Your Ghostty config was not used: \(issue)")
         }
@@ -762,6 +823,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item.title = workspace.currentTab?.pinned == true ? "Unpin Session" : "Pin Session"
             return workspace.currentTab != nil
         case #selector(closeCurrent(_:)):
+            if keyPanelWindow != nil { item.title = "Close Window"; return true }
             if inNotes { item.title = "Close Notes"; return true }
             // ⌘W in the quick terminal ends its shell.
             item.title = inQuickTerminal ? "Close Quick Terminal" : "Close Session"
@@ -823,6 +885,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
         let app = submenu(main, "Agentz")
         app.addItem(withTitle: "About Agentz", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(.separator())
+        add(app, "Settings…", #selector(showSettings(_:)), ",")
         app.addItem(.separator())
         add(app, "Notification Settings…", #selector(notificationSettings(_:)))
         add(app, "Install Claude Status Line", #selector(installStatusLine(_:)))
@@ -895,9 +959,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         let quick = add(view, "Quick Terminal", #selector(toggleQuickTerminal(_:)))
         // Shows the global key. Without the hot key, e.g. when macOS
         // refused it, the menu takes it while agentz is in front.
-        if let trigger = GhosttyApp.quickTerminal.hotKey, let key = HotKey.menuKey(trigger) {
-            quick.keyEquivalent = key
-            quick.keyEquivalentModifierMask = menuModifiers(trigger.modifiers)
+        if let combo = GhosttyApp.quickTerminal.hotKey.flatMap(KeyCombo.init(trigger:)) {
+            combo.apply(to: quick)
         }
         view.addItem(.separator())
         // For every terminal at once. ⌘= does what ⌘+ does, as in Ghostty,
@@ -1026,15 +1089,6 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
             }
         }
     }
-}
-
-private func menuModifiers(_ m: KeyTrigger.Modifiers) -> NSEvent.ModifierFlags {
-    var flags: NSEvent.ModifierFlags = []
-    if m.contains(.command) { flags.insert(.command) }
-    if m.contains(.shift) { flags.insert(.shift) }
-    if m.contains(.option) { flags.insert(.option) }
-    if m.contains(.control) { flags.insert(.control) }
-    return flags
 }
 
 private func plural(_ n: Int, _ one: String, _ many: String) -> String {
