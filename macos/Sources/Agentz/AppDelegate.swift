@@ -81,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             ?? NSHomeDirectory()
         UserDefaults.standard.set(dir, forKey: "project")
 
-        let notes = SessionNotes(url: SmokeTest.logPath == nil ? SessionNotes.defaultURL : nil)
+        let notes = SessionNotes(directory: SmokeTest.logPath == nil ? SessionNotes.defaultDirectory : nil)
         let workspace = Workspace(projectDir: isDirectory(dir) ? dir : NSHomeDirectory(), notes: notes)
         self.workspace = workspace
         let look = Look.shared

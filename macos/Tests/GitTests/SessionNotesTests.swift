@@ -8,20 +8,24 @@ struct SessionNotesTests {
     private func location() throws -> URL {
         let directory = URL(fileURLWithPath: "/tmp/codex-501/agentz-notes/tests/\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent("notes.json")
+        return directory.appendingPathComponent("notes", isDirectory: true)
+    }
+
+    private func files(_ url: URL) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []).sorted()
     }
 
     @Test func roundTripKeepsProvidersSeparateAndMarkdownExact() throws {
         let url = try location()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let store = SessionNotes(url: url)
+        let store = SessionNotes(directory: url)
         let claude = try #require(store.create(for: SessionKey(.claude, "same-id"), title: "Review", folder: "/project"))
         let codex = try #require(store.create(for: SessionKey(.codex, "same-id"), title: "Fix", folder: "/project"))
         let markdown = "# Résumé 📝\n\n- [ ] Test sleep\n\n```swift\nlet x = 1\n```\n"
         store.update(claude, text: markdown)
         store.update(codex, text: "Different note")
         #expect(store.flush())
-        let restored = SessionNotes(url: url)
+        let restored = SessionNotes(directory: url)
         #expect(restored.note(claude)?.text == markdown)
         #expect(restored.note(codex)?.text == "Different note")
         #expect(restored.notes.count == 2)
@@ -31,7 +35,7 @@ struct SessionNotesTests {
     @Test func provisionalIDMigrationSurvivesRestartAndKeepsEditorIdentity() throws {
         let url = try location()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let store = SessionNotes(url: url)
+        let store = SessionNotes(directory: url)
         let old = SessionKey(.codex, "new-\(UUID())"), real = SessionKey(.codex, "thread-id")
         let id = try #require(store.create(for: old, title: "New session", folder: "/project"))
         store.update(id, text: "Before the first prompt")
@@ -39,7 +43,7 @@ struct SessionNotesTests {
         #expect(store.note(for: old) == nil)
         #expect(store.note(for: real)?.id == id)
         #expect(store.flush())
-        let restored = SessionNotes(url: url)
+        let restored = SessionNotes(directory: url)
         #expect(restored.note(for: real)?.text == "Before the first prompt")
         #expect(restored.note(for: real)?.id == id)
     }
@@ -59,27 +63,63 @@ struct SessionNotesTests {
         #expect(store.note(draft)?.title == "Known title")
     }
 
-    @Test func corruptOrFutureDocumentIsNeverOverwritten() throws {
-        for content in ["{broken", "{\"version\":999,\"notes\":[]}"] {
-            let url = try location()
-            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            try content.write(to: url, atomically: true, encoding: .utf8)
-            let store = SessionNotes(url: url)
-            #expect(store.isReadOnly)
-            #expect(store.problem != nil)
-            #expect(store.create(for: SessionKey(.claude, "id"), title: "Note", folder: "/") == nil)
-            store.flush()
-            #expect(try String(contentsOf: url, encoding: .utf8) == content)
-        }
+    @Test func eachNoteIsAMarkdownFileNamedAfterItsSession() throws {
+        let url = try location()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let store = SessionNotes(directory: url)
+        let id = try #require(store.create(for: SessionKey(.claude, "abc"), title: "New: a/b", folder: "/project"))
+        store.update(id, text: "# Plan\n\n- one")
+        #expect(store.flush())
+        let short = id.uuidString.prefix(8).lowercased()
+        #expect(files(url) == ["New a b \(short).md"])
+        let file = try String(contentsOf: url.appendingPathComponent("New a b \(short).md"), encoding: .utf8)
+        #expect(file.hasPrefix("---\nid: \(id.uuidString)\nsession: \"claude:abc\"\ntitle: \"New: a/b\"\nfolder: \"/project\"\n"))
+        #expect(file.hasSuffix("---\n\n# Plan\n\n- one"))
+
+        // A new title renames the file; the old one is removed.
+        store.refreshMetadata([Session(agent: .claude, id: "abc", title: "Fix parser", cwd: "/project", originator: nil,
+                                       created: Date(), updated: Date(), inProject: true, branch: nil, pr: nil,
+                                       limit: nil, turnStarted: nil, action: nil, context: nil)])
+        #expect(store.flush())
+        #expect(files(url) == ["Fix parser \(short).md"])
+        #expect(SessionNotes(directory: url).note(id)?.title == "Fix parser")
+    }
+
+    @Test func unreadableFilesAreSkippedAndNeverOverwritten() throws {
+        let url = try location()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        let broken = url.appendingPathComponent("Broken.md")
+        try "no front matter".write(to: broken, atomically: true, encoding: .utf8)
+        let store = SessionNotes(directory: url)
+        #expect(!store.isReadOnly)
+        #expect(store.problem?.contains("Broken.md") == true)
+        let id = try #require(store.create(for: SessionKey(.claude, "id"), title: "Note", folder: "/"))
+        store.update(id, text: "Works")
+        #expect(store.flush())
+        #expect(try String(contentsOf: broken, encoding: .utf8) == "no front matter")
+        #expect(SessionNotes(directory: url).note(id)?.text == "Works")
+    }
+
+    @Test func unreadableFolderMakesNotesReadOnly() throws {
+        let url = try location()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try "not a folder".write(to: url, atomically: true, encoding: .utf8)
+        let store = SessionNotes(directory: url)
+        #expect(store.isReadOnly)
+        #expect(store.problem != nil)
+        #expect(store.create(for: SessionKey(.claude, "id"), title: "Note", folder: "/") == nil)
+        store.flush()
+        #expect(try String(contentsOf: url, encoding: .utf8) == "not a folder")
     }
 
     @Test func failedWriteKeepsDraftAndCanBeRetried() throws {
         let url = try location()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let store = SessionNotes(url: url)
+        let store = SessionNotes(directory: url)
         let id = try #require(store.create(for: SessionKey(.claude, "id"), title: "Note", folder: "/"))
         store.update(id, text: "Do not lose this")
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        try "blocks the folder".write(to: url, atomically: true, encoding: .utf8)
         #expect(!store.flush())
         #expect(store.isDirty)
         #expect(store.note(id)?.text == "Do not lose this")
@@ -87,22 +127,26 @@ struct SessionNotesTests {
         #expect(store.flush())
         #expect(!store.isDirty)
         #expect(store.problem == nil)
-        #expect(SessionNotes(url: url).note(id)?.text == "Do not lose this")
+        #expect(SessionNotes(directory: url).note(id)?.text == "Do not lose this")
     }
 
     @Test func deletingOneNotePersistsWithoutDeletingAnother() throws {
         let url = try location()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let store = SessionNotes(url: url)
+        let store = SessionNotes(directory: url)
         let first = try #require(store.create(for: SessionKey(.claude, "first"), title: "First", folder: "/"))
         let second = try #require(store.create(for: SessionKey(.claude, "second"), title: "Second", folder: "/"))
+        store.update(first, text: "Remove")
         store.update(second, text: "Keep")
         #expect(store.flush())
         store.delete(first)
         #expect(store.flush())
-        let restored = SessionNotes(url: url)
+        let restored = SessionNotes(directory: url)
         #expect(restored.note(first) == nil)
         #expect(restored.note(second)?.text == "Keep")
+        store.delete(second)
+        #expect(store.flush())
+        #expect(files(url).isEmpty)
     }
 
     @Test func missingAndFilteredSessionsKeepNotesAndSearchMatchesText() throws {
@@ -133,19 +177,19 @@ struct SessionNotesTests {
     @Test func emptyDraftStaysEditableButIsNotSaved() throws {
         let url = try location()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let store = SessionNotes(url: url)
+        let store = SessionNotes(directory: url)
         let id = try #require(store.create(for: SessionKey(.claude, "empty"), title: "Empty", folder: "/"))
         store.update(id, text: " \n\t ")
         #expect(store.flush())
         #expect(store.note(id) != nil)
-        #expect(SessionNotes(url: url).notes.isEmpty)
+        #expect(SessionNotes(directory: url).notes.isEmpty)
         store.update(id, text: "Kept typing")
         store.finishEditing(id)
-        #expect(SessionNotes(url: url).note(id)?.text == "Kept typing")
+        #expect(SessionNotes(directory: url).note(id)?.text == "Kept typing")
         store.update(id, text: "\n ")
         store.finishEditing(id)
         #expect(store.note(id) == nil)
-        #expect(SessionNotes(url: url).notes.isEmpty)
+        #expect(SessionNotes(directory: url).notes.isEmpty)
     }
 
     @Test func finishingEmptyNoteKeepsOtherDraftsAndSavedNotes() throws {
