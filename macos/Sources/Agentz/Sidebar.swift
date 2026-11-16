@@ -1162,7 +1162,12 @@ private struct RowButton<Label: View>: View {
 // MARK: - Rate limits
 
 /// The agents' rate limits: a bar per window with what is left, and when
-/// it starts over. One grid, so the bars line up.
+/// it starts over. Each column but the bar's is as wide as its widest
+/// text can be, so the bars line up.
+///
+/// Not a `Grid`: with the agent's name spanning all columns, a Grid laid
+/// out wider than the sidebar for some rows, e.g. Codex with only its
+/// weekly window, cutting off both sides.
 private struct UsageView: View {
     let usage: [(Agent, Usage)]
     let now: UInt64
@@ -1173,16 +1178,13 @@ private struct UsageView: View {
             Text("Rate limits · left · resets in")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(look.faint)
-            Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 4) {
+            VStack(alignment: .leading, spacing: 4) {
                 ForEach(usage, id: \.0) { agent, u in
-                    GridRow {
-                        HStack(spacing: 5) {
-                            agent.icon.foregroundStyle(look.color(for: agent))
-                            Text(agent.displayName).fontWeight(.semibold)
-                        }
-                        .gridCellColumns(4)
-                        .padding(.top, agent == usage.first?.0 ? 0 : 4)
+                    HStack(spacing: 5) {
+                        agent.icon.foregroundStyle(look.color(for: agent))
+                        Text(agent.displayName).fontWeight(.semibold)
                     }
+                    .padding(.top, agent == usage.first?.0 ? 0 : 4)
                     if let w = u.session { line("5h", w) }
                     if let w = u.week { line("week", w) }
                 }
@@ -1199,25 +1201,33 @@ private struct UsageView: View {
         let color = stale ? look.faint : left < 10 ? look.red : left < 20 ? look.yellow : look.green
         let reset = stale ? "" : until(w.resetsAt - now)
         let name = label == "5h" ? "5-hour" : "weekly"
-        return GridRow {
-            Text(label)
-                .foregroundStyle(look.secondary)
+        return HStack(spacing: 8) {
+            column(widest: "week", alignment: .leading) {
+                Text(label).foregroundStyle(look.secondary)
+            }
             Bar(fraction: left / 100, color: color, track: look.fieldBackground)
                 .frame(height: 5)
-            Text("\(Int(left.rounded()))%")
-                .monospacedDigit()
-                .foregroundStyle(stale ? look.faint : left < 20 ? color : look.text)
-                .gridColumnAlignment(.trailing)
-            // Never empty: a Grid whose last column holds only empty texts
-            // lays out wider than the sidebar, under the full-width header.
-            Text(stale ? "–" : reset)
-                .monospacedDigit()
-                .foregroundStyle(stale ? look.faint : look.secondary)
-                .gridColumnAlignment(.trailing)
+            column(widest: "100%", alignment: .trailing) {
+                Text("\(Int(left.rounded()))%")
+                    .foregroundStyle(stale ? look.faint : left < 20 ? color : look.text)
+            }
+            // The longest `until` gives for a weekly window.
+            column(widest: "23h59m", alignment: .trailing) {
+                Text(stale ? "–" : reset)
+                    .foregroundStyle(stale ? look.faint : look.secondary)
+            }
         }
         .help(stale
             ? "The \(name) limit started over since the agent last reported it. New numbers come with its next reply."
             : "\(Int(left.rounded()))% of the \(name) limit left, starts over in \(reset)")
+    }
+
+    /// `content` in a column as wide as `widest`, whatever it shows.
+    private func column(widest: String, alignment: Alignment, @ViewBuilder content: () -> some View) -> some View {
+        Text(widest)
+            .hidden()
+            .overlay(alignment: alignment) { content().lineLimit(1) }
+            .monospacedDigit()
     }
 }
 
