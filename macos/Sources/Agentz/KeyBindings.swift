@@ -191,6 +191,12 @@ final class KeyBindings {
 
     /// In menu order.
     let entries: [Entry]
+    /// Agentz routes its commands to an explicit target. Standard macOS
+    /// commands use the responder chain and stay out of the settings editor.
+    /// Keep them in `entries` so their shortcuts still count as conflicts.
+    var settingsEntries: [Entry] {
+        entries.filter { items[$0.id]?.target != nil && $0.id != "showSettings:" }
+    }
     private(set) var overrides: [String: KeyCombo]
     /// What went wrong setting a key up, e.g. macOS refused a global key.
     private(set) var problems: [String: String] = [:]

@@ -85,6 +85,32 @@ struct KeyBindingsTests {
     }
 
     @Test
+    func settingsOnlyListAgentzCommandsButKeepStandardShortcutConflicts() {
+        let target = BindingsTestTarget()
+        let (menu, _) = testMenu(target)
+        let app = NSMenu(title: "Agentz")
+        menu.addItem(withTitle: "Agentz", action: nil, keyEquivalent: "").submenu = app
+        app.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",").target = target
+        app.addItem(withTitle: "Hide Agentz", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        app.addItem(withTitle: "Quit Agentz", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let edit = NSMenu(title: "Edit")
+        menu.addItem(withTitle: "Edit", action: nil, keyEquivalent: "").submenu = edit
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let window = NSMenu(title: "Window")
+        menu.addItem(withTitle: "Window", action: nil, keyEquivalent: "").submenu = window
+        window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        let bindings = KeyBindings(menu: menu, store: nil)
+
+        #expect(bindings.settingsEntries.map(\.title) == ["New Claude", "Pin", "Increase", "Today", "All"])
+        bindings.set("pin:", KeyCombo(key: "c", modifiers: .command))
+        #expect(bindings.conflict("pin:") == "Same as Edit › Copy")
+        #expect(edit.items[0].keyEquivalent == "c")
+        #expect(app.items[2].keyEquivalent == "q")
+        withExtendedLifetime(target) {}
+    }
+
+    @Test
     func sameKeysAreFlaggedAndTakeTheAliasesKey() {
         let target = BindingsTestTarget()
         let (menu, items) = testMenu(target)

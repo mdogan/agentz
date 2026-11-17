@@ -202,6 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     private static let recentsKey = "recentFolders"
+    private static let recentsLimitKey = "recentFoldersLimit"
     private static let autoHideKey = "autoHideSessionList"
     private static let continuesKey = "continueAtReset"
 
@@ -225,14 +226,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     private var recentFolders: [String] {
-        UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? []
+        Array((UserDefaults.standard.stringArray(forKey: Self.recentsKey) ?? []).prefix(recentFoldersLimit))
+    }
+
+    private var recentFoldersLimit: Int {
+        max(1, UserDefaults.standard.object(forKey: Self.recentsLimitKey) as? Int ?? 10)
+    }
+
+    private func setRecentFoldersLimit(_ limit: Int) {
+        UserDefaults.standard.set(max(1, limit), forKey: Self.recentsLimitKey)
+        // Drop the oldest entries as soon as the limit is lowered.
+        UserDefaults.standard.set(recentFolders, forKey: Self.recentsKey)
     }
 
     /// Puts `dir` at the top of the recent folders. Not in the smoke test,
     /// whose folders are gone once it is done.
     private func remember(_ dir: String) {
         guard SmokeTest.logPath == nil else { return }
-        UserDefaults.standard.set(addingRecent(dir, to: recentFolders), forKey: Self.recentsKey)
+        UserDefaults.standard.set(addingRecent(dir, to: recentFolders, limit: recentFoldersLimit), forKey: Self.recentsKey)
     }
 
     /// `--project <dir>` or a folder argument, for when the binary runs
@@ -294,6 +305,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 setAutoHide: { [weak self] on in
                     if self?.windowController?.autoHide != on { self?.toggleAutoHide(nil) }
                 },
+                recentProjectsLimit: { [weak self] in self?.recentFoldersLimit ?? 10 },
+                setRecentProjectsLimit: { [weak self] limit in self?.setRecentFoldersLimit(limit) },
                 selectTheme: { [weak self] name in self?.pickTheme(name) },
                 notificationSettings: { [weak self] in self?.notificationSettings(nil) },
                 statusLine: { [weak self] install in self?.configureStatusLine(install ? "install" : "uninstall") }
@@ -704,9 +717,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         shortcutsWindow?.showWindow(nil)
     }
 
-    @objc func installStatusLine(_: Any?) { configureStatusLine("install") }
-    @objc func uninstallStatusLine(_: Any?) { configureStatusLine("uninstall") }
-
     private func configureStatusLine(_ action: String) {
         let alert = NSAlert()
         do {
@@ -887,10 +897,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         app.addItem(withTitle: "About Agentz", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         app.addItem(.separator())
         add(app, "Settings…", #selector(showSettings(_:)), ",")
-        app.addItem(.separator())
-        add(app, "Notification Settings…", #selector(notificationSettings(_:)))
-        add(app, "Install Claude Status Line", #selector(installStatusLine(_:)))
-        add(app, "Uninstall Claude Status Line", #selector(uninstallStatusLine(_:)))
         app.addItem(.separator())
         app.addItem(withTitle: "Hide Agentz", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let others = app.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")

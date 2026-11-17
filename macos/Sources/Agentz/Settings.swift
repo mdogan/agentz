@@ -1,5 +1,4 @@
-// Agentz › Settings… (⌘,): the menus' shortcuts, and a few settings the
-// menus also have.
+// Agentz › Settings… (⌘,): general preferences and keyboard shortcuts.
 
 import AgentzCore
 import AppKit
@@ -16,6 +15,8 @@ final class GeneralSettings {
     struct Actions {
         var autoHide: () -> Bool
         var setAutoHide: (Bool) -> Void
+        var recentProjectsLimit: () -> Int
+        var setRecentProjectsLimit: (Int) -> Void
         var selectTheme: (String?) -> Void
         var notificationSettings: () -> Void
         var statusLine: (_ install: Bool) -> Void
@@ -25,6 +26,7 @@ final class GeneralSettings {
     @ObservationIgnored private let look: Look
 
     private(set) var autoHide = false
+    private(set) var recentProjectsLimit = 10
     /// Nil while no terminal runs yet and none was set.
     private(set) var fontSize: Float?
     /// Set here or with ⌘+ / ⌘-, not the Ghostty config's.
@@ -41,6 +43,7 @@ final class GeneralSettings {
 
     func reload() {
         autoHide = actions.autoHide()
+        recentProjectsLimit = actions.recentProjectsLimit()
         fontSize = GhosttyApp.fontSize ?? Terminal.fontSize
         ownFontSize = GhosttyApp.fontSize != nil
         look.refreshThemes()
@@ -52,6 +55,11 @@ final class GeneralSettings {
 
     func setAutoHide(_ on: Bool) {
         actions.setAutoHide(on)
+        reload()
+    }
+
+    func setRecentProjectsLimit(_ limit: Int) {
+        actions.setRecentProjectsLimit(limit)
         reload()
     }
 
@@ -75,11 +83,32 @@ final class GeneralSettings {
 
 struct GeneralSettingsView: View {
     let model: GeneralSettings
+    @State private var recentProjectsLimitText = ""
+    @FocusState private var editingRecentProjectsLimit: Bool
 
     var body: some View {
         let look = Look.shared
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                SettingsSection("Projects") {
+                    SettingsRow("Recent projects", detail: "Maximum number of recent projects to keep. Oldest entries are removed first.") {
+                        HStack(spacing: 6) {
+                            TextField("Recent projects", text: $recentProjectsLimitText)
+                                .focused($editingRecentProjectsLimit)
+                                .onSubmit { saveRecentProjectsLimit() }
+                                .frame(width: 50)
+                                .multilineTextAlignment(.trailing)
+                                .textFieldStyle(.roundedBorder)
+                                .controlSize(.small)
+                            Stepper("Recent projects", value: Binding(
+                                get: { model.recentProjectsLimit },
+                                set: { model.setRecentProjectsLimit($0) }
+                            ), in: 1...Int.max)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+                    }
+                }
                 SettingsSection("Session List") {
                     SettingsRow("Auto-hide the session list",
                                 detail: "It slides in when the mouse rests at the window's left edge.") {
@@ -147,6 +176,22 @@ struct GeneralSettingsView: View {
         }
         .scrollContentBackground(.hidden)
         .background(look.background)
+        .onAppear { recentProjectsLimitText = String(model.recentProjectsLimit) }
+        .onChange(of: model.recentProjectsLimit) { _, limit in recentProjectsLimitText = String(limit) }
+        .onChange(of: editingRecentProjectsLimit) { _, editing in
+            if !editing { saveRecentProjectsLimit() }
+        }
+        .onDisappear {
+            if editingRecentProjectsLimit { saveRecentProjectsLimit() }
+        }
+    }
+
+    // Commit the whole number so typing 100 does not first trim the list to 1.
+    private func saveRecentProjectsLimit() {
+        if let limit = Int(recentProjectsLimitText.trimmingCharacters(in: .whitespaces)) {
+            model.setRecentProjectsLimit(limit)
+        }
+        recentProjectsLimitText = String(model.recentProjectsLimit)
     }
 
     /// A theme in the menu, checked when picked; nil to follow Ghostty.
@@ -306,7 +351,7 @@ struct ShortcutsSettingsView: View {
     private var groups: [Group] {
         let words = search.lowercased().split(separator: " ")
         var groups: [Group] = []
-        for entry in bindings.entries {
+        for entry in bindings.settingsEntries {
             let text = "\(entry.menu) \(entry.title) \(bindings.combo(entry.id).text)".lowercased()
             guard words.allSatisfy({ text.contains($0) }) else { continue }
             if groups.last?.menu == entry.menu {
@@ -536,4 +581,5 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     func windowDidBecomeKey(_: Notification) { general.reload() }
     func windowDidResignKey(_: Notification) { recorder.stop() }
+    func windowWillClose(_: Notification) { window?.makeFirstResponder(nil) }
 }
