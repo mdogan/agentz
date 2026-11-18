@@ -7,6 +7,8 @@ struct RepositoryStateToken: Equatable, Sendable {
     let stashes: String
     let worktrees: String
     let workingTreeMetadata: String
+    /// A rebase or merge that stopped, or nil.
+    var operation: GitOperationInProgress? = nil
 
     func replacingWorkingTree(with snapshot: WorkingTreeSnapshot) -> Self {
         Self(
@@ -15,7 +17,8 @@ struct RepositoryStateToken: Equatable, Sendable {
             references: references,
             stashes: stashes,
             worktrees: worktrees,
-            workingTreeMetadata: snapshot.workingTreeMetadata
+            workingTreeMetadata: snapshot.workingTreeMetadata,
+            operation: operation
         )
     }
 }
@@ -268,7 +271,8 @@ struct GitClient: Sendable {
             references: GitParser.parseReferences(refs.output, currentBranch: branch),
             stashes: GitParser.parseStashes(stashes.output),
             worktrees: GitParser.parseWorktrees(worktrees.output, currentRoot: root),
-            commits: commits
+            commits: commits,
+            operation: Self.operationInProgress(at: root)
         )
         let stateToken = includesStateToken
             ? RepositoryStateToken(
@@ -280,7 +284,8 @@ struct GitClient: Sendable {
                 workingTreeMetadata: workingTreeMetadata(
                     from: changes,
                     at: root
-                )
+                ),
+                operation: snapshot.operation
             )
             : nil
         return (snapshot, stateToken)
@@ -492,7 +497,8 @@ struct GitClient: Sendable {
             references: references.output,
             stashes: stashes.output,
             worktrees: worktrees.output,
-            workingTreeMetadata: workingTreeSnapshot.workingTreeMetadata
+            workingTreeMetadata: workingTreeSnapshot.workingTreeMetadata,
+            operation: Self.operationInProgress(at: root)
         )
     }
 
@@ -1100,6 +1106,230 @@ struct GitClient: Sendable {
         return ["branch", "--no-track", "--", name, start.fullName]
     }
 
+    // MARK: - Commits and history
+
+    /// The folder git keeps this worktree's state in: `.git`, or the folder
+    /// a `.git` file names, in a linked worktree or a submodule.
+    static func gitDirectory(at root: URL) -> URL {
+        let dotGit = root.appendingPathComponent(".git")
+        guard let text = try? String(contentsOf: dotGit, encoding: .utf8),
+              text.hasPrefix("gitdir:") else {
+            return dotGit
+        }
+        let path = text.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.hasPrefix("/")
+            ? URL(fileURLWithPath: path).standardizedFileURL
+            : root.appendingPathComponent(path).standardizedFileURL
+    }
+
+    /// The rebase, merge, cherry-pick or revert that stopped in this
+    /// worktree, read from the files git leaves while it waits.
+    static func operationInProgress(at root: URL) -> GitOperationInProgress? {
+        let directory = gitDirectory(at: root)
+        func has(_ name: String) -> Bool {
+            FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path)
+        }
+        // `git am` uses rebase-apply too; it isn't one of ours.
+        if has("rebase-merge") || has("rebase-apply") && !has("rebase-apply/applying") {
+            return .rebase
+        }
+        if has("MERGE_HEAD") { return .merge }
+        if has("CHERRY_PICK_HEAD") { return .cherryPick }
+        if has("REVERT_HEAD") { return .revert }
+        return nil
+    }
+
+    /// Git must not wait for an editor: it takes the message it suggests.
+    private static let noEditor = ["GIT_EDITOR": "true"]
+
+    func cherryPick(at root: URL, commit: GitCommit) async throws {
+        _ = try await run(Self.cherryPickArguments(commit: commit), in: root, environment: Self.noEditor)
+    }
+
+    /// A merge commit is picked as its change against its first parent.
+    static func cherryPickArguments(commit: GitCommit) -> [String] {
+        ["cherry-pick"] + (commit.parents.count > 1 ? ["-m", "1"] : []) + [commit.hash]
+    }
+
+    func revert(at root: URL, commit: GitCommit) async throws {
+        _ = try await run(Self.revertArguments(commit: commit), in: root, environment: Self.noEditor)
+    }
+
+    static func revertArguments(commit: GitCommit) -> [String] {
+        ["revert", "--no-edit"] + (commit.parents.count > 1 ? ["-m", "1"] : []) + [commit.hash]
+    }
+
+    func reset(at root: URL, to revision: String, mode: GitResetMode) async throws {
+        _ = try await run(["reset", "--\(mode.rawValue)", revision, "--"], in: root)
+    }
+
+    func merge(at root: URL, reference: GitReference) async throws {
+        _ = try await run(["merge", "--no-edit", reference.fullName], in: root, environment: Self.noEditor)
+    }
+
+    /// Puts HEAD's commits on top of `reference`. Uncommitted changes are
+    /// put away first and come back after.
+    func rebase(at root: URL, onto reference: GitReference) async throws {
+        _ = try await run(["rebase", "--autostash", reference.fullName], in: root, environment: Self.noEditor)
+    }
+
+    func continueOperation(at root: URL, _ operation: GitOperationInProgress) async throws {
+        _ = try await run([operation.command, "--continue"], in: root, environment: Self.noEditor)
+    }
+
+    func skipOperation(at root: URL, _ operation: GitOperationInProgress) async throws {
+        _ = try await run([operation.command, "--skip"], in: root, environment: Self.noEditor)
+    }
+
+    func abortOperation(at root: URL, _ operation: GitOperationInProgress) async throws {
+        _ = try await run([operation.command, "--abort"], in: root)
+    }
+
+    /// The commit's whole message, not only its subject.
+    func message(at root: URL, of hash: String) async throws -> String {
+        let result = try await run(["log", "-1", "--format=%B", hash], in: root)
+        return result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// HEAD's commits from `hash` on, to rewrite: the plan starts on the
+    /// commit's parent, or at the root for a root commit. Throws when the
+    /// commit isn't in HEAD's history or a merge is in the way, since
+    /// rewriting would flatten it.
+    func rebasePlan(at root: URL, from hash: String, warning: String?) async throws -> RebasePlan {
+        let short = String(hash.prefix(8))
+        let isAncestor = try await runAllowingFailure(
+            ["merge-base", "--is-ancestor", hash, "HEAD"],
+            in: root
+        )
+        guard isAncestor.exitCode == 0 else {
+            throw GitOperationError(
+                command: "git merge-base --is-ancestor \(short) HEAD",
+                message: "\(short) isn’t in the history of the current branch, so it can’t be rewritten here."
+            )
+        }
+        let parent = try await runAllowingFailure(["rev-parse", "--verify", "--quiet", "\(hash)^"], in: root)
+        let base = parent.exitCode == 0 ? parent.output.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+        let range = base.map { "\($0)..HEAD" } ?? "HEAD"
+        let steps = try await rebaseSteps(at: root, arguments: [range])
+        if let merge = steps.map(\.commit).first(where: { $0.parents.count > 1 }) {
+            throw GitOperationError(
+                command: "git log \(range)",
+                message: """
+                The merge commit \(merge.shortHash) “\(merge.subject)” is between \(short) and HEAD. \
+                Rewriting would flatten it, so it isn’t done here.
+                """
+            )
+        }
+        return RebasePlan(
+            base: base,
+            baseTitle: base.map { "after \(String($0.prefix(8)))" } ?? "from the first commit",
+            steps: steps,
+            warning: warning
+        )
+    }
+
+    /// Gives HEAD's commit the message, and nothing else: staged changes
+    /// stay staged.
+    func rewordHead(at root: URL, message: String) async throws {
+        _ = try await run(
+            ["commit", "--amend", "--only", "--allow-empty", "--no-verify", "--cleanup=strip", "-F", "-"],
+            in: root,
+            input: Data(message.utf8),
+            environment: Self.noEditor
+        )
+    }
+
+    /// HEAD's commits that `git rebase <reference>` would move: not in
+    /// `reference`, no merges, none whose change it already has.
+    func rebasePlan(at root: URL, onto reference: GitReference, warning: String?) async throws -> RebasePlan {
+        let steps = try await rebaseSteps(
+            at: root,
+            arguments: ["--cherry-pick", "--right-only", "--no-merges", "\(reference.fullName)...HEAD"]
+        )
+        return RebasePlan(
+            base: reference.fullName,
+            baseTitle: "onto \(reference.name)",
+            steps: steps,
+            warning: warning
+        )
+    }
+
+    /// Newest first, like the history, each with its whole message.
+    private func rebaseSteps(at root: URL, arguments: [String]) async throws -> [RebaseStep] {
+        let limit = 1000
+        async let listed = run(
+            ["log", "--topo-order", "--max-count=\(limit + 1)", "--date=iso-strict",
+             "--pretty=format:\(Self.unverifiedCommitFormat)"] + arguments,
+            in: root
+        )
+        async let bodies = run(
+            ["log", "--topo-order", "--max-count=\(limit + 1)", "--pretty=format:%H%x1f%B%x1e"] + arguments,
+            in: root
+        )
+        let commits = GitParser.parseCommits(try await listed.output)
+        guard commits.count <= limit else {
+            throw GitOperationError(
+                command: "git log",
+                message: "That is more than \(limit) commits to rewrite. Use git rebase in a terminal for this."
+            )
+        }
+        var messages: [String: String] = [:]
+        for record in try await bodies.output.split(separator: "\u{1e}") {
+            let fields = record.split(separator: "\u{1f}", maxSplits: 1, omittingEmptySubsequences: false)
+            guard fields.count == 2 else { continue }
+            messages[fields[0].trimmingCharacters(in: .whitespacesAndNewlines)] =
+                fields[1].trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return commits.map { RebaseStep(commit: $0, message: messages[$0.hash] ?? $0.subject) }
+    }
+
+    /// Rewrites the plan's commits with an interactive rebase whose todo
+    /// list is written here instead of in an editor. A reword is a pick
+    /// followed by an amend with the new message. Uncommitted changes are
+    /// put away first and come back after.
+    func rewrite(at root: URL, plan: RebasePlan) async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentz-rebase-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var todo: [String] = []
+        for (index, step) in plan.steps.reversed().enumerated() {
+            switch step.action {
+            case .pick:
+                todo.append("pick \(step.commit.hash)")
+            case .reword:
+                let file = folder.appendingPathComponent("message-\(index)")
+                try step.message.write(to: file, atomically: true, encoding: .utf8)
+                todo.append("pick \(step.commit.hash)")
+                todo.append("exec git commit --amend --allow-empty --no-verify --cleanup=strip -F \(Self.shellQuoted(file.path))")
+            case .squash, .fixup, .drop:
+                todo.append("\(step.action.rawValue) \(step.commit.hash)")
+            }
+        }
+        let todoFile = folder.appendingPathComponent("todo")
+        try (todo.joined(separator: "\n") + "\n").write(to: todoFile, atomically: true, encoding: .utf8)
+
+        var environment = Self.noEditor
+        // Git runs it with the path of its own todo list.
+        environment["GIT_SEQUENCE_EDITOR"] = "cp \(Self.shellQuoted(todoFile.path))"
+        _ = try await run(
+            Self.rewriteArguments(base: plan.base),
+            in: root,
+            environment: environment
+        )
+        // A rebase that stopped still needs the messages; the system clears
+        // its temporary folder in time.
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    static func rewriteArguments(base: String?) -> [String] {
+        ["-c", "rebase.autoSquash=false", "rebase", "--interactive", "--autostash", "--empty=drop"]
+            + (base.map { [$0] } ?? ["--root"])
+    }
+
+    private static func shellQuoted(_ text: String) -> String {
+        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     func rename(at root: URL, reference: GitReference, to name: String) async throws {
         _ = try await run(
             Self.renameArguments(for: reference, to: name),
@@ -1454,9 +1684,10 @@ struct GitClient: Sendable {
     private func run(
         _ arguments: [String],
         in directory: URL,
-        input: Data? = nil
+        input: Data? = nil,
+        environment: [String: String] = [:]
     ) async throws -> GitCommandResult {
-        let result = try await execute(arguments, in: directory, input: input)
+        let result = try await execute(arguments, in: directory, input: input, environment: environment)
         guard result.exitCode == 0 else {
             throw GitOperationError(
                 command: "git \(arguments.joined(separator: " "))",
@@ -1470,13 +1701,14 @@ struct GitClient: Sendable {
         _ arguments: [String],
         in directory: URL
     ) async throws -> GitCommandResult {
-        try await execute(arguments, in: directory, input: nil)
+        try await execute(arguments, in: directory, input: nil, environment: [:])
     }
 
     private func execute(
         _ arguments: [String],
         in directory: URL,
-        input: Data?
+        input: Data?,
+        environment: [String: String]
     ) async throws -> GitCommandResult {
         let gitURL = self.gitURL
         let cancellation = GitProcessCancellation()
@@ -1499,6 +1731,7 @@ struct GitClient: Sendable {
                 arguments,
                 in: directory,
                 input: input,
+                environment: environment,
                 gitURL: gitURL,
                 cancellation: cancellation
             )
@@ -1525,6 +1758,7 @@ struct GitClient: Sendable {
         _ arguments: [String],
         in directory: URL,
         input: Data?,
+        environment: [String: String],
         gitURL: URL,
         cancellation: GitProcessCancellation
     ) async throws -> GitCommandResult {
@@ -1547,7 +1781,7 @@ struct GitClient: Sendable {
                 process.standardError = errorPipe
                 process.standardInput = inputPipe
 
-                process.environment = Self.processEnvironment
+                process.environment = Self.processEnvironment.merging(environment) { $1 }
 
                 try process.run()
                 cancellation.processDidStart()

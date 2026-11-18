@@ -19,7 +19,21 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var references: [GitReference] = []
     @Published private(set) var stashes: [GitStash] = []
     @Published private(set) var worktrees: [GitWorktree] = []
-    @Published private(set) var commits: [GitCommit] = []
+    @Published private(set) var commits: [GitCommit] = [] {
+        didSet { lineages = [:] }
+    }
+    /// The loaded commits each tip leads to, by the tip's hash.
+    private var lineages: [String: Set<String>] = [:]
+    /// A rebase, merge, cherry-pick or revert that stopped and waits.
+    @Published private(set) var operation: GitOperationInProgress?
+    /// An action that asks first.
+    @Published var confirmation: GitConfirmation?
+    /// The commits the interactive rebase sheet rewrites.
+    @Published var rebasePlan: RebasePlan?
+    /// The commit whose message the sheet edits.
+    @Published var rewordRequest: RewordRequest?
+    /// Tells the app about a worktree made here, so its list picks it up.
+    var worktreeMade: ((NewWorktree) -> Void)?
     @Published private(set) var canLoadMoreHistory = false
     @Published private(set) var isLoadingMoreHistory = false
     @Published private(set) var diff = ""
@@ -59,6 +73,8 @@ final class RepositoryStore: ObservableObject {
     @Published var isShowingNewBranchSheet = false
     /// Where the sheet's branch starts. Without one, it starts at HEAD.
     @Published private(set) var newBranchStart: GitReference?
+    /// Whether the sheet's checkbox to check out the branch starts on.
+    @Published private(set) var newBranchChecksOut = true
     @Published var isShowingPathHistoryPicker = false
     @Published var isShowingCommitHashPicker = false
     @Published var isShowingKeyboardShortcuts = false
@@ -197,9 +213,10 @@ final class RepositoryStore: ObservableObject {
         isShowingBranchPicker = true
     }
 
-    func showNewBranchSheet(from start: GitReference? = nil) {
+    func showNewBranchSheet(from start: GitReference? = nil, checkout: Bool = true) {
         guard repositoryURL != nil else { return }
         newBranchStart = start
+        newBranchChecksOut = checkout
         isShowingNewBranchSheet = true
     }
 
@@ -1346,6 +1363,7 @@ final class RepositoryStore: ObservableObject {
         references = snapshot.references
         stashes = snapshot.stashes
         worktrees = snapshot.worktrees
+        operation = snapshot.operation
         replaceHistory(snapshot.commits)
 
         // The selected reference is a value, so it goes stale whenever its
@@ -1616,6 +1634,10 @@ final class RepositoryStore: ObservableObject {
         pendingPushPlan = nil
         isConfirmingPush = false
         pendingBranchMove = nil
+        operation = nil
+        confirmation = nil
+        rebasePlan = nil
+        rewordRequest = nil
         cachedCommitHash = nil
         cachedCommitDetails = nil
         cachedVerifiedCommit = nil
@@ -1630,3 +1652,443 @@ final class RepositoryStore: ObservableObject {
     }
 }
 
+
+/// An action that waits for the user to agree.
+struct GitConfirmation: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+    let actionTitle: String
+    let isDestructive: Bool
+    let action: @MainActor () -> Void
+}
+
+/// A commit, and its whole message, for the sheet that edits it.
+struct RewordRequest: Identifiable {
+    let commit: GitCommit
+    let message: String
+
+    var id: String { commit.hash }
+}
+
+// MARK: - Commit and branch actions
+
+extension RepositoryStore {
+    /// The current branch's name, or HEAD when it is detached.
+    var headName: String {
+        references.first(where: \.isCurrent)?.name ?? "HEAD"
+    }
+
+    /// The hash of HEAD's commit, when it is loaded.
+    var headHash: String? {
+        if let branch = references.first(where: \.isCurrent) {
+            return branch.target
+        }
+        return commits.first { $0.decorations.contains { $0 == "HEAD" || $0.hasPrefix("HEAD -> ") } }?.hash
+    }
+
+    /// Whether the commit is in HEAD's history, from the loaded commits. Nil
+    /// when HEAD isn't loaded, e.g. while another branch's history shows.
+    func isInCurrentHistory(_ commit: GitCommit) -> Bool? {
+        guard let head = headHash, let lineage = loadedLineage(of: head) else { return nil }
+        return lineage.contains(commit.hash)
+    }
+
+    func isHead(_ commit: GitCommit) -> Bool {
+        commit.hash == headHash
+    }
+
+    /// The loaded commits `tip` leads to, itself too. Nil when it isn't loaded.
+    /// Every commit between a loaded tip and a loaded ancestor is loaded too:
+    /// the history comes in topological order.
+    private func loadedLineage(of tip: String) -> Set<String>? {
+        if let known = lineages[tip] { return known }
+        let byHash = Dictionary(commits.map { ($0.hash, $0) }, uniquingKeysWith: { first, _ in first })
+        guard byHash[tip] != nil else { return nil }
+        var seen = Set<String>()
+        var next = [tip]
+        while let hash = next.popLast() {
+            guard seen.insert(hash).inserted, let commit = byHash[hash] else { continue }
+            next += commit.parents
+        }
+        lineages[tip] = seen
+        return seen
+    }
+
+    /// Says so when any of `hashes` is already on the upstream branch, since
+    /// rewriting them means a force push.
+    private func pushedWarning(rewriting hashes: Set<String>) -> String? {
+        guard let upstream,
+              let tip = references.first(where: { $0.kind == .remoteBranch && $0.name == upstream })?.target,
+              let pushed = loadedLineage(of: tip),
+              !pushed.isDisjoint(with: hashes) else {
+            return nil
+        }
+        return "Some of these commits are already on \(upstream). After this, \(headName) has to be force pushed, "
+            + "and anyone who pulled them has to fix their copy."
+    }
+
+    /// The commits rewritten from `commit` on: it and the ones after it on
+    /// HEAD's line.
+    private func pushedWarning(rewritingFrom commit: GitCommit) -> String? {
+        pushedWarning(rewriting: [commit.hash])
+    }
+
+    /// Runs `action`, or asks first when there is something to warn about:
+    /// `always`, a warning, or, when it `changesFiles`, agents working here.
+    private func confirmIfNeeded(
+        _ title: String,
+        message: String = "",
+        action actionTitle: String,
+        destructive: Bool = false,
+        always: Bool = false,
+        warning: String? = nil,
+        changesFiles: Bool = true,
+        run: @escaping @MainActor () -> Void
+    ) {
+        var parts = [message, warning ?? ""].filter { !$0.isEmpty }
+        if changesFiles, let root = repositoryURL, let agents = agentsWorking?(root), !agents.isEmpty {
+            let who = agents.count == 1
+                ? "\(agents[0]) is working in this worktree."
+                : "\(agents.formatted(.list(type: .and))) are working in this worktree."
+            parts.append("\(who) This changes files during that work, and agents aren't told.")
+        }
+        guard always || parts.count > (message.isEmpty ? 0 : 1) else {
+            run()
+            return
+        }
+        confirmation = GitConfirmation(
+            title: title,
+            message: parts.joined(separator: "\n\n"),
+            actionTitle: actionTitle,
+            isDestructive: destructive,
+            action: run
+        )
+    }
+
+    /// Runs a git command that may stop part way, on a conflict. That isn't
+    /// an error: the bar over the changes says what to do, and the changes
+    /// show, to resolve the conflicts.
+    private func mutateStoppable(_ label: String, action: @escaping @MainActor (URL) async throws -> Void) {
+        mutate(label) { root in
+            do {
+                try await action(root)
+            } catch let error as GitOperationError {
+                guard GitClient.operationInProgress(at: root) != nil else { throw error }
+                self.selectedSection = .changes
+            }
+        }
+    }
+
+    func copyHash(_ commit: GitCommit) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(commit.hash, forType: .string)
+    }
+
+    func showNewBranchSheet(at commit: GitCommit, checkout: Bool) {
+        showNewBranchSheet(from: .commit(commit), checkout: checkout)
+    }
+
+    /// Detaches HEAD at the commit.
+    func checkout(_ commit: GitCommit) {
+        checkout(.commit(commit))
+    }
+
+    func cherryPick(_ commit: GitCommit) {
+        confirmIfNeeded("Cherry-Pick \(commit.shortHash)?", action: "Cherry-Pick") {
+            self.mutateStoppable("Cherry-picking \(commit.shortHash)") { root in
+                try await self.client.cherryPick(at: root, commit: commit)
+            }
+        }
+    }
+
+    func revert(_ commit: GitCommit) {
+        confirmIfNeeded("Revert \(commit.shortHash)?", action: "Revert") {
+            self.mutateStoppable("Reverting \(commit.shortHash)") { root in
+                try await self.client.revert(at: root, commit: commit)
+            }
+        }
+    }
+
+    /// Moves the current branch to `revision`. A hard reset asks first: it
+    /// throws away uncommitted changes.
+    func reset(to revision: String, named name: String, mode: GitResetMode) {
+        let message: String
+        switch mode {
+        case .soft:
+            message = "\(headName) moves to \(name). The changes of the commits it leaves, and anything staged, "
+                + "end up staged. Commits it leaves can be found in the reflog."
+        case .mixed:
+            message = "\(headName) moves to \(name). The changes of the commits it leaves, and anything staged, "
+                + "end up unstaged in the files. Commits it leaves can be found in the reflog."
+        case .hard:
+            message = "\(headName) moves to \(name), and every file goes back to how it is there. "
+                + "Uncommitted changes are lost for good; commits it leaves can be found in the reflog."
+        }
+        confirmIfNeeded(
+            "Reset \(headName) to \(name)?",
+            message: message,
+            action: "Reset",
+            destructive: mode == .hard,
+            always: true,
+            changesFiles: mode == .hard
+        ) {
+            self.mutate("Resetting \(self.headName) to \(name)") { root in
+                try await self.client.reset(at: root, to: revision, mode: mode)
+            }
+        }
+    }
+
+    func reset(to commit: GitCommit, mode: GitResetMode) {
+        reset(to: commit.hash, named: commit.shortHash, mode: mode)
+    }
+
+    func reset(to reference: GitReference, mode: GitResetMode) {
+        reset(to: reference.fullName, named: reference.name, mode: mode)
+    }
+
+    /// Opens the sheet with the commit's whole message.
+    func showReword(_ commit: GitCommit) {
+        guard let root = repositoryURL else { return }
+        _ = startOperation("Reading \(commit.shortHash)") {
+            let message = try await self.client.message(at: root, of: commit.hash)
+            guard self.isCurrentRepository(root) else { return }
+            self.rewordRequest = RewordRequest(commit: commit, message: message)
+        }
+    }
+
+    /// HEAD's commit only gets a new message; an older one is rewritten
+    /// with the commits after it. The sheet's button was the user's yes; it
+    /// asks again only with something to warn about.
+    func reword(_ commit: GitCommit, message: String) {
+        let warning = pushedWarning(rewritingFrom: commit)
+        if isHead(commit) {
+            confirmIfNeeded("Change the Message of \(commit.shortHash)?", action: "Change", warning: warning, changesFiles: false) {
+                self.mutate("Changing the message of \(commit.shortHash)") { root in
+                    try await self.client.rewordHead(at: root, message: message)
+                }
+            }
+            return
+        }
+        rewrite(from: commit.hash, target: commit, to: .reword, message: message,
+                title: "Change the Message of \(commit.shortHash)?", action: "Change", asks: false,
+                label: "Changing the message of \(commit.shortHash)", warning: warning)
+    }
+
+    /// Folds the commit into its parent: squash keeps both messages, fixup
+    /// only the parent's.
+    func fold(_ commit: GitCommit, keepingMessage: Bool) {
+        guard let parent = commit.parents.first else { return }
+        let verb = keepingMessage ? "Squash" : "Fixup"
+        let explanation = keepingMessage
+            ? "“\(commit.subject)” becomes part of its parent \(String(parent.prefix(8))), which keeps both messages."
+            : "“\(commit.subject)” becomes part of its parent \(String(parent.prefix(8))), which keeps only its own message."
+        rewrite(from: parent, target: commit, to: keepingMessage ? .squash : .fixup,
+                title: "\(verb) \(commit.shortHash) into Its Parent?",
+                explanation: explanation + " The commits after it on \(headName) are rewritten.",
+                action: verb, label: "\(keepingMessage ? "Squashing" : "Fixing up") \(commit.shortHash)",
+                warning: pushedWarning(rewriting: [commit.hash, parent]))
+    }
+
+    /// Takes the commit out of the branch: the commits after it are
+    /// rewritten without it.
+    func delete(_ commit: GitCommit) {
+        rewrite(from: commit.hash, target: commit, to: .drop,
+                title: "Delete Commit \(commit.shortHash)?",
+                explanation: "“\(commit.subject)” and its changes are taken out of \(headName). "
+                    + "The commits after it are rewritten.",
+                action: "Delete", destructive: true,
+                label: "Deleting \(commit.shortHash)", warning: pushedWarning(rewritingFrom: commit))
+    }
+
+    /// Rewrites HEAD's commits from `hash` on, with `target` changed to
+    /// `targetAction`. Asks first unless `asks` is false and there is
+    /// nothing to warn about.
+    private func rewrite(
+        from hash: String,
+        target: GitCommit,
+        to targetAction: RebaseAction,
+        message newMessage: String = "",
+        title: String,
+        explanation: String = "",
+        action: String,
+        destructive: Bool = false,
+        asks: Bool = true,
+        label: String,
+        warning: String?
+    ) {
+        confirmIfNeeded(title, message: explanation, action: action, destructive: destructive, always: asks, warning: warning) {
+            self.mutateStoppable(label) { root in
+                var plan = try await self.client.rebasePlan(at: root, from: hash, warning: nil)
+                guard plan.set(target.hash, to: targetAction, message: newMessage) else {
+                    throw GitOperationError(
+                        command: "git rebase",
+                        message: "\(target.shortHash) isn’t in the history of \(self.headName), so it can’t be changed here."
+                    )
+                }
+                if let problem = plan.problem {
+                    throw GitOperationError(command: "git rebase", message: problem)
+                }
+                try await self.client.rewrite(at: root, plan: plan)
+            }
+        }
+    }
+
+    /// Opens the sheet that rewrites the commit and the ones after it.
+    func showInteractiveRebase(from commit: GitCommit) {
+        guard let root = repositoryURL else { return }
+        let warning = pushedWarning(rewritingFrom: commit)
+        _ = startOperation("Reading the commits") {
+            let plan = try await self.client.rebasePlan(at: root, from: commit.hash, warning: warning)
+            guard self.isCurrentRepository(root) else { return }
+            self.rebasePlan = plan
+        }
+    }
+
+    /// Opens the sheet that puts the current branch's commits on top of
+    /// `reference`, rewriting them on the way.
+    func showInteractiveRebase(onto reference: GitReference) {
+        guard let root = repositoryURL else { return }
+        let warning = pushedWarning(rebasingOnto: reference)
+        _ = startOperation("Reading the commits") {
+            let plan = try await self.client.rebasePlan(at: root, onto: reference, warning: warning)
+            guard self.isCurrentRepository(root) else { return }
+            self.rebasePlan = plan
+        }
+    }
+
+    /// The commits a rebase onto `reference` moves: HEAD's, without the
+    /// ones `reference` has.
+    private func pushedWarning(rebasingOnto reference: GitReference) -> String? {
+        guard let head = headHash, let ours = loadedLineage(of: head),
+              let theirs = loadedLineage(of: reference.target) else {
+            return nil
+        }
+        return pushedWarning(rewriting: ours.subtracting(theirs))
+    }
+
+    /// Runs the sheet's plan.
+    func runRebase(_ plan: RebasePlan) {
+        let count = plan.steps.count
+        confirmIfNeeded("Rewrite \(count) Commit\(count == 1 ? "" : "s")?", action: "Rewrite") {
+            self.mutateStoppable("Rewriting \(count) commit\(count == 1 ? "" : "s")") { root in
+                try await self.client.rewrite(at: root, plan: plan)
+            }
+        }
+    }
+
+    func merge(_ reference: GitReference) {
+        confirmIfNeeded(
+            "Merge \(reference.name) into \(headName)?",
+            message: "This makes a merge commit on \(headName), or moves it forward when it has nothing of its own. "
+                + "Conflicts stop the merge for you to resolve, or abort.",
+            action: "Merge",
+            always: true
+        ) {
+            self.mutateStoppable("Merging \(reference.name)") { root in
+                try await self.client.merge(at: root, reference: reference)
+            }
+        }
+    }
+
+    func rebase(onto reference: GitReference) {
+        confirmIfNeeded(
+            "Rebase \(headName) onto \(reference.name)?",
+            message: "The commits of \(headName) that \(reference.name) doesn’t have are rewritten on top of it. "
+                + "Conflicts stop the rebase for you to resolve, or abort.",
+            action: "Rebase",
+            always: true,
+            warning: pushedWarning(rebasingOnto: reference)
+        ) {
+            self.mutateStoppable("Rebasing \(self.headName) onto \(reference.name)") { root in
+                try await self.client.rebase(at: root, onto: reference)
+            }
+        }
+    }
+
+    func continueOperation() {
+        guard let operation else { return }
+        guard conflictedChanges.isEmpty else {
+            errorMessage = "Resolve the conflicts first, then continue the \(operation.noun)."
+            return
+        }
+        mutateStoppable("Continuing the \(operation.noun)") { root in
+            try await self.client.continueOperation(at: root, operation)
+        }
+    }
+
+    func skipOperation() {
+        guard let operation, operation.canSkip else { return }
+        confirmIfNeeded(
+            "Skip This Commit?",
+            message: "The commit the \(operation.noun) stopped at is left out, with your work on its conflicts.",
+            action: "Skip",
+            destructive: true,
+            always: true
+        ) {
+            self.mutateStoppable("Skipping a commit") { root in
+                try await self.client.skipOperation(at: root, operation)
+            }
+        }
+    }
+
+    func abortOperation() {
+        guard let operation else { return }
+        confirmIfNeeded(
+            "Abort the \(operation.noun.capitalized)?",
+            message: "Everything goes back to how it was before the \(operation.noun). "
+                + "Your work on its conflicts is lost.",
+            action: "Abort",
+            destructive: true,
+            always: true
+        ) {
+            self.mutate("Aborting the \(operation.noun)") { root in
+                try await self.client.abortOperation(at: root, operation)
+            }
+        }
+    }
+
+    /// The worktree the local branch is checked out in, other than this one.
+    func worktree(holding reference: GitReference) -> GitWorktree? {
+        guard reference.kind == .localBranch else { return nil }
+        return worktrees.first { $0.branchName == reference.name && !$0.isPrunable }
+    }
+
+    /// Checks the branch out in a new worktree and starts `agent` there. A
+    /// branch that already has a worktree starts it in that one.
+    func newWorktree(for reference: GitReference, agent: Agent) {
+        if let existing = worktree(holding: reference) {
+            startSession?(agent, URL(fileURLWithPath: existing.path, isDirectory: true))
+            return
+        }
+        guard let root = repositoryURL else { return }
+        _ = startOperation("Making a worktree for \(reference.name)") {
+            let directory = root.path
+            let branch = reference.name
+            let result = await Task.detached { Result { try addWorktree(directory, branch) } }.value
+            let made: NewWorktree
+            switch result {
+            case let .success(value):
+                made = value
+            case let .failure(error):
+                throw GitOperationError(command: "git worktree add", message: AgentzCore.errorMessage(error))
+            }
+            self.worktreeMade?(made)
+            self.startSession?(agent, URL(fileURLWithPath: made.path, isDirectory: true))
+            try await self.reload(root: root, historyScope: self.historyScope)
+        }
+    }
+}
+
+extension RebasePlan {
+    /// False when the commit isn't one of the plan's.
+    @discardableResult
+    mutating func set(_ hash: String, to action: RebaseAction, message: String = "") -> Bool {
+        guard let index = steps.firstIndex(where: { $0.commit.hash == hash }) else { return false }
+        steps[index].action = action
+        if action == .reword {
+            steps[index].message = message
+        }
+        return true
+    }
+}

@@ -741,6 +741,8 @@ private struct ReferenceSidebarRow: View {
                 .disabled(store.isLoading)
             }
 
+            BranchActionItems(reference: reference)
+
             if reference.kind != .remoteBranch || remoteBranchTarget != nil {
                 Divider()
                 Button(role: .destructive) {

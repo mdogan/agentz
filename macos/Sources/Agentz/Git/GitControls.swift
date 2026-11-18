@@ -193,7 +193,19 @@ struct BranchSheet: View {
     /// Called when the branch is on its way, not when the sheet is cancelled.
     var onCreate: () -> Void = {}
     @State private var name = ""
-    @State private var checksOut = true
+    @State private var checksOut: Bool
+
+    init(
+        start: GitReference?,
+        checksOut: Bool = true,
+        isPresented: Binding<Bool>,
+        onCreate: @escaping () -> Void = {}
+    ) {
+        self.start = start
+        _isPresented = isPresented
+        self.onCreate = onCreate
+        _checksOut = State(initialValue: checksOut)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

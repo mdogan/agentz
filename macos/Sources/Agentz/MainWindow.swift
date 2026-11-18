@@ -42,6 +42,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         git.store.startSession = { [weak workspace] agent, folder in
             workspace?.newSession(agent, cwd: folder.path)
         }
+        git.store.worktreeMade = { [weak workspace] made in
+            workspace?.worktreeMade(made)
+        }
         git.store.agentsWorking = { [weak workspace] root in
             workspace?.agentsWorking(in: root.path) ?? []
         }

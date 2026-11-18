@@ -1569,6 +1569,9 @@ final class Workspace {
         session.store.startSession = { [weak self] agent, folder in
             if agent == .git { self?.openGit(folder.path) } else { self?.newSession(agent, cwd: folder.path) }
         }
+        session.store.worktreeMade = { [weak self] made in
+            self?.worktreeMade(made)
+        }
         session.store.agentsWorking = { [weak self] root in
             self?.agentsWorking(in: root.path) ?? []
         }

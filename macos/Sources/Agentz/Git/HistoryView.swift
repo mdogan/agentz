@@ -39,6 +39,9 @@ struct HistoryView: View {
                                 showsGraph: showsGraph
                             )
                             .tag(commit)
+                            .contextMenu {
+                                CommitMenu(commit: commit)
+                            }
                             .listRowInsets(
                                 EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12)
                             )

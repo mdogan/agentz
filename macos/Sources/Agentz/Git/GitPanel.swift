@@ -140,6 +140,7 @@ struct GitPanel: View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(look.divider).frame(height: 1)
+            GitOperationBar()
             GitChangesView(showingStashSheet: $showingStashSheet, stashScope: $stashScope, showsStash: false)
                 .environment(\.openChange) { openGit($0) }
         }

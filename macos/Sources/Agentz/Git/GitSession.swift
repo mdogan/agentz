@@ -129,6 +129,7 @@ struct GitSessionView: View {
         VStack(alignment: .leading, spacing: 0) {
             GitSessionBar()
             Rectangle().fill(look.divider).frame(height: 1)
+            GitOperationBar()
             // Not a split view: it shares out new room between its columns,
             // so the list would change width when the branches come and go.
             HStack(spacing: 0) {
@@ -347,7 +348,21 @@ struct GitDialogs: ViewModifier {
             }
             .animation(.snappy, value: store.operationLabel)
             .sheet(isPresented: $store.isShowingNewBranchSheet) {
-                BranchSheet(start: store.newBranchStart, isPresented: $store.isShowingNewBranchSheet)
+                BranchSheet(
+                    start: store.newBranchStart,
+                    checksOut: store.newBranchChecksOut,
+                    isPresented: $store.isShowingNewBranchSheet
+                )
+                .environmentObject(store)
+                .lookWindowStyle()
+            }
+            .sheet(item: $store.rebasePlan) { plan in
+                RebaseSheet(plan: plan) { store.rebasePlan = nil }
+                    .environmentObject(store)
+                    .lookWindowStyle()
+            }
+            .sheet(item: $store.rewordRequest) { request in
+                RewordSheet(request: request) { store.rewordRequest = nil }
                     .environmentObject(store)
                     .lookWindowStyle()
             }
@@ -389,6 +404,21 @@ struct GitDialogs: ViewModifier {
                 }
             } message: {
                 Text(checkoutMessage)
+            }
+            .alert(
+                store.confirmation?.title ?? "",
+                isPresented: Binding(
+                    get: { store.confirmation != nil },
+                    set: { if !$0 { store.confirmation = nil } }
+                ),
+                presenting: store.confirmation
+            ) { confirmation in
+                Button("Cancel", role: .cancel) {}
+                Button(confirmation.actionTitle, role: confirmation.isDestructive ? .destructive : nil) {
+                    confirmation.action()
+                }
+            } message: { confirmation in
+                Text(confirmation.message)
             }
             .alert("Push \(store.pendingPushPlan?.branchName ?? store.branch)?", isPresented: $store.isConfirmingPush) {
                 Button("Cancel", role: .cancel) { store.cancelPushConfirmation() }

@@ -633,6 +633,164 @@ struct RepositorySnapshot: Sendable {
     let stashes: [GitStash]
     let worktrees: [GitWorktree]
     let commits: [GitCommit]
+    /// A rebase, merge, cherry-pick or revert that stopped and waits.
+    var operation: GitOperationInProgress? = nil
+}
+
+/// A git command that stopped part way, mostly on a conflict, and waits for
+/// the user to continue, skip the commit, or abort.
+enum GitOperationInProgress: String, Sendable {
+    case rebase
+    case merge
+    case cherryPick
+    case revert
+
+    /// The git command: `git <command> --continue`.
+    var command: String {
+        switch self {
+        case .rebase: "rebase"
+        case .merge: "merge"
+        case .cherryPick: "cherry-pick"
+        case .revert: "revert"
+        }
+    }
+
+    /// As in "The rebase stopped".
+    var noun: String {
+        switch self {
+        case .rebase: "rebase"
+        case .merge: "merge"
+        case .cherryPick: "cherry-pick"
+        case .revert: "revert"
+        }
+    }
+
+    /// A merge has one commit to make; the others go through several and
+    /// can leave one out.
+    var canSkip: Bool { self != .merge }
+}
+
+/// How `git reset` moves the branch.
+enum GitResetMode: String, CaseIterable, Sendable {
+    case soft
+    case mixed
+    case hard
+
+    var title: String {
+        switch self {
+        case .soft: "Soft: Keep Changes Staged"
+        case .mixed: "Mixed: Keep Changes Unstaged"
+        case .hard: "Hard: Discard All Changes"
+        }
+    }
+}
+
+/// What to do with one commit when its branch is rewritten: git's
+/// interactive rebase, without `edit`, `exec` or `break`.
+enum RebaseAction: String, CaseIterable, Sendable {
+    case pick
+    case reword
+    case squash
+    case fixup
+    case drop
+
+    var title: String {
+        switch self {
+        case .pick: "Pick"
+        case .reword: "Reword"
+        case .squash: "Squash"
+        case .fixup: "Fixup"
+        case .drop: "Drop"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .pick: "Keep the commit as it is"
+        case .reword: "Keep the commit with a new message"
+        case .squash: "Fold the commit into the one before it and keep both messages"
+        case .fixup: "Fold the commit into the one before it and keep only that one's message"
+        case .drop: "Leave the commit out"
+        }
+    }
+
+    /// Squash and fixup fold into the commit before; they need one.
+    var foldsIntoPrevious: Bool { self == .squash || self == .fixup }
+}
+
+struct RebaseStep: Identifiable, Hashable, Sendable {
+    let commit: GitCommit
+    var action: RebaseAction = .pick
+    /// The commit's message; a `reword` gives it this one.
+    var message = ""
+
+    var id: String { commit.hash }
+}
+
+/// Commits to rewrite: the ones after `base`, or all of HEAD's without one.
+struct RebasePlan: Identifiable, Sendable {
+    let id = UUID()
+    /// The commit or branch the rewritten commits go on top of. Nil
+    /// rewrites from the root commit.
+    let base: String?
+    /// For the user: "after 1a2b3c4d", "onto main".
+    let baseTitle: String
+    /// Newest first, as the history shows them.
+    var steps: [RebaseStep]
+    /// Says when some of the commits are already pushed.
+    var warning: String?
+    /// The commits' order before the user moved them.
+    private let order: [String]
+
+    init(base: String?, baseTitle: String, steps: [RebaseStep], warning: String? = nil) {
+        self.base = base
+        self.baseTitle = baseTitle
+        self.steps = steps
+        self.warning = warning
+        order = steps.map(\.id)
+    }
+
+    /// Git's todo order: the oldest commit first. A commit that folds into
+    /// the one before it needs a kept commit before it.
+    var problem: String? {
+        let kept = steps.reversed().filter { $0.action != .drop }
+        if kept.isEmpty, base == nil {
+            return "At least one commit has to stay."
+        }
+        if let first = kept.first, first.action.foldsIntoPrevious {
+            return "“\(first.commit.subject)” has no commit before it to fold into."
+        }
+        if let empty = kept.first(where: {
+            $0.action == .reword && $0.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }) {
+            return "Write a message for “\(empty.commit.subject)”."
+        }
+        return nil
+    }
+
+    /// It puts the commits on a branch, not back where they are: running
+    /// it does something even when no commit changes.
+    var movesOntoBranch: Bool {
+        base?.hasPrefix("refs/") == true
+    }
+
+    var changesSomething: Bool {
+        steps.contains { $0.action != .pick } || steps.map(\.id) != order
+    }
+}
+
+extension GitReference {
+    /// A commit as a place to check out or start a branch at. Git treats it
+    /// like a tag: checking it out detaches HEAD.
+    static func commit(_ commit: GitCommit) -> GitReference {
+        GitReference(
+            name: commit.shortHash,
+            fullName: commit.hash,
+            kind: .tag,
+            target: commit.hash,
+            isCurrent: false
+        )
+    }
 }
 
 struct GitCommandResult: Sendable {
