@@ -32,6 +32,7 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 
 - Hover over a session and click Claude, Codex, Git, or Shell to open it in that session's folder. Below 250 points, the sidebar puts these actions in the ellipsis menu.
 - **Click** a running session to show it. Click an inactive session to read its last prompt, reply, and note. **Show older turns** opens more of its conversation. **Double-click** or press **Return** on any session to open it: it switches to it if it runs, otherwise it resumes it.
+- Session previews render Markdown, including lists, links, code and tables. You can select and copy text across a reply. Expand **Memory sources** to read the references attached to a Codex answer.
 - A spinner means the agent is working. A green dot means it waits for you.
 - While any agent is working, agentz keeps the Mac awake, including for sessions off screen or Claude sessions running in another app. Once all agents are idle or have quit, normal sleep resumes. The display can still sleep.
 - While an agent works, its second line says what it does and how long it has been at it since your last prompt, e.g. "Run the tests · 3m" with a terminal icon: the command it runs (or what Claude says the command does), the file it reads or edits, what it searches for, or the tool it uses. Hover over it for more. It comes from the agent's transcript, so Claude sessions working outside agentz show it too.

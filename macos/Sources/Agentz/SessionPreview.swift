@@ -1,14 +1,35 @@
 import AgentzCore
 import SwiftUI
 
-/// Rapid keyboard navigation can queue several selections. Only the visible
-/// preview needs I/O. Finish any in-flight read before starting the next.
+private struct PreviewPage {
+    struct Turn: Identifiable {
+        /// Count back from the latest turn to keep IDs when older ones load.
+        let id: Int
+        let prompt: TranscriptMarkdown?
+        let reply: TranscriptMarkdown?
+    }
+
+    let note: TranscriptMarkdown?
+    let turns: [Turn]
+    let hasOlder: Bool
+}
+
+/// Keep transcript I/O and Markdown parsing off the UI thread.
 private actor PreviewReader {
     static let shared = PreviewReader()
 
-    func read(_ key: SessionKey, count: UInt32) -> TranscriptPreview? {
+    func read(_ key: SessionKey, count: UInt32, note: String?, palette: TranscriptMarkdown.Palette) -> PreviewPage? {
         guard !Task.isCancelled else { return nil }
-        return transcriptPreview(key.agent, key.id, count)
+        let preview = transcriptPreview(key.agent, key.id, count)
+        var turns: [PreviewPage.Turn] = []
+        let history = preview?.turns ?? []
+        for (index, turn) in history.enumerated() {
+            guard !Task.isCancelled else { return nil }
+            turns.append(.init(id: history.count - index,
+                               prompt: turn.prompt.isEmpty ? nil : TranscriptMarkdown(turn.prompt, palette: palette),
+                               reply: turn.answer.isEmpty ? nil : TranscriptMarkdown(turn.answer, palette: palette, assistant: key.agent == .codex)))
+        }
+        return PreviewPage(note: note.map { TranscriptMarkdown($0, palette: palette) }, turns: turns, hasOlder: preview?.hasOlder == true)
     }
 }
 
@@ -16,50 +37,85 @@ struct SessionPreview: View {
     let row: Row
     let note: SessionNote?
     @State private var count: UInt32 = 1
-    @State private var preview: TranscriptPreview?
-    @State private var finished = false
+    @State private var page: PreviewPage?
+    @State private var loading = true
 
     private struct Request: Equatable {
         let updated: Date
         let count: UInt32
+        let note: String?
+        let palette: TranscriptMarkdown.Palette
     }
 
     var body: some View {
+        let look = Look.shared
+        let request = Request(updated: row.updated, count: count, note: note?.isEmpty == false ? note?.text : nil,
+                              palette: .init(text: NSColor(look.text), accent: NSColor(look.accent), code: NSColor(look.magenta)))
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                if let note, !note.isEmpty { section("Note", note.text) }
-                if preview?.hasOlder == true {
-                    Button("Show older turns") { count += 5 }
+            VStack(alignment: .leading, spacing: 20) {
+                if let note = page?.note {
+                    message(note, label: "Note", icon: Image(systemName: "note.text"), color: look.magenta, inset: true)
                 }
-                if let preview {
-                    ForEach(Array(preview.turns.enumerated()), id: \.offset) { _, turn in
-                        if !turn.prompt.isEmpty { section("You", turn.prompt) }
-                        if !turn.answer.isEmpty { section(row.key.agent.displayName, turn.answer) }
+                if page?.hasOlder == true {
+                    Button { count += 5 } label: { Label("Show older turns", systemImage: "clock.arrow.circlepath") }
+                        .buttonStyle(.link)
+                        .disabled(loading)
+                }
+                if let page {
+                    ForEach(page.turns) { turn in
+                        if let prompt = turn.prompt {
+                            message(prompt, label: "You", icon: Image(systemName: "person.fill"), color: look.green, inset: true)
+                        }
+                        if let reply = turn.reply {
+                            message(reply, label: row.key.agent.displayName, icon: row.key.agent.icon, color: look.color(for: row.key.agent), inset: false)
+                        }
                     }
                 }
-                if !finished { ProgressView().controlSize(.small) }
-                else if preview?.turns.isEmpty != false {
-                    Text("No conversation available.").foregroundStyle(Look.shared.secondary)
+                if loading { ProgressView().controlSize(.small) }
+                else if page?.turns.isEmpty != false {
+                    Text("No conversation available.").foregroundStyle(look.secondary)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 2)
         }
-        .task(id: Request(updated: row.updated, count: count)) {
-            finished = false
-            let key = row.key, limit = count
+        .tint(look.accent)
+        .task(id: request) {
+            loading = true
             do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
-            let result = await PreviewReader.shared.read(key, count: limit)
+            let result = await PreviewReader.shared.read(row.key, count: request.count, note: request.note, palette: request.palette)
             guard !Task.isCancelled else { return }
-            preview = result
-            finished = true
+            page = result
+            loading = false
         }
     }
 
-    private func section(_ label: String, _ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label).font(.caption.weight(.semibold)).foregroundStyle(Look.shared.secondary)
-            Text(verbatim: text).textSelection(.enabled)
+    private func message(_ document: TranscriptMarkdown, label: String, icon: some View, color: Color, inset: Bool) -> some View {
+        let look = Look.shared
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                icon.frame(width: 14)
+                Text(label)
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(color)
+            if document.text.length > 0 {
+                TranscriptText(text: document.text, linkColor: NSColor(look.accent))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !document.sources.isEmpty {
+                DisclosureGroup("Memory sources") {
+                    Text(verbatim: document.sources.joined(separator: "\n"))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .font(.caption)
+                .foregroundStyle(look.secondary)
+            }
         }
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        .padding(inset ? 12 : 0)
+        .background(inset ? color.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

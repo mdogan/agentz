@@ -1286,27 +1286,33 @@ struct EmptyPaneView: View {
                let row = workspace.row(for: key)
             {
                 let elsewhere = workspace.elsewhere[key]
-                HStack(spacing: 8) {
-                    row.key.agent.icon.foregroundStyle(look.color(for: row.key.agent))
-                    Text(row.title).font(.title3).lineLimit(2)
-                }
-                HStack(spacing: 0) {
-                    Text("\(row.key.agent.name) · \(tilde(row.cwd))\(row.branch.map { " · \($0)" } ?? "") · \(age(now: workspace.now, row.updated))")
-                    if let pr = row.pr {
-                        Text(" · ")
-                        PullRequestLink(pr: pr, look: look)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        row.key.agent.icon.foregroundStyle(look.color(for: row.key.agent))
+                        Text(row.title).font(.title3.weight(.semibold)).lineLimit(2)
+                        Spacer(minLength: 4)
+                        Button(elsewhere == nil ? "Resume" : "Fork…") { workspace.open(key) }
+                            .keyboardShortcut(.defaultAction)
+                            .fixedSize()
                     }
+                    HStack(spacing: 5) {
+                        Text("\(row.key.agent.displayName) · \(tilde(row.cwd))\(row.branch.map { " · \($0)" } ?? "") · \(age(now: workspace.now, row.updated))")
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .help(row.cwd)
+                        if let pr = row.pr { PullRequestLink(pr: pr, look: look) }
+                    }
+                    .font(.callout)
+                    .foregroundStyle(look.secondary)
+                    if let elsewhere {
+                        Label("Running in \(elsewhere.appName). Opening it here starts a fork.", systemImage: "macwindow")
+                            .foregroundStyle(look.secondary)
+                    }
+                    Divider()
+                    SessionPreview(row: row, note: workspace.notes.note(for: key))
+                        .id(key)
                 }
-                .foregroundStyle(look.secondary)
-                if let elsewhere {
-                    Label("Running in \(elsewhere.appName). Opening it here starts a fork.", systemImage: "macwindow")
-                        .foregroundStyle(look.secondary)
-                }
-                Button(elsewhere == nil ? "Resume" : "Fork…") { workspace.open(key) }
-                    .keyboardShortcut(.defaultAction)
-                    .padding(.top, 4)
-                SessionPreview(row: row, note: workspace.notes.note(for: key))
-                    .id(key)
+                .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Text("Pick a session on the left. Double-click it or press Return to open it.")
                     .foregroundStyle(look.secondary)
@@ -1321,7 +1327,7 @@ struct EmptyPaneView: View {
             }
         }
         .foregroundStyle(look.text)
-        .padding(40)
+        .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(look.background)
         // A click in an empty pane of a split works in that pane.
