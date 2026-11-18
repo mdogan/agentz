@@ -35,13 +35,19 @@ struct StartPlace: Identifiable {
     func matches(_ query: [Substring]) -> Bool {
         query.allSatisfy { words.contains($0) }
     }
+
+    static let home: StartPlace = {
+        let dir = NSHomeDirectory()
+        return StartPlace(id: dir, choice: .folder(dir: dir, repo: dir), title: "Home", detail: "~",
+                          icon: "house", always: true, words: "home ~ \(dir)".lowercased())
+    }()
+
+    static let openFolder = StartPlace(id: "open", choice: .openFolder, title: "Open Folder…",
+                                       icon: "ellipsis.circle", always: true, words: "open folder")
 }
 
-/// The rows of `StartPicker`: the recent folders, and in a repo each of its
-/// worktrees and a row that makes a new one, then rows that ask for another
-/// folder. The repo or folder `here` is in comes first. `picked` is the row
-/// of `here` itself; a folder that is no worktree, like `src` in a repo,
-/// gets a row of its own on top.
+/// Home comes first, followed by the current folder, recent repos and their
+/// worktrees. The current folder is selected even when it is a subfolder.
 func startPlaces(here: String, recents: [String]) -> (places: [StartPlace], picked: String?) {
     // `here` last, so that a recent folder of the same repo stands for it.
     var repos = recentRepos(recents + [here])
@@ -49,15 +55,18 @@ func startPlaces(here: String, recents: [String]) -> (places: [StartPlace], pick
     if let i = hereRepo {
         repos.insert(repos.remove(at: i), at: 0)
     }
-    var places: [StartPlace] = []
-    var picked: String?
+    let home = StartPlace.home
+    var places = [home]
+    var picked: String? = samePath(here, home.id) ? home.id : nil
     for repo in repos {
         guard !repo.worktrees.isEmpty else {
+            if samePath(repo.dir, home.id) { continue }
             places.append(folderPlace(repo.dir, repo: repo.dir))
             if samePath(repo.dir, here) { picked = repo.dir }
             continue
         }
         for wt in repo.worktrees where !wt.bare && !wt.missing {
+            if samePath(wt.path, home.id) { continue }
             let path = tilde(wt.path)
             places.append(StartPlace(
                 id: wt.path,
@@ -81,10 +90,10 @@ func startPlaces(here: String, recents: [String]) -> (places: [StartPlace], pick
         ))
     }
     if picked == nil, isDirectory(here) {
-        places.insert(folderPlace(here, repo: hereRepo == nil ? here : repos[0].dir), at: 0)
+        places.insert(folderPlace(here, repo: hereRepo == nil ? here : repos[0].dir), at: 1)
         picked = here
     }
-    places.append(StartPlace(id: "open", choice: .openFolder, title: "Open Folder…", icon: "ellipsis.circle", always: true, words: "open folder"))
+    places.append(.openFolder)
     places.append(StartPlace(
         id: "create", choice: .createFolder, title: "Create Folder…", icon: "folder.badge.plus", always: true, words: "create folder"
     ))
@@ -168,34 +177,35 @@ struct StartPicker: View {
             let words = words
             selection = words.isEmpty
                 ? picked ?? places.first?.id
-                : (shown.first { $0.matches(words) } ?? shown.first)?.id
+                : (shown.first { $0.matches(words) } ?? .openFolder).id
         }
     }
 
     private var list: some View {
-        let shown = shown
-        let firstAlways = shown.first(where: \.always)?.id
         // As high as all rows, up to a point, and the same while filtering.
         let height = min(CGFloat(places.count) * Self.rowHeight + 17, 360)
-        return ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(shown) { place in
-                        if place.id == firstAlways, place.id != shown.first?.id {
-                            Divider().padding(.vertical, 4)
+        return VStack(alignment: .leading, spacing: 0) {
+            row(.home)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(shown.dropFirst()) { place in
+                            if place.id == StartPlace.openFolder.id {
+                                Divider().padding(.vertical, 4)
+                            }
+                            row(place).id(place.id)
                         }
-                        row(place).id(place.id)
                     }
                 }
-                .padding(4)
-            }
-            .frame(height: height)
-            .background(Look.shared.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Look.shared.divider))
-            .onChange(of: selection) { _, id in
-                if let id { proxy.scrollTo(id) }
+                .onChange(of: selection) { _, id in
+                    if let id, id != StartPlace.home.id { proxy.scrollTo(id) }
+                }
             }
         }
+        .padding(4)
+        .frame(height: height)
+        .background(Look.shared.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Look.shared.divider))
     }
 
     private func row(_ place: StartPlace) -> some View {
