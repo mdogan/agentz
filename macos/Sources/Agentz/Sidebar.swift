@@ -46,6 +46,7 @@ struct SidebarView: View {
     let actions: SidebarActions
     @FocusState private var listFocused: Bool
     @FocusState private var filterFocused: Bool
+    @State private var wideRows = false
     @State private var hovered: SessionKey?
     @State private var newWorktree: WorktreeRequest?
     @State private var cleanup: CleanupRequest?
@@ -59,6 +60,7 @@ struct SidebarView: View {
         .foregroundStyle(look.text)
         .background(look.sidebar.ignoresSafeArea())
         .tint(look.accent)
+        .onGeometryChange(for: Bool.self, of: { $0.size.width >= 380 }) { wideRows = $0 }
         .onChange(of: focus.serial) {
             switch focus.target {
             case .list: listFocused = true
@@ -132,13 +134,12 @@ struct SidebarView: View {
                     let attention = workspace.attentionKeys.count
                     if attention > 0 {
                         Text("·")
-                        Button { workspace.showNextAttention() } label: {
+                        AttentionListButton(workspace: workspace) {
                             Text(attention == 1 ? "1 needs you" : "\(attention) need you")
                                 .fontWeight(.semibold)
                                 .foregroundStyle(look.accent)
                         }
                         .buttonStyle(.plain)
-                        .help("Go to the next session that needs you (⇧⌘A)")
                     }
                 }
                 .lineLimit(1)
@@ -368,7 +369,7 @@ struct SidebarView: View {
             limit: workspace.limitStops[row.key],
             continues: workspace.continueAtReset.contains(row.key),
             leftovers: workspace.leftovers[row.key] ?? [],
-            closable: closable,
+            actionWidth: wideRows ? RowButtons.width(closable: closable) : RowButtons.size,
             hovered: hovered == row.key,
             now: workspace.now,
             toggleContinue: running ? { workspace.setContinueAtReset(row.key, !workspace.continueAtReset.contains(row.key)) } : nil,
@@ -386,14 +387,15 @@ struct SidebarView: View {
         // After the row's gestures, so a click on it does not also select
         // the row.
         .overlay(alignment: .trailing) {
-            if hovered == row.key {
+            if hovered == row.key || !wideRows {
                 RowButtons(
                     look: look,
                     closable: closable,
+                    compact: !wideRows,
                     start: { agent in workspace.newSession(agent, cwd: row.cwd) },
                     close: { actions.close(row.key) }
                 )
-                .padding(.trailing, 4)
+                .padding(.trailing, 28)
             }
         }
         // Around the button too, or moving onto it would leave the row and
@@ -482,21 +484,6 @@ struct SidebarView: View {
     }
 
     /// When "Remind Me Later" can bring a session back, with their titles.
-    private func laterTimes() -> [(String, Date)] {
-        let now = Date()
-        var times: [(String, Date)] = [
-            ("In 15 Minutes", now.addingTimeInterval(15 * 60)),
-            ("In 1 Hour", now.addingTimeInterval(3600)),
-            ("In 3 Hours", now.addingTimeInterval(3 * 3600)),
-        ]
-        let calendar = Calendar.current
-        if let nine = calendar.nextDate(after: now, matching: DateComponents(hour: 9, minute: 0), matchingPolicy: .nextTime) {
-            let when = atTime(nine, now: now)
-            times.append((when.prefix(1).uppercased() + when.dropFirst(), nine))
-        }
-        return times
-    }
-
     private var emptyMessage: String {
         if !workspace.loaded { return "Loading sessions…" }
         switch workspace.range {
@@ -659,8 +646,7 @@ private struct RowView: View {
     let continues: Bool
     /// Programs left running in its folder.
     let leftovers: [Leftover]
-    /// It has a close button when hovered.
-    let closable: Bool
+    let actionWidth: CGFloat
     /// The list shows its buttons where the state would be.
     let hovered: Bool
     let now: Date
@@ -736,10 +722,8 @@ private struct RowView: View {
                 }
             }
             Spacer(minLength: 4)
-            state
-                .opacity(hovered ? 0 : 1)
-                // Room for the buttons, so the text stops before them.
-                .frame(width: hovered ? RowButtons.width(closable: closable) - 2 : 16)
+            Color.clear.frame(width: actionWidth, height: 1)
+            state.frame(width: 16)
         }
         .padding(.leading, 8)
         .padding(.trailing, 6)
@@ -1109,6 +1093,7 @@ struct FolderApp: Identifiable {
 private struct RowButtons: View {
     let look: Look
     let closable: Bool
+    let compact: Bool
     let start: (Agent) -> Void
     let close: () -> Void
 
@@ -1119,6 +1104,28 @@ private struct RowButtons: View {
     }
 
     var body: some View {
+        if compact {
+            Menu {
+                ForEach([Agent.claude, .codex, .git, .shell], id: \.self) { agent in
+                    Button(agent.newHere) { start(agent) }
+                }
+                if closable {
+                    Divider()
+                    Button("Close Session", action: close)
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle").frame(width: Self.size, height: Self.size)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("Session actions")
+        } else {
+            buttons
+        }
+    }
+
+    private var buttons: some View {
         HStack(spacing: 0) {
             ForEach([Agent.claude, .codex, .git, .shell], id: \.self) { agent in
                 RowButton(look: look, help: agent.newHere, action: { start(agent) }) { _ in
@@ -1260,7 +1267,7 @@ struct EmptyPaneView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if workspace.panes.focused == pane, let key = workspace.selection, !workspace.runningKeys.contains(key),
-               let row = workspace.rows.first(where: { $0.key == key })
+               let row = workspace.row(for: key)
             {
                 let elsewhere = workspace.elsewhere[key]
                 HStack(spacing: 8) {
@@ -1282,9 +1289,8 @@ struct EmptyPaneView: View {
                 Button(elsewhere == nil ? "Resume" : "Fork…") { workspace.open(key) }
                     .keyboardShortcut(.defaultAction)
                     .padding(.top, 4)
-                Text("Tip: double-click a session in the list to resume it right away.")
-                    .font(.callout)
-                    .foregroundStyle(look.secondary)
+                SessionPreview(row: row, note: workspace.notes.note(for: key))
+                    .id(key)
             } else {
                 Text("Pick a session on the left. Double-click it or press Return to open it.")
                     .foregroundStyle(look.secondary)
@@ -1350,4 +1356,19 @@ extension Agent {
         default: "New \(displayName) Session Here"
         }
     }
+}
+
+func laterTimes() -> [(String, Date)] {
+    let now = Date()
+    var times: [(String, Date)] = [
+        ("In 15 Minutes", now.addingTimeInterval(15 * 60)),
+        ("In 1 Hour", now.addingTimeInterval(3600)),
+        ("In 3 Hours", now.addingTimeInterval(3 * 3600)),
+    ]
+    let calendar = Calendar.current
+    if let nine = calendar.nextDate(after: now, matching: DateComponents(hour: 9, minute: 0), matchingPolicy: .nextTime) {
+        let when = atTime(nine, now: now)
+        times.append((when.prefix(1).uppercased() + when.dropFirst(), nine))
+    }
+    return times
 }

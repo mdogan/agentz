@@ -390,7 +390,7 @@ private struct SplitButtons: View {
     }
 }
 
-/// How many sessions want the user. A click goes to the next one. In the
+/// How many sessions want the user. A click shows them all. In the
 /// title bar, so it shows while the list is hidden too.
 private struct AttentionButton: View {
     let workspace: Workspace
@@ -399,8 +399,7 @@ private struct AttentionButton: View {
 
     var body: some View {
         let count = workspace.attentionKeys.count
-        let help = count == 1 ? "A session needs you. Go to it (⇧⌘A)" : "\(count) sessions need you. Go to the next one (⇧⌘A)"
-        Button { workspace.showNextAttention() } label: {
+        AttentionListButton(workspace: workspace) {
             HStack(spacing: 4) {
                 Image(systemName: "bell.fill")
                     .font(.system(size: 10, weight: .semibold))
@@ -416,8 +415,6 @@ private struct AttentionButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
-        .help(help)
-        .accessibilityLabel(help)
     }
 }
 
@@ -477,6 +474,64 @@ private struct SplitButton: View {
     }
 }
 
+private struct SplitPaneHeader: View {
+    let workspace: Workspace
+    let pane: Int
+    @State private var otherTree: Worktree?
+    @State private var watcher: FolderWatcher?
+    @State private var headChanged = 0
+
+    private struct BranchRequest: Equatable {
+        let folder: String?
+        let change: Int
+    }
+
+    var body: some View {
+        let key = workspace.panes.split != nil && workspace.panes.keys.indices.contains(pane) ? workspace.panes.keys[pane] : nil
+        let tab = key.flatMap { key in workspace.tabs.first { $0.key == key } }
+        let row = tab.flatMap { workspace.row(for: $0.linked ?? $0.key) }
+        let folder = row?.cwd ?? tab?.cwd
+        let known = folder.flatMap { worktree(containing: $0, in: workspace.worktrees) }
+        let tree = known ?? otherTree
+        let branch = tree.map { $0.branch ?? "Detached at " + $0.head.prefix(8) } ?? row?.branch
+        let focused = pane == workspace.panes.focused
+        Button { workspace.focusPane(pane) } label: {
+            HStack(spacing: 6) {
+                if let key { (tab?.linked ?? key).agent.icon }
+                Text(row?.place ?? "Empty pane").fontWeight(.semibold)
+                if let branch { Label(branch, systemImage: "arrow.triangle.branch") }
+                if let row { Text(row.title).foregroundStyle(Look.shared.secondary) }
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 11))
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Look.shared.sidebar)
+            .overlay(alignment: .bottom) { Rectangle().fill(focused ? Look.shared.accent : Look.shared.divider).frame(height: focused ? 2 : 1) }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Look.shared.text)
+        .accessibilityAddTraits(focused ? .isSelected : [])
+        .task(id: BranchRequest(folder: known == nil ? folder : nil, change: headChanged)) {
+            watcher = nil
+            guard known == nil, let folder else { otherTree = nil; return }
+            let tree = await Task.detached(priority: .utility) {
+                worktree(containing: folder, in: listWorktrees(folder))
+            }.value
+            guard !Task.isCancelled else { return }
+            otherTree = tree
+            if let tree {
+                let git = GitClient.gitDirectory(at: URL(fileURLWithPath: tree.path)).resolvingSymlinksInPath().path
+                watcher = FolderWatcher([git], ignoring: [git + "/logs", git + "/objects"], fileEvents: true) { paths in
+                    if paths == nil || paths?.contains(git + "/HEAD") == true { headChanged += 1 }
+                }
+            }
+        }
+    }
+}
+
 /// Holds every terminal view, so hidden ones keep their size and keep
 /// running. Only the ones in the panes are visible: one, or two after a
 /// split, with a line between them.
@@ -496,6 +551,7 @@ final class PaneViewController: NSViewController {
     private let gitButtons = [NSButton(), NSButton()]
     /// One per pane, shown while the pane has no terminal.
     private let placeholders: [PaneHostingView<EmptyPaneView>]
+    private let headers: [PaneHostingView<SplitPaneHeader>]
     /// Fades the pane the user does not work in, as Ghostty does.
     private let fade = FadeView()
     private let divider = PaneDivider()
@@ -509,6 +565,7 @@ final class PaneViewController: NSViewController {
         self.workspace = workspace
         self.look = look
         self.editNote = editNote
+        headers = [0, 1].map { PaneHostingView(rootView: SplitPaneHeader(workspace: workspace, pane: $0)) }
         placeholders = [0, 1].map { PaneHostingView(rootView: EmptyPaneView(workspace: workspace, look: look, pane: $0)) }
         super.init(nibName: nil, bundle: nil)
     }
@@ -534,6 +591,7 @@ final class PaneViewController: NSViewController {
             container.addSubview(placeholder)
         }
         container.addSubview(fade)
+        for header in headers { container.addSubview(header) }
         for (buttons, name, symbol, label, action) in [
             (noteButtons, "note", "square.and.pencil", "Add Note", #selector(openNote(_:))),
             (zedButtons, "zed", "chevron.left.forwardslash.chevron.right", "Open in Zed", #selector(openZed(_:))),
@@ -634,7 +692,7 @@ final class PaneViewController: NSViewController {
             if v.superview !== terminals {
                 // At its pane's size from the start, so the program does
                 // not start at one size and get resized right away.
-                v.frame = pane.map { rects[$0] } ?? terminals.bounds
+                v.frame = pane.map { contentRect(rects[$0], split: layout.split != nil) } ?? terminals.bounds
                 terminals.addSubview(v)
             }
             // A hidden first responder hands the keyboard to the next view
@@ -646,11 +704,23 @@ final class PaneViewController: NSViewController {
         layoutPanes()
     }
 
+    private func contentRect(_ rect: NSRect, split: Bool) -> NSRect {
+        guard split else { return rect }
+        return NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: max(0, rect.height - 24))
+    }
+
     /// Puts the shown terminals, the placeholders, the divider and the fade
     /// where the panes are.
     private func layoutPanes() {
         let layout = workspace.panes
         let rects = paneRects(layout.split, ratio: draggedRatio ?? layout.ratio)
+        let contentRects = rects.map { contentRect($0, split: layout.split != nil) }
+        for (i, header) in headers.enumerated() {
+            header.isHidden = layout.split == nil
+            if !header.isHidden {
+                header.frame = NSRect(x: rects[i].minX, y: contentRects[i].maxY, width: rects[i].width, height: 24)
+            }
+        }
         var empty = Set(layout.keys.indices)
         for i in noteButtons.indices {
             let tab = layout.keys.indices.contains(i) ? workspace.tabs.first { $0.key == layout.keys[i] } : nil
@@ -672,11 +742,11 @@ final class PaneViewController: NSViewController {
         for (i, key) in layout.keys.enumerated() {
             guard let v = workspace.tabs.first(where: { $0.key == key })?.content.paneView else { continue }
             empty.remove(i)
-            if v.frame != rects[i] { v.frame = rects[i] }
+            if v.frame != contentRects[i] { v.frame = contentRects[i] }
         }
         for (i, placeholder) in placeholders.enumerated() {
             placeholder.isHidden = !empty.contains(i)
-            if !placeholder.isHidden, placeholder.frame != rects[i] { placeholder.frame = rects[i] }
+            if !placeholder.isHidden, placeholder.frame != contentRects[i] { placeholder.frame = contentRects[i] }
         }
         guard let split = layout.split else {
             divider.isHidden = true

@@ -93,13 +93,12 @@ final class SmokeTest {
         check("pid is the login shell", name.map { $0.hasSuffix(Launch.shellName) } ?? false, "name=\(name ?? "nil") shell=\(Launch.shellName)")
         check("idle shell has no foreground job", await wait(5) { !t.hasForegroundJob && t.foregroundGroup != nil })
 
-        t.run("printf '%s %s %s' \"$TERM_PROGRAM\" \"$TERM\" \"$CLAUDECODE\" > \(shellQuote(envFile))")
+        t.run("printf '%s %s %s' \"$TERM_PROGRAM\" \"$TERM\" \"$CLAUDECODE\" > \(shellQuote(envFile)) && cd \(shellQuote(tmp))")
         check("environment", await wait(5) {
             (try? String(contentsOfFile: envFile, encoding: .utf8)) == "ghostty xterm-ghostty "
         }, (try? String(contentsOfFile: envFile, encoding: .utf8)) ?? "no file")
 
-        t.run("cd \(shellQuote(tmp))")
-        check("folder follows cd (OSC 7)", await wait(5) { shell.cwd == tmp || realPath(shell.cwd) == tmp }, shell.cwd)
+        check("folder follows cd (OSC 7)", await wait(5) { shell.cwd == tmp || realPath(shell.cwd) == realPath(tmp) }, shell.cwd)
 
         // Only shells that mark their commands (OSC 133) report their end.
         var finished: (exitCode: Int?, seconds: TimeInterval)?
@@ -143,7 +142,7 @@ final class SmokeTest {
         let codexKey = codex.key
         codex.turns.userInput()
         check("agent replaces the idle shell", !ws.tabs.contains { $0.key == shellKey })
-        check("agent starts in the shell's folder", codex.cwd == tmp || realPath(codex.cwd) == tmp, codex.cwd)
+        check("agent starts in the shell's folder", codex.cwd == tmp || realPath(codex.cwd) == realPath(tmp), codex.cwd)
         check("the recent folders stay as they were", UserDefaults.standard.stringArray(forKey: "recentFolders") == recents)
         check("agent busy from its title", await wait(5) { codex.isBusy })
         check("quit counts a working agent", ws.quitCounts().working == 1)
@@ -945,16 +944,22 @@ final class SmokeTest {
         // ⌥⌘C: File › Copy Session Contents, with no selection needed. A
         // shell gives its terminal's text, and Ghostty's file of it is gone
         // after.
-        let leftBefore = Set((try? FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory())) ?? [])
         pasteboard.clearContents()
         key("c", 8, option: true)
+        _ = await wait(3) { !copied().isEmpty }
         let all = pasteboard.string(forType: .string) ?? ""
         check("⌥⌘C copies the terminal's text, scrollback too",
               all.contains("select-me-first") && all.contains("select-me-last") && all.contains("\n300\n"),
               "\(all.split(separator: "\n").count) lines")
-        let leftAfter = Set((try? FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory())) ?? [])
-        check("and leaves no file behind", leftAfter.subtracting(leftBefore).isEmpty, "\(leftAfter.subtracting(leftBefore))")
-        check("the shell's row has the same", ws.hasContents(shell.key) && ws.contents(of: shell.key)?.text == all)
+        let file: String? = t.withScreenFile { path in
+            FileManager.default.fileExists(atPath: path) ? path : nil
+        }
+        check("and leaves no file behind", file.map {
+            !FileManager.default.fileExists(atPath: $0) &&
+                !FileManager.default.fileExists(atPath: ($0 as NSString).deletingLastPathComponent)
+        } == true)
+        let exported = await ws.contents(of: shell.key)
+        check("the shell's row has the same", ws.hasContents(shell.key) && exported?.text == all)
         ws.close(shell.key)
     }
 
@@ -1443,6 +1448,9 @@ final class SmokeTest {
     /// menu and Help › Keyboard Shortcuts, ⌫ removes it, ⌘W closes it.
     private func settings(_ app: AppDelegate) async {
         guard let parent = window.window, let bindings = app.keyBindings else { return check("key bindings", false) }
+        NSApp.activate()
+        parent.makeKeyAndOrderFront(nil)
+        _ = await wait(3) { NSApp.isActive && parent.isKeyWindow }
         window.focusTerminal()
         let tabs = workspace.tabs.count
         if let event = NSEvent.keyEvent(

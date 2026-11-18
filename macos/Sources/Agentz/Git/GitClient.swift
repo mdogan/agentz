@@ -10,6 +10,11 @@ struct RepositoryStateToken: Equatable, Sendable {
     /// A rebase or merge that stopped, or nil.
     var operation: GitOperationInProgress? = nil
 
+    func sameHistory(as other: Self) -> Bool {
+        references == other.references && stashes == other.stashes && worktrees == other.worktrees
+            && operation == other.operation && status.prefix(while: { $0 != "\0" }) == other.status.prefix(while: { $0 != "\0" })
+    }
+
     func replacingWorkingTree(with snapshot: WorkingTreeSnapshot) -> Self {
         Self(
             status: snapshot.status,
@@ -344,6 +349,12 @@ struct GitClient: Sendable {
             in: root
         )
         return GitParser.parseCommits(result.output)
+    }
+
+    func searchPage(at root: URL, scope: CommitHistoryScope, offset: Int, limit: Int, query: String) async throws -> (count: Int, matches: [GitCommit]) {
+        let page = try await history(at: root, scope: scope, offset: offset, limit: limit)
+        try Task.checkCancellation()
+        return (page.count, page.filter { $0.matchesHistory(query) })
     }
 
     static func historyArguments(

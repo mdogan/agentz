@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
@@ -218,27 +218,23 @@ struct ScanState {
     project: Option<(PathBuf, project::Project)>,
     /// The sessions the last scan returned, and the folder it was for.
     returned: Option<(PathBuf, Vec<Session>)>,
-    /// A scan ran. Only the first one leaves out old sessions.
-    scanned: bool,
+    /// File events can update the archive after a full discovery pass.
+    archive_complete: bool,
 }
 
-impl ScanState {
-    /// All sessions, with `in_project` set for the project of `dir`. See
-    /// `sessions::Scanner::scan` for `since`.
-    fn scan_sessions(&mut self, dir: &Path, since: Option<SystemTime>) -> Vec<Session> {
-        let fresh = matches!(&self.project, Some((d, p)) if d == dir && !p.is_stale());
-        if !fresh {
-            self.project = Some((dir.to_path_buf(), project::Project::detect(dir)));
-        }
-        let Some((_, project)) = &self.project else {
-            unreachable!()
-        };
-        let mut sessions = self.sessions.scan(since);
-        for s in &mut sessions {
-            s.in_project = project.contains(&s.cwd);
-        }
-        sessions
+/// Directories and metadata files that affect the session archive.
+#[uniffi::export]
+pub fn archive_watch_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(dir) = sessions::claude_dir() {
+        paths.push(dir.join("projects"));
     }
+    if let Some(dir) = sessions::codex_home() {
+        paths.push(dir.join("sessions"));
+        paths.push(dir.join("session_index.jsonl"));
+    }
+    paths.extend(usage::context_windows_dir());
+    paths
 }
 
 #[uniffi::export]
@@ -250,7 +246,13 @@ impl SessionScanner {
 
     /// Only the sessions, with `in_project` set for the project of `dir`.
     pub fn sessions(&self, dir: PathBuf) -> Vec<Session> {
-        lock(&self.0).scan_sessions(&dir, None)
+        let mut state = lock(&self.0);
+        let project = project::Project::detect(&dir);
+        let mut sessions = state.sessions.scan(None);
+        for session in &mut sessions {
+            session.in_project = project.contains(&session.cwd);
+        }
+        sessions
     }
 
     /// Everything the app shows. `dir` is the folder whose project the
@@ -266,11 +268,39 @@ impl SessionScanner {
         new_codex_pids: Vec<i32>,
         quick_shell: Option<i32>,
         since: Option<SystemTime>,
+        changed_paths: Option<Vec<PathBuf>>,
     ) -> Scan {
         let mut s = lock(&self.0);
-        let since = since.filter(|_| !s.scanned);
-        s.scanned = true;
-        let sessions = s.scan_sessions(&dir, since);
+        let since = since.filter(|_| s.returned.is_none());
+        let project_changed = !matches!(&s.project, Some((d, p)) if d == &dir && !p.is_stale());
+        if project_changed {
+            s.project = Some((dir.clone(), project::Project::detect(&dir)));
+        }
+        let fresh = match changed_paths {
+            Some(paths) if s.archive_complete && !project_changed => {
+                if paths.is_empty() {
+                    None
+                } else {
+                    Some(s.sessions.changed(&paths))
+                }
+            }
+            _ => Some(s.sessions.scan(since)),
+        };
+        s.archive_complete = since.is_none();
+        let mut changed = false;
+        if let Some(mut sessions) = fresh {
+            let project = &s.project.as_ref().unwrap().1;
+            for session in &mut sessions {
+                session.in_project = project.contains(&session.cwd);
+            }
+            changed = s
+                .returned
+                .as_ref()
+                .is_none_or(|(d, previous)| d != &dir || previous != &sessions);
+            if changed {
+                s.returned = Some((dir, sessions));
+            }
+        }
         let worktrees = s
             .project
             .as_ref()
@@ -284,9 +314,10 @@ impl SessionScanner {
             returned,
             ..
         } = &mut *s;
+        let sessions = &returned.as_ref().unwrap().1;
         let procs = procs::Snapshot::default();
-        let shells = procs::shell_processes(&pids(&shell_pids), &procs, &sessions, codex_links);
-        let threads = procs::codex_threads(&pids(&new_codex_pids), &procs, &sessions, codex_links);
+        let shells = procs::shell_processes(&pids(&shell_pids), &procs, sessions, codex_links);
+        let threads = procs::codex_threads(&pids(&new_codex_pids), &procs, sessions, codex_links);
         let quick = quick_shell.and_then(|p| u32::try_from(p).ok());
         let elsewhere = procs::claude_elsewhere(&procs, std::process::id(), quick, None);
         let leftovers = procs::leftovers(&procs, leftover_args);
@@ -294,16 +325,8 @@ impl SessionScanner {
             claude: usage::claude(),
             codex: codex_usage.read(scanner.codex_files()),
         };
-        // Most scans find nothing new. Then Swift keeps what it has
-        // instead of decoding and comparing every session again.
-        let changed = returned
-            .as_ref()
-            .is_none_or(|(d, last)| *d != dir || *last != sessions);
-        if changed {
-            *returned = Some((dir, sessions.clone()));
-        }
         Scan {
-            sessions: changed.then_some(sessions),
+            sessions: changed.then(|| sessions.clone()),
             complete: since.is_none(),
             shells: shells.into_iter().map(Into::into).collect(),
             codex_threads: threads
@@ -344,6 +367,16 @@ pub fn stop_leftovers(leftovers: Vec<Leftover>) -> u32 {
 #[uniffi::export]
 pub fn transcript_markdown(agent: Agent, id: String) -> Option<String> {
     export::markdown(agent, &id)
+}
+
+/// The newest conversation turns, in reading order, without starting an agent.
+#[uniffi::export]
+pub fn transcript_preview(
+    agent: Agent,
+    id: String,
+    count: u32,
+) -> Option<export::TranscriptPreview> {
+    export::preview(agent, &id, count)
 }
 
 /// The process's current directory, even when its shell does not report

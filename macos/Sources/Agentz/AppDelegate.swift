@@ -110,11 +110,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 stopLeftovers: { [weak self] leftovers in self?.stopLeftovers(leftovers) },
                 saveContents: { [weak self] key in
                     guard let workspace = self?.workspace else { return }
-                    workspace.contents(of: key)?.save(in: workspace)
+                    Task { await workspace.contents(of: key)?.save(in: workspace) }
                 },
                 copyContents: { [weak self] key in
                     guard let workspace = self?.workspace else { return }
-                    workspace.contents(of: key)?.copy(in: workspace)
+                    Task { await workspace.contents(of: key)?.copy(in: workspace) }
                 },
                 editNote: { [weak self] key in self?.editNote(key) },
                 allNotes: { [weak self] in self?.showAllNotes(nil) }
@@ -559,15 +559,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     /// The contents of the quick terminal while it has the keyboard, or
     /// else of the shown session.
-    private func currentContents() -> SessionContents? {
-        guard let workspace else { return nil }
+    private func withCurrentContents(_ perform: @escaping (SessionContents, Workspace) async -> Void) {
+        guard let workspace else { return }
         if let quick = quickTerminal, quick.isKey {
-            guard let terminal = quick.terminal else { return nil }
-            let contents = SessionContents(title: "Quick Terminal", terminal: terminal)
-            if contents == nil { workspace.setStatus("The terminal has no text.") }
-            return contents
+            guard let terminal = quick.terminal else { return }
+            guard let contents = SessionContents(title: "Quick Terminal", terminal: terminal) else {
+                workspace.setStatus("The terminal has no text.")
+                return
+            }
+            Task { await perform(contents, workspace) }
+        } else if let tab = workspace.currentTab {
+            let key = tab.linked ?? tab.key
+            Task {
+                if let contents = await workspace.contents(of: key) { await perform(contents, workspace) }
+            }
         }
-        return workspace.currentTab.flatMap { workspace.contents(of: $0.linked ?? $0.key) }
     }
 
     @objc func saveContents(_: Any?) {
@@ -575,13 +581,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             workspace?.notes.flush()
             return
         }
-        guard let workspace else { return }
-        currentContents()?.save(in: workspace)
+        withCurrentContents { await $0.save(in: $1) }
     }
 
     @objc func copyContents(_: Any?) {
-        guard let workspace else { return }
-        currentContents()?.copy(in: workspace)
+        withCurrentContents { await $0.copy(in: $1) }
     }
 
     @objc func togglePin(_: Any?) {

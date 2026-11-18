@@ -1,3 +1,4 @@
+import AgentzCore
 import AppKit
 import Testing
 @testable import agentz
@@ -78,6 +79,23 @@ struct CommandPaletteTests {
         #expect(titles("login") == ["Fix login bug", "Write docs"])
         #expect(titles("api ref") == ["Refactor"])
         #expect(titles("wdocs") == ["Write docs"])
+    }
+
+    @Test func sessionIndexRefreshesNotesAndKeepsEqualMatchesInOrder() async {
+        let index = SessionSearchIndex()
+        func item(_ id: String, title: String, note: String) -> SwitcherSession {
+            let row = Row(key: SessionKey(.codex, id), title: title, cwd: "/tmp", place: "Project", updated: Date(), order: Date())
+            return SwitcherSession(row: row, state: .notRunning, elsewhere: nil, isCurrent: false,
+                                   note: SessionNote(id: UUID(), session: id, title: title, folder: "/tmp", text: note, updated: Date()))
+        }
+        let a = item("a", title: "Café", note: "first")
+        let b = item("b", title: "Coffee", note: "second")
+        let snapshot = UUID()
+        #expect(await index.search([b, a], snapshot: snapshot, query: "").map(\.id) == [b.id, a.id])
+        #expect(await index.search([b, a], snapshot: snapshot, query: "proj").map(\.id) == [b.id, a.id])
+        #expect(await index.search([b, a], snapshot: snapshot, query: "cafe").map(\.id) == [a.id])
+        let edited = item("a", title: "Café", note: "new task")
+        #expect(await index.search([b, edited], snapshot: UUID(), query: "task").map(\.id) == [a.id])
     }
 
     @Test

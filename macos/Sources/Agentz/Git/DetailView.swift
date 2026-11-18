@@ -799,7 +799,7 @@ private struct ConflictCodeLines: View {
         .overlay(alignment: .leading) {
             Rectangle()
                 .fill(tint.opacity(0.8))
-                .frame(width: DiffLayout.accentBarWidth)
+                .frame(width: 2.5)
         }
     }
 }
@@ -1357,7 +1357,6 @@ private struct CommitDiffFileView: View {
 /// Commit diffs use one native text surface per visual block so selections can
 /// cross row boundaries instead of stopping at each SwiftUI `Text` view.
 private struct CommitDiffLinesView: View {
-    @Environment(\.colorScheme) private var colorScheme
     let lines: [UnifiedDiffLine]
     var wraps = false
     var containerWidth: CGFloat = 0
@@ -1454,7 +1453,6 @@ private struct CommitDiffLinesView: View {
         ContinuousDiffTextView(
             lines: textLines,
             style: .unified,
-            colorScheme: colorScheme,
             wraps: wraps
         )
     }
@@ -1464,7 +1462,7 @@ private enum DiffLayout {
     static let rowHeight: CGFloat = 20
     static let automaticLineLimit = 20_000
     static let lineNumberWidth: CGFloat = 34
-    static let accentBarWidth: CGFloat = 2.5
+    static let markerWidth: CGFloat = 14
     static let textPadding: CGFloat = 9
     static let dividerWidth: CGFloat = 1
     static let minimumSideBySideColumnWidth: CGFloat = 180
@@ -1472,18 +1470,18 @@ private enum DiffLayout {
     /// Gap the file cards leave around a commit-style diff block.
     static let filePadding: CGFloat = 12
 
-    static let sideBySideTextLeadingInset = accentBarWidth
+    static let sideBySideTextLeadingInset = markerWidth
         + lineNumberWidth
         + dividerWidth
         + textPadding
 
-    static let unifiedTextLeadingInset = accentBarWidth
+    static let unifiedTextLeadingInset = markerWidth
         + lineNumberWidth * 2
         + dividerWidth
         + textPadding
 
     /// Everything a side-by-side cell draws around its text.
-    static let cellChrome = accentBarWidth + lineNumberWidth + dividerWidth + textPadding * 2
+    static let cellChrome = markerWidth + lineNumberWidth + dividerWidth + textPadding * 2
 
     static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
 
@@ -1725,7 +1723,6 @@ private struct DiffHunkMenu: View {
 }
 
 private struct DiffHunkView: View {
-    @Environment(\.colorScheme) private var colorScheme
     let hunk: UnifiedDiffHunk
     let selectedLineIDs: Set<Int>
     let staged: Bool
@@ -1797,7 +1794,7 @@ private struct DiffHunkView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
                 Color.clear
-                    .frame(width: DiffLayout.accentBarWidth + DiffLayout.lineNumberWidth * 2)
+                    .frame(width: DiffLayout.markerWidth + DiffLayout.lineNumberWidth * 2)
                 Divider()
                 Text(hunk.header.text)
                     .font(.system(size: 11.5, design: .monospaced))
@@ -1834,7 +1831,6 @@ private struct DiffHunkView: View {
                     ContinuousDiffTextView(
                         lines: textLines,
                         style: .unified,
-                        colorScheme: colorScheme,
                         wraps: true,
                         isSelectable: false
                     )
@@ -2017,7 +2013,7 @@ private struct SideBySideDiffPane: View {
                 .foregroundStyle(.secondary)
                 .padding(
                     .leading,
-                    DiffLayout.accentBarWidth + DiffLayout.lineNumberWidth
+                    DiffLayout.markerWidth + DiffLayout.lineNumberWidth
                         + DiffLayout.dividerWidth + DiffLayout.textPadding
                 )
                 .frame(
@@ -2049,7 +2045,6 @@ private struct SideBySideDiffPane: View {
 }
 
 private struct SideBySideDiffColumn: View {
-    @Environment(\.colorScheme) private var colorScheme
     let diff: SideBySideDiff
     let side: SideBySideDiffSide
     let contentWidth: CGFloat
@@ -2083,8 +2078,7 @@ private struct SideBySideDiffColumn: View {
                         addsSpacingAfter: $0.addsHunkSpacing
                     )
                 },
-                style: .sideBySide,
-                colorScheme: colorScheme
+                style: .sideBySide
             )
             .frame(
                 width: max(
@@ -2115,7 +2109,7 @@ private struct SideBySideHunkColumnView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 0) {
                 Color.clear
-                    .frame(width: DiffLayout.accentBarWidth + DiffLayout.lineNumberWidth)
+                    .frame(width: DiffLayout.markerWidth + DiffLayout.lineNumberWidth)
                 Divider()
                 Spacer(minLength: 0)
             }
@@ -2141,7 +2135,19 @@ private struct SideBySideHunkColumnView: View {
     }
 }
 
+private struct DiffMarker: View {
+    let kind: UnifiedDiffLineKind?
+    var body: some View {
+        Text(kind == .addition ? "+" : kind == .deletion ? "−" : "")
+            .font(.system(size: 11, weight: .bold, design: .monospaced))
+            .foregroundStyle(Look.shared.text)
+            .frame(width: DiffLayout.markerWidth, height: DiffLayout.rowHeight)
+            .accessibilityLabel(kind == .addition ? "Added" : kind == .deletion ? "Removed" : "")
+    }
+}
+
 private struct SideBySideCell: View {
+    @Environment(\.colorSchemeContrast) private var contrast
     let line: UnifiedDiffLine?
     let side: SideBySideDiffSide
     let width: CGFloat
@@ -2156,25 +2162,15 @@ private struct SideBySideCell: View {
         // A missing counterpart is filled so the eye can follow the gap.
         guard let line else { return Look.shared.text.opacity(0.04) }
         switch line.kind {
-        case .addition: return GitForkTheme.green.opacity(0.11)
-        case .deletion: return GitForkTheme.red.opacity(0.10)
-        default: return .clear
-        }
-    }
-
-    private var accentBar: Color {
-        switch line?.kind {
-        case .addition: return GitForkTheme.green.opacity(0.85)
-        case .deletion: return GitForkTheme.red.opacity(0.85)
+        case .addition: return GitForkTheme.green.opacity(contrast == .increased ? 0.24 : 0.11)
+        case .deletion: return GitForkTheme.red.opacity(contrast == .increased ? 0.24 : 0.10)
         default: return .clear
         }
     }
 
     var body: some View {
         HStack(spacing: 0) {
-            Rectangle()
-                .fill(accentBar)
-                .frame(width: DiffLayout.accentBarWidth)
+            DiffMarker(kind: line?.kind)
 
             Text(lineNumber)
                 .font(.system(size: 10, design: .monospaced))
@@ -2212,7 +2208,6 @@ private enum ContinuousDiffTextStyle {
 private struct ContinuousDiffTextView: NSViewRepresentable {
     let lines: [ContinuousDiffTextLine]
     let style: ContinuousDiffTextStyle
-    let colorScheme: ColorScheme
     /// Wrapped text folds a long line into more visual rows; unwrapped text is
     /// clipped and the enclosing scroll view carries it sideways.
     var wraps = false
@@ -2287,10 +2282,8 @@ private struct ContinuousDiffTextView: NSViewRepresentable {
 
     private func foregroundColor(for line: ContinuousDiffTextLine) -> NSColor {
         switch line.kind {
-        case .addition:
-            NSColor(GitForkTheme.diffAddition(colorScheme))
-        case .deletion:
-            NSColor(GitForkTheme.diffDeletion(colorScheme))
+        case .addition, .deletion:
+            NSColor(Look.shared.colors.foreground)
         case .hunkHeader:
             style == .unified ? NSColor(GitForkTheme.blue) : secondaryTextColor
         default:
@@ -2320,7 +2313,7 @@ private final class DiffTextSurface: NSTextView {
 }
 
 private struct DiffLineView: View {
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
     let line: UnifiedDiffLine
     let isRangeSelected: Bool
     let allowsTextSelection: Bool
@@ -2329,8 +2322,7 @@ private struct DiffLineView: View {
     var height = DiffLayout.rowHeight
 
     private var foreground: Color {
-        if line.kind == .addition { return GitForkTheme.diffAddition(colorScheme) }
-        if line.kind == .deletion { return GitForkTheme.diffDeletion(colorScheme) }
+        if line.kind == .addition || line.kind == .deletion { return Look.shared.text }
         if line.kind == .hunkHeader { return GitForkTheme.blue }
         if line.text.hasPrefix("diff ") || line.text.hasPrefix("commit ") { return GitForkTheme.purple }
         return Look.shared.text
@@ -2338,15 +2330,9 @@ private struct DiffLineView: View {
 
     private var background: Color {
         if isRangeSelected { return GitForkTheme.blue.opacity(0.18) }
-        if line.kind == .addition { return GitForkTheme.green.opacity(0.11) }
-        if line.kind == .deletion { return GitForkTheme.red.opacity(0.10) }
+        if line.kind == .addition { return GitForkTheme.green.opacity(contrast == .increased ? 0.24 : 0.11) }
+        if line.kind == .deletion { return GitForkTheme.red.opacity(contrast == .increased ? 0.24 : 0.10) }
         if line.kind == .hunkHeader { return GitForkTheme.blue.opacity(0.08) }
-        return .clear
-    }
-
-    private var accentBar: Color {
-        if line.kind == .addition { return GitForkTheme.green.opacity(0.85) }
-        if line.kind == .deletion { return GitForkTheme.red.opacity(0.85) }
         return .clear
     }
 
@@ -2356,9 +2342,8 @@ private struct DiffLineView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Rectangle()
-                .fill(accentBar)
-                .frame(width: DiffLayout.accentBarWidth)
+            DiffMarker(kind: line.kind)
+                .frame(height: height, alignment: .top)
 
             lineNumber(line.oldLineNumber)
             lineNumber(line.newLineNumber)

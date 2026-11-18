@@ -46,6 +46,7 @@ final class GitSession: PaneContent {
         pendingChange = nil
         if store.selectedSection != .changes { store.selectChanges() }
         store.selectChangeEntry(id)
+        store.compactDetailShown = true
     }
 
     /// The branch it is on, for the session list.
@@ -99,6 +100,10 @@ final class GitSession: PaneContent {
     }
 }
 
+extension EnvironmentValues {
+    @Entry var compactGitDetail: Binding<Bool>?
+}
+
 /// A repository's git in a pane: a bar with where HEAD is, the tabs and
 /// the repository's actions; under it the changes or the history on the
 /// left, and the picked file or commit on the right. The history has the
@@ -112,6 +117,7 @@ struct GitSessionView: View {
     @AppStorage("gitReferencesWidth") private var referencesWidth = 220.0
     @AppStorage("gitListWidth") private var listWidth = 360.0
     @State private var paneWidth = CGFloat.infinity
+    private var compact: Bool { paneWidth < listWidth + 321 }
 
     /// The branches need room next to the list and the least of the detail.
     private var referencesFit: Bool {
@@ -123,11 +129,8 @@ struct GitSessionView: View {
     }
 
     var body: some View {
-        // In a pane narrower than its columns, e.g. in a small window, they
-        // start at its left edge and the pane cuts off the right of the
-        // last one. Centered, the pane cut off both ends.
         VStack(alignment: .leading, spacing: 0) {
-            GitSessionBar()
+            GitSessionBar(compact: compact)
             Rectangle().fill(look.divider).frame(height: 1)
             GitOperationBar()
             // Not a split view: it shares out new room between its columns,
@@ -148,12 +151,29 @@ struct GitSessionView: View {
                         GitChangesView(showingStashSheet: $showingStashSheet, stashScope: $stashScope)
                     }
                 }
-                .frame(width: listWidth)
+                .environment(\.compactGitDetail, compact ? $store.compactDetailShown : nil)
+                .frame(width: compact ? nil : listWidth)
+                .frame(maxWidth: compact ? .infinity : nil)
                 .background(look.sidebar)
-                ColumnResizer(width: $listWidth, range: 300...600)
-                    .zIndex(1)
-                DetailView()
-                    .frame(minWidth: 320, maxWidth: .infinity)
+                .accessibilityHidden(compact && store.compactDetailShown)
+                .allowsHitTesting(!compact || !store.compactDetailShown)
+                if !compact {
+                    ColumnResizer(width: $listWidth, range: 300...600).zIndex(1)
+                    DetailView().frame(minWidth: 320, maxWidth: .infinity)
+                }
+            }
+            .overlay {
+                if compact && store.compactDetailShown {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Button { store.compactDetailShown = false } label: {
+                            Label(store.selectedSection == .changes ? "Back to Changes" : "Back to History", systemImage: "chevron.left")
+                        }
+                        .padding(6)
+                        Divider()
+                        DetailView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .background(look.background)
+                }
             }
         }
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -201,6 +221,7 @@ private struct ColumnResizer: View {
 /// The bar on top of a git tab: where HEAD is, the tabs, the repository's
 /// actions and the repository.
 private struct GitSessionBar: View {
+    let compact: Bool
     @EnvironmentObject private var store: RepositoryStore
 
     var body: some View {
@@ -224,47 +245,75 @@ private struct GitSessionBar: View {
                 store.showHistory()
             }
             Spacer(minLength: 12)
-            ToolbarIconButton("Fetch", systemImage: "arrow.down.circle", help: "Fetch all remotes") {
-                store.fetch()
+            if compact {
+                Menu {
+                    Group {
+                        Button("Fetch", action: store.fetch)
+                        Button("Pull", action: store.pull)
+                        Button("Push…", action: store.requestPushConfirmation)
+                        Button("New Branch…") { store.showNewBranchSheet() }
+                        Button("Refresh", action: store.refresh)
+                    }.disabled(store.isLoading)
+                    Divider()
+                    Button("Git Command Log", action: showLog)
+                    Button("Open in Zed", action: store.openZedEditor)
+                    Button("Show in Finder", action: store.openInFinder)
+                } label: { Image(systemName: "ellipsis.circle") }
+                .menuIndicator(.hidden)
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .accessibilityLabel("Repository actions")
+            } else {
+                toolbarActions
+                repository.padding(.leading, 8)
             }
-            .disabled(store.isLoading)
-            ToolbarIconButton("Pull", systemImage: "arrow.down.to.line", help: "Pull with fast-forward only") {
-                store.pull()
-            }
-            .disabled(store.isLoading)
-            ToolbarIconButton("Push", systemImage: "arrow.up.to.line", help: "Push the current branch") {
-                store.requestPushConfirmation()
-            }
-            .disabled(store.isLoading)
-            ToolbarSeparator()
-            ToolbarIconButton(
-                "New Branch", systemImage: "arrow.triangle.branch", badge: "plus.circle.fill",
-                help: "Create a branch at HEAD"
-            ) {
-                store.showNewBranchSheet()
-            }
-            .disabled(store.isLoading)
-            ToolbarIconButton("Refresh", systemImage: "arrow.clockwise", help: "Read the repository again (⌘R)") {
-                store.refresh()
-            }
-            .disabled(store.isLoading)
-            ToolbarSeparator()
-            ToolbarIconButton("Git Command Log", systemImage: "terminal", help: "The git commands run here, and how each went (⇧⌘L)") {
-                GitCommandLog.shared.requestFocus(on: store.repositoryURL)
-                GitWindows.openCommandLog()
-            }
-            ToolbarIconButton("Open in Zed", systemImage: "chevron.left.forwardslash.chevron.right", help: "Open the repository in Zed") {
-                store.openZedEditor()
-            }
-            ToolbarIconButton("Show in Finder", systemImage: "folder", help: "Show the repository in Finder") {
-                store.openInFinder()
-            }
-            repository
-                .padding(.leading, 8)
         }
         .padding(.leading, 6)
         .padding(.trailing, 10)
         .frame(height: 36)
+    }
+
+    private func showLog() {
+        GitCommandLog.shared.requestFocus(on: store.repositoryURL)
+        GitWindows.openCommandLog()
+    }
+
+    @ViewBuilder
+    private var toolbarActions: some View {
+        ToolbarIconButton("Fetch", systemImage: "arrow.down.circle", help: "Fetch all remotes") {
+            store.fetch()
+        }
+        .disabled(store.isLoading)
+        ToolbarIconButton("Pull", systemImage: "arrow.down.to.line", help: "Pull with fast-forward only") {
+            store.pull()
+        }
+        .disabled(store.isLoading)
+        ToolbarIconButton("Push", systemImage: "arrow.up.to.line", help: "Push the current branch") {
+            store.requestPushConfirmation()
+        }
+        .disabled(store.isLoading)
+        ToolbarSeparator()
+        ToolbarIconButton(
+            "New Branch", systemImage: "arrow.triangle.branch", badge: "plus.circle.fill",
+            help: "Create a branch at HEAD"
+        ) {
+            store.showNewBranchSheet()
+        }
+        .disabled(store.isLoading)
+        ToolbarIconButton("Refresh", systemImage: "arrow.clockwise", help: "Read the repository again (⌘R)") {
+            store.refresh()
+        }
+        .disabled(store.isLoading)
+        ToolbarSeparator()
+        ToolbarIconButton("Git Command Log", systemImage: "terminal", help: "The git commands run here, and how each went (⇧⌘L)") {
+            showLog()
+        }
+        ToolbarIconButton("Open in Zed", systemImage: "chevron.left.forwardslash.chevron.right", help: "Open the repository in Zed") {
+            store.openZedEditor()
+        }
+        ToolbarIconButton("Show in Finder", systemImage: "folder", help: "Show the repository in Finder") {
+            store.openInFinder()
+        }
     }
 
     /// The repository, and the worktree when it is not the main one.

@@ -7,8 +7,9 @@
 //! screen, as Claude's fullscreen mode and Codex do: then the terminal only
 //! has the rows on screen.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -31,17 +32,177 @@ pub fn markdown(agent: Agent, id: &str) -> Option<String> {
 }
 
 fn render_file(agent: Agent, path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
-    let lines: Vec<Value> = text
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let parts = match agent {
-        Agent::Claude => claude_parts(&lines),
-        Agent::Codex => codex_parts(&lines),
-        Agent::Shell | Agent::Git => return None,
-    };
-    Some(render(agent, &parts))
+    let mut markdown = Markdown::default();
+    let reader = BufReader::new(fs::File::open(path).ok()?);
+    visit_parts(agent, reader, false, |part| markdown.push(agent, part))?;
+    Some(markdown.finish())
+}
+
+/// A user prompt and the assistant text that followed it. Tool calls are
+/// still included in exports, but take no space in the read-only preview.
+#[derive(uniffi::Record)]
+pub struct PreviewTurn {
+    pub prompt: String,
+    pub answer: String,
+}
+
+#[derive(uniffi::Record)]
+pub struct TranscriptPreview {
+    pub turns: Vec<PreviewTurn>,
+    pub has_older: bool,
+}
+
+pub fn preview(agent: Agent, id: &str, count: u32) -> Option<TranscriptPreview> {
+    preview_file(agent, &transcript_path(agent, id)?, count as usize)
+}
+
+fn preview_file(agent: Agent, path: &Path, count: usize) -> Option<TranscriptPreview> {
+    let file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut reader = BufReader::new(file);
+    // Most recent exchanges fit in the tail. Only use a partial result when
+    // we saw an earlier prompt on the same branch. Otherwise read from the start.
+    const TAIL: u64 = 64 * 1024;
+    if len > TAIL {
+        reader.seek(SeekFrom::Start(len - TAIL)).ok()?;
+        reader.skip_until(b'\n').ok()?;
+        let result = collect_turns(agent, &mut reader, count, true)?;
+        if result.has_older {
+            return Some(result);
+        }
+        reader.rewind().ok()?;
+    }
+    collect_turns(agent, reader, count, false)
+}
+
+fn collect_turns(
+    agent: Agent,
+    reader: impl BufRead,
+    count: usize,
+    partial: bool,
+) -> Option<TranscriptPreview> {
+    let mut turns = VecDeque::new();
+    let mut total = 0;
+    let mut prompts = 0;
+    visit_parts(agent, reader, partial, |part| {
+        if matches!(part, Part::Tool(_)) {
+            return;
+        }
+        if matches!(part, Part::User(_)) {
+            prompts += 1;
+        }
+        if matches!(part, Part::User(_)) || total == 0 {
+            total += 1;
+            if turns.len() == count {
+                turns.pop_front();
+            }
+            if count > 0 {
+                turns.push_back(PreviewTurn {
+                    prompt: String::new(),
+                    answer: String::new(),
+                });
+            }
+        }
+        if let Some(turn) = turns.back_mut() {
+            match part {
+                Part::User(prompt) => turn.prompt = prompt,
+                Part::Text(text) => {
+                    if !turn.answer.is_empty() {
+                        turn.answer.push_str("\n\n");
+                    }
+                    turn.answer.push_str(&text);
+                }
+                Part::Tool(_) => {}
+            }
+        }
+    })?;
+    Some(TranscriptPreview {
+        turns: turns.into(),
+        has_older: if partial {
+            prompts > count
+        } else {
+            total > count
+        },
+    })
+}
+
+struct ClaudeRecord {
+    parent: Option<String>,
+    parts: Vec<Part>,
+}
+
+fn visit_parts(
+    agent: Agent,
+    mut reader: impl BufRead,
+    partial: bool,
+    mut visit: impl FnMut(Part),
+) -> Option<()> {
+    let mut line = String::new();
+    let mut parts = Vec::new();
+    let mut records = Vec::new();
+    let mut index = HashMap::new();
+    let mut tip = None;
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            break;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match agent {
+            Agent::Codex => {
+                codex_record(&v, &mut parts);
+                parts.drain(..).for_each(&mut visit);
+            }
+            Agent::Claude => {
+                let pos = records.len();
+                if let Some(id) = v["uuid"].as_str() {
+                    index.insert(id.to_owned(), pos);
+                    if (v["type"] == "user" || v["type"] == "assistant") && v["isSidechain"] != true
+                    {
+                        tip = Some(pos);
+                    }
+                }
+                let mut parts = Vec::new();
+                if v["isSidechain"] != true {
+                    claude_record(&v, &mut parts);
+                }
+                let parent = v["parentUuid"]
+                    .as_str()
+                    .or_else(|| v["logicalParentUuid"].as_str())
+                    .map(str::to_owned);
+                records.push(ClaudeRecord { parent, parts });
+            }
+            Agent::Shell | Agent::Git => return None,
+        }
+    }
+    if agent == Agent::Claude {
+        let mut kept = HashSet::new();
+        if let Some(mut at) = tip {
+            loop {
+                kept.insert(at);
+                let Some(parent) = &records[at].parent else {
+                    break;
+                };
+                match index.get(parent) {
+                    Some(&i) if i < at => at = i,
+                    _ => {
+                        if !partial {
+                            kept.extend(0..at);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        for (i, record) in records.into_iter().enumerate() {
+            if (tip.is_none() && !partial) || kept.contains(&i) {
+                record.parts.into_iter().for_each(&mut visit);
+            }
+        }
+    }
+    Some(())
 }
 
 /// Claude: `<claude dir>/projects/<encoded cwd>/<id>.jsonl`. Codex:
@@ -82,104 +243,51 @@ fn find_file(dir: &Path, suffix: &str) -> Option<PathBuf> {
     None
 }
 
-fn claude_parts(lines: &[Value]) -> Vec<Part> {
-    let branch = claude_branch(lines);
-    let mut parts = Vec::new();
-    for (i, v) in lines.iter().enumerate() {
-        if branch.as_ref().is_some_and(|b| !b.contains(&i)) || v["isSidechain"] == true {
-            continue;
-        }
-        let content = &v["message"]["content"];
-        match v["type"].as_str() {
-            // Not what Claude adds by itself, like a compaction's summary.
-            Some("user") if v["isMeta"] != true && v["isCompactSummary"] != true => {
-                if let Some(text) = user_text(content) {
-                    parts.push(Part::User(text));
-                }
+fn claude_record(v: &Value, parts: &mut Vec<Part>) {
+    let content = &v["message"]["content"];
+    match v["type"].as_str() {
+        // Not what Claude adds by itself, like a compaction's summary.
+        Some("user") if v["isMeta"] != true && v["isCompactSummary"] != true => {
+            if let Some(text) = user_text(content) {
+                parts.push(Part::User(text));
             }
-            Some("assistant") => {
-                for block in content.as_array().into_iter().flatten() {
-                    match block["type"].as_str() {
-                        Some("text") => push_text(&mut parts, block["text"].as_str()),
-                        Some("tool_use") => {
-                            let one = json!({ "message": { "content": [block] } });
-                            parts.extend(action::claude(&one).map(Part::Tool));
-                        }
-                        _ => {}
+        }
+        Some("assistant") => {
+            for block in content.as_array().into_iter().flatten() {
+                match block["type"].as_str() {
+                    Some("text") => push_text(parts, block["text"].as_str()),
+                    Some("tool_use") => {
+                        let one = json!({ "message": { "content": [block] } });
+                        parts.extend(action::claude(&one).map(Part::Tool));
                     }
+                    _ => {}
                 }
             }
-            _ => {}
         }
+        _ => {}
     }
-    parts
 }
 
-/// The lines of the branch the conversation ended on, by index. Each line
-/// names the one before it (`parentUuid`); rewinding to an earlier prompt
-/// starts a new branch in the same file, and the old one stays. A
-/// compaction names the line before it in `logicalParentUuid`. None when
-/// the lines don't say, so all of them count.
-fn claude_branch(lines: &[Value]) -> Option<HashSet<usize>> {
-    let index: HashMap<&str, usize> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, v)| Some((v["uuid"].as_str()?, i)))
-        .collect();
-    let last = lines.iter().rposition(|v| {
-        (v["type"] == "user" || v["type"] == "assistant")
-            && v["isSidechain"] != true
-            && v["uuid"].is_string()
-    })?;
-    let mut kept = HashSet::new();
-    let mut at = last;
-    loop {
-        kept.insert(at);
-        let v = &lines[at];
-        let Some(parent) = v["parentUuid"]
-            .as_str()
-            .or_else(|| v["logicalParentUuid"].as_str())
-        else {
-            break;
-        };
-        match index.get(parent) {
-            Some(&i) if i < at => at = i,
-            _ => {
-                // The chain breaks here: the parent is missing, or comes
-                // later in the file, as a compaction's can. Keep everything
-                // before it rather than lose the start of the conversation.
-                kept.extend(0..at);
-                break;
+fn codex_record(v: &Value, parts: &mut Vec<Part>) {
+    if v["type"] != "response_item" {
+        return;
+    }
+    let p = &v["payload"];
+    match (p["type"].as_str(), p["role"].as_str()) {
+        (Some("message"), Some("user")) => {
+            if let Some(text) = user_text(&p["content"]) {
+                parts.push(Part::User(text));
             }
         }
-    }
-    Some(kept)
-}
-
-fn codex_parts(lines: &[Value]) -> Vec<Part> {
-    let mut parts = Vec::new();
-    for v in lines {
-        if v["type"] != "response_item" {
-            continue;
-        }
-        let p = &v["payload"];
-        match (p["type"].as_str(), p["role"].as_str()) {
-            (Some("message"), Some("user")) => {
-                if let Some(text) = user_text(&p["content"]) {
-                    parts.push(Part::User(text));
+        (Some("message"), Some("assistant")) => {
+            for block in p["content"].as_array().into_iter().flatten() {
+                if block["type"] == "output_text" {
+                    push_text(parts, block["text"].as_str());
                 }
             }
-            (Some("message"), Some("assistant")) => {
-                for block in p["content"].as_array().into_iter().flatten() {
-                    if block["type"] == "output_text" {
-                        push_text(&mut parts, block["text"].as_str());
-                    }
-                }
-            }
-            _ => parts.extend(action::codex(p).map(Part::Tool)),
         }
+        _ => parts.extend(action::codex(p).map(Part::Tool)),
     }
-    parts
 }
 
 /// What the user typed: the message's text, without what the agent added
@@ -217,43 +325,53 @@ fn push_text(parts: &mut Vec<Part>, text: Option<&str>) {
 
 /// A `## You` or `## Claude` heading each time the speaker changes; tool
 /// calls as list items.
-fn render(agent: Agent, parts: &[Part]) -> String {
-    let name = if agent == Agent::Codex {
-        "Codex"
-    } else {
-        "Claude"
-    };
-    let mut out = String::new();
-    let mut user = None;
-    let mut in_list = false;
-    for part in parts {
-        let is_user = matches!(part, Part::User(_));
-        if user != Some(is_user) {
-            if in_list {
-                out.push('\n');
+#[derive(Default)]
+struct Markdown {
+    text: String,
+    user: Option<bool>,
+    in_list: bool,
+}
+
+impl Markdown {
+    fn push(&mut self, agent: Agent, part: Part) {
+        let user = matches!(part, Part::User(_));
+        if self.user != Some(user) {
+            if self.in_list {
+                self.text.push('\n');
             }
-            out.push_str(&format!("## {}\n\n", if is_user { "You" } else { name }));
-            user = Some(is_user);
-            in_list = false;
+            let name = if user {
+                "You"
+            } else if agent == Agent::Codex {
+                "Codex"
+            } else {
+                "Claude"
+            };
+            self.text.push_str(&format!("## {name}\n\n"));
+            self.user = Some(user);
+            self.in_list = false;
         }
         match part {
             Part::User(text) | Part::Text(text) => {
-                if in_list {
-                    out.push('\n');
-                    in_list = false;
+                if self.in_list {
+                    self.text.push('\n');
                 }
-                out.push_str(text);
-                out.push_str("\n\n");
+                self.in_list = false;
+                self.text.push_str(&text);
+                self.text.push_str("\n\n");
             }
-            Part::Tool(a) => {
-                out.push_str(&format!("- {}: {}\n", label(a.kind), a.detail));
-                in_list = true;
+            Part::Tool(action) => {
+                self.text
+                    .push_str(&format!("- {}: {}\n", label(action.kind), action.detail));
+                self.in_list = true;
             }
         }
     }
-    let mut out = out.trim_end().to_string();
-    out.push('\n');
-    out
+
+    fn finish(mut self) -> String {
+        self.text.truncate(self.text.trim_end().len());
+        self.text.push('\n');
+        self.text
+    }
 }
 
 fn label(kind: ActionKind) -> &'static str {
@@ -357,6 +475,26 @@ mod tests {
             md,
             "## You\n\nList the files\n\n## Codex\n\n- Ran: ls -la\n\nTwo files.\n"
         );
+    }
+
+    #[test]
+    fn preview_reads_the_newest_turns_on_the_active_branch() {
+        let rows = r#"{"type":"user","uuid":"a","message":{"content":"First"}}
+{"type":"assistant","uuid":"b","parentUuid":"a","message":{"content":[{"type":"text","text":"One"}]}}
+{"type":"user","uuid":"c","parentUuid":"b","message":{"content":"Discarded"}}
+{"type":"user","uuid":"d","parentUuid":"b","message":{"content":"Second"}}
+{"type":"assistant","uuid":"e","parentUuid":"d","message":{"content":[{"type":"text","text":"Two"}]}}"#;
+        let path = temp("preview", &format!("{}\n{rows}", " ".repeat(70000)));
+        let latest = preview_file(Agent::Claude, &path, 1).unwrap();
+        assert!(latest.has_older);
+        assert_eq!(latest.turns.len(), 1);
+        assert_eq!(latest.turns[0].prompt, "Second");
+        assert_eq!(latest.turns[0].answer, "Two");
+        let all = preview_file(Agent::Claude, &path, 5).unwrap();
+        assert!(!all.has_older);
+        assert_eq!(all.turns.len(), 2);
+        assert_eq!(all.turns[0].prompt, "First");
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

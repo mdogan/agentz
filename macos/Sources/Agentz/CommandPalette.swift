@@ -79,31 +79,36 @@ enum PaletteSearch {
         return items.enumerated().compactMap { index, item -> (Int, Int, Item)? in
             let title = normalized(title(item))
             let detail = normalized(detail(item))
-            var score = 0
-            for word in words {
-                if title.hasPrefix(word) {
-                    continue
-                } else if title.contains(word) {
-                    score += 1
-                } else if detail.contains(word) {
-                    score += 2
-                } else {
-                    var remaining = word[...]
-                    for character in title where character == remaining.first {
-                        remaining = remaining.dropFirst()
-                        if remaining.isEmpty { break }
-                    }
-                    guard remaining.isEmpty else { return nil }
-                    score += 3
-                }
-            }
+            guard let score = score(words, title: title, detail: detail) else { return nil }
             return (score, index, item)
         }
         .sorted { ($0.0, $0.1) < ($1.0, $1.1) }
         .map { $0.2 }
     }
 
-    private static func normalized(_ text: String) -> String {
+    nonisolated static func score(_ words: [Substring], title: String, detail: String) -> Int? {
+        var score = 0
+        for word in words {
+            if title.hasPrefix(word) {
+                continue
+            } else if title.contains(word) {
+                score += 1
+            } else if detail.contains(word) {
+                score += 2
+            } else {
+                var remaining = word[...]
+                for character in title where character == remaining.first {
+                    remaining = remaining.dropFirst()
+                    if remaining.isEmpty { break }
+                }
+                guard remaining.isEmpty else { return nil }
+                score += 3
+            }
+        }
+        return score
+    }
+
+    nonisolated static func normalized(_ text: String) -> String {
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 }
@@ -115,6 +120,7 @@ enum PaletteSearch {
 /// app window. Only one shows at a time.
 @MainActor
 final class PaletteSheet {
+    let sessionIndex = SessionSearchIndex()
     private(set) var sheet: NSWindow?
 
     var isShown: Bool { sheet != nil }
@@ -182,7 +188,8 @@ struct PaletteView<Item: Identifiable, Row: View>: View {
     /// What Return does to the selection, e.g. "run".
     let verb: String
     let items: [Item]
-    let search: (_ items: [Item], _ query: String) -> [Item]
+    var search: ((_ items: [Item], _ query: String) -> [Item])?
+    var backgroundSearch: ((_ query: String) async -> [Item])?
     var isEnabled: (Item) -> Bool = { _ in true }
     /// The item to select first among the shown ones; nil selects the first
     /// enabled one.
@@ -196,7 +203,15 @@ struct PaletteView<Item: Identifiable, Row: View>: View {
     @State private var selection: Item.ID?
     @State private var done = false
 
-    private var shown: [Item] { search(items, query) }
+    @State private var completedQuery: String?
+    @State private var matches: [Item] = []
+    @State private var submitWhenReady: String?
+    private var pending: Bool { backgroundSearch != nil && !query.isEmpty && completedQuery != query }
+    private var shown: [Item] {
+        if query.isEmpty { return items }
+        if let search { return search(items, query) }
+        return pending ? [] : matches
+    }
 
     var body: some View {
         let look = Look.shared
@@ -229,7 +244,20 @@ struct PaletteView<Item: Identifiable, Row: View>: View {
         .padding(20)
         .frame(width: 620)
         .onAppear(perform: selectFirst)
-        .onChange(of: query) { selectFirst() }
+        .onChange(of: query) {
+            if submitWhenReady != query { submitWhenReady = nil }
+            selectFirst()
+        }
+        .task(id: query) {
+            guard let backgroundSearch else { return }
+            let requested = query
+            let result = await backgroundSearch(requested)
+            guard !Task.isCancelled, query == requested else { return }
+            matches = result
+            completedQuery = requested
+            if !requested.isEmpty { selectFirst() }
+            if submitWhenReady == requested { submitWhenReady = nil; submit() }
+        }
     }
 
     private var list: some View {
@@ -245,7 +273,7 @@ struct PaletteView<Item: Identifiable, Row: View>: View {
             }
             .frame(height: 350)
             .overlay {
-                if shown.isEmpty {
+                if pending { ProgressView().controlSize(.small) } else if shown.isEmpty {
                     Text(empty).foregroundStyle(Look.shared.secondary)
                 }
             }
@@ -289,6 +317,7 @@ struct PaletteView<Item: Identifiable, Row: View>: View {
     }
 
     private func submit() {
+        if pending { submitWhenReady = query; return }
         guard !done, let item = shown.first(where: { $0.id == selection && isEnabled($0) }) else { return }
         done = true
         choose(item)

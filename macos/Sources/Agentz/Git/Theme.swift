@@ -44,16 +44,7 @@ enum GitForkTheme {
         identityColor(for: name)
     }
 
-    /// Foreground for added diff lines: the theme's green, as a terminal
-    /// shows it.
-    static func diffAddition(_: ColorScheme) -> Color {
-        green
-    }
 
-    /// Foreground for removed diff lines: the theme's red.
-    static func diffDeletion(_: ColorScheme) -> Color {
-        red
-    }
 }
 
 /// A round, flat avatar with a person's initials. The fill color comes

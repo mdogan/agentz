@@ -40,7 +40,10 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var conflictDocument: ConflictDocument?
     @Published private(set) var isLoading = false
     @Published private(set) var operationLabel: String?
-    @Published var selectedSection: WorkspaceSection = .history
+    @Published var compactDetailShown = false
+    @Published var selectedSection: WorkspaceSection = .history {
+        didSet { if oldValue != selectedSection { compactDetailShown = false } }
+    }
     @Published private(set) var historyScope: CommitHistoryScope = .currentBranch
     @Published var selectedCommit: GitCommit?
     @Published private(set) var selectedChange: WorkingChange?
@@ -48,7 +51,12 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var changeSelection = ChangeSelectionModel()
     @Published var selectedReference: GitReference?
     @Published var selectedStash: GitStash?
-    @Published var searchText = ""
+    @Published var searchText = "" {
+        didSet { if oldValue != searchText { searchHistory() } }
+    }
+    @Published private(set) var searchingHistory = false
+    @Published private var olderMatches: [GitCommit] = []
+    private var historySearchTask: Task<Void, Never>?
     @Published var commitMessage = ""
     @Published var amend = false
     @Published var signCommit = false {
@@ -157,11 +165,39 @@ final class RepositoryStore: ObservableObject {
 
     var filteredCommits: [GitCommit] {
         guard !searchText.isEmpty else { return commits }
-        return commits.filter {
-            $0.subject.localizedCaseInsensitiveContains(searchText)
-                || $0.authorName.localizedCaseInsensitiveContains(searchText)
-                || $0.hash.localizedCaseInsensitiveContains(searchText)
-                || $0.decorations.contains { $0.localizedCaseInsensitiveContains(searchText) }
+        let loaded = commits.filter { $0.matchesHistory(searchText) }
+        var seen = Set(loaded.map(\.hash))
+        return loaded + olderMatches.filter { seen.insert($0.hash).inserted }
+    }
+
+    private func searchHistory() {
+        historySearchTask?.cancel()
+        olderMatches = []
+        let query = searchText, scope = historyScope
+        guard !query.isEmpty, canLoadMoreHistory, let root = repositoryURL else {
+            searchingHistory = false
+            return
+        }
+        searchingHistory = true
+        let offset = historyNextOffset
+        historySearchTask = Task { [weak self, client] in
+            do {
+                try await Task.sleep(for: .milliseconds(150))
+                var next = offset
+                let batch = scope == .lostAndDangling ? Int(Int32.max) : 2048
+                while !Task.isCancelled {
+                    let page = try await client.searchPage(at: root, scope: scope, offset: next, limit: batch, query: query)
+                    try Task.checkCancellation()
+                    guard let self, self.historyScope == scope, self.isCurrentRepository(root) else { return }
+                    if !page.matches.isEmpty { self.olderMatches += page.matches }
+                    next += page.count
+                    if page.count < batch { break }
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                self?.show(error)
+            }
+            if !Task.isCancelled { self?.searchingHistory = false }
         }
     }
 
@@ -395,6 +431,8 @@ final class RepositoryStore: ObservableObject {
     private func replaceCommit(_ commit: GitCommit) {
         if let index = commits.firstIndex(where: { $0.hash == commit.hash }) {
             commits[index] = commit
+        } else if let index = olderMatches.firstIndex(where: { $0.hash == commit.hash }) {
+            olderMatches[index] = commit
         }
     }
 
@@ -1321,7 +1359,14 @@ final class RepositoryStore: ObservableObject {
 
             isLoading = true
             defer { isLoading = false }
-            try await reload(root: root, historyScope: historyScope)
+            if let previous = monitoredState, previous.sameHistory(as: state) {
+                let previousOrder = changeOrder
+                changes = GitParser.parseStatus(Data(state.status.utf8))
+                monitoredState = state
+                if selectedSection == .changes { reconcileChangeSelection(previousOrder: previousOrder) }
+            } else {
+                try await reload(root: root, historyScope: historyScope)
+            }
         } catch {
             // External Git operations can leave short-lived lock or ref states.
             // The next polling pass retries without interrupting the user.
@@ -1347,12 +1392,14 @@ final class RepositoryStore: ObservableObject {
     ) async throws {
         cancelHistoryPagination(resetState: false)
         let previousChangeOrder = changeOrder
+        let depth = max(historyPageSize, commits.count)
+        let previousSelection = selectedCommit?.hash
         let load: RepositoryLoad
         do {
             load = try await client.snapshotAndStateToken(
                 at: root,
                 historyScope: historyScope,
-                historyLimit: historyPageSize
+                historyLimit: depth
             )
         } catch {
             // The filter's branch may be gone, deleted in a terminal or by a
@@ -1371,7 +1418,7 @@ final class RepositoryStore: ObservableObject {
             load = try await client.snapshotAndStateToken(
                 at: root,
                 historyScope: fallback,
-                historyLimit: historyPageSize
+                historyLimit: depth
             )
         }
         try Task.checkCancellation()
@@ -1388,7 +1435,26 @@ final class RepositoryStore: ObservableObject {
         stashes = snapshot.stashes
         worktrees = snapshot.worktrees
         operation = snapshot.operation
-        replaceHistory(snapshot.commits)
+        var history = snapshot.commits
+        // Incoming commits can push even a previously loaded selection past the last page.
+        if let hash = previousSelection, history.count == depth,
+           !history.contains(where: { $0.hash == hash }),
+           commits.contains(where: { $0.hash == hash }) || olderMatches.contains(where: { $0.hash == hash }) {
+            var count = depth
+            var offset = depth
+            var seen = Set(history.map(\.hash))
+            while count >= historyPageSize && !seen.contains(hash) {
+                let page = try await client.history(at: root, scope: self.historyScope, offset: offset, limit: historyPageSize)
+                try Task.checkCancellation()
+                guard isCurrentRepository(root) else { return }
+                history.append(contentsOf: page.filter { seen.insert($0.hash).inserted })
+                count = page.count
+                offset += count
+            }
+            replaceHistory(history, nextOffset: offset, more: count >= historyPageSize)
+        } else {
+            replaceHistory(history, more: history.count == depth)
+        }
 
         // The selected reference is a value, so it goes stale whenever its
         // target, upstream, or name changes. Re-bind it to the reloaded ref of
@@ -1524,10 +1590,11 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
-    private func replaceHistory(_ loadedCommits: [GitCommit]) {
+    private func replaceHistory(_ loadedCommits: [GitCommit], nextOffset: Int? = nil, more: Bool? = nil) {
         commits = loadedCommits
-        historyNextOffset = loadedCommits.count
-        canLoadMoreHistory = loadedCommits.count == historyPageSize
+        historyNextOffset = nextOffset ?? loadedCommits.count
+        canLoadMoreHistory = more ?? (loadedCommits.count == historyPageSize)
+        searchHistory()
     }
 
     private func cancelHistoryPagination(resetState: Bool = true) {
@@ -1617,6 +1684,9 @@ final class RepositoryStore: ObservableObject {
     }
 
     private func prepareForRepositorySwitch() {
+        historySearchTask?.cancel()
+        olderMatches = []
+        searchingHistory = false
         cancelHistoryPagination()
         repositoryPathTask?.cancel()
         repositoryPathTask = nil

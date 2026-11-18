@@ -3,6 +3,7 @@ import AppKit
 import SwiftUI
 
 struct HistoryView: View {
+    @Environment(\.compactGitDetail) private var openDetail
     @EnvironmentObject private var store: RepositoryStore
     /// The pane has room for the branches next to the history.
     let canShowReferences: Bool
@@ -21,12 +22,13 @@ struct HistoryView: View {
         let look = Look.shared
         let remoteBranches = Set(store.references.filter { $0.kind == .remoteBranch }.map(\.name))
         VStack(spacing: 0) {
-            HistoryHeader(commitCount: commits.count, canShowReferences: canShowReferences)
+            HistoryHeader(canShowReferences: canShowReferences)
 
             Rectangle().fill(look.divider).frame(height: 1)
 
             if commits.isEmpty {
-                GitPlaceholder(emptyDescription)
+                if store.searchingHistory { ProgressView("Searching history…").frame(maxWidth: .infinity, maxHeight: .infinity) }
+                else { GitPlaceholder(emptyDescription) }
             } else {
                 ScrollViewReader { proxy in
                     List(selection: commitSelection) {
@@ -38,7 +40,14 @@ struct HistoryView: View {
                                 graphColumnCount: graph?.columnCount ?? 0,
                                 showsGraph: showsGraph
                             )
-                            .tag(commit)
+                            .contentShape(Rectangle())
+                            .simultaneousGesture(TapGesture().onEnded {
+                                if let openDetail {
+                                    store.selectCommit(commit)
+                                    openDetail.wrappedValue = true
+                                }
+                            })
+                            .tag(commit.hash)
                             .contextMenu {
                                 CommitMenu(commit: commit)
                             }
@@ -51,7 +60,7 @@ struct HistoryView: View {
                             )
                         }
 
-                        if store.canLoadMoreHistory || store.isLoadingMoreHistory {
+                        if store.searchText.isEmpty && (store.canLoadMoreHistory || store.isLoadingMoreHistory) {
                             HStack {
                                 Spacer()
                                 ProgressView()
@@ -68,6 +77,11 @@ struct HistoryView: View {
                             }
                         }
                     }
+                    .onKeyPress(.rightArrow) {
+                        guard let openDetail, store.selectedCommit != nil else { return .ignored }
+                        openDetail.wrappedValue = true
+                        return .handled
+                    }
                     .listStyle(.plain)
                     .lookListBackground(look.sidebar)
                     .onChange(of: store.commitReveal) { _, reveal in
@@ -81,10 +95,16 @@ struct HistoryView: View {
         }
     }
 
-    private var commitSelection: Binding<GitCommit?> {
+    private var commitSelection: Binding<String?> {
         Binding(
-            get: { store.selectedCommit },
-            set: { store.selectCommit($0) }
+            get: { store.selectedCommit?.hash },
+            set: { hash in
+                if let hash, let selected = store.filteredCommits.first(where: { $0.hash == hash }) {
+                    store.selectCommit(selected)
+                } else if hash == nil {
+                    store.selectCommit(nil)
+                }
+            }
         )
     }
 
@@ -339,11 +359,10 @@ private struct CommitGraph: View {
 }
 
 /// The top of the history: the button that shows or hides the branches, a
-/// search over the loaded commits, and, when the branches can't say what
+/// search over the selected history, and, when the branches can't say what
 /// the commits are limited to, a menu that does.
 private struct HistoryHeader: View {
     @EnvironmentObject private var store: RepositoryStore
-    let commitCount: Int
     let canShowReferences: Bool
     @AppStorage("gitReferencesShown") private var referencesShown = true
     @FocusState private var searchFocused: Bool
@@ -393,7 +412,7 @@ private struct HistoryHeader: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(look.fieldBackground, in: RoundedRectangle(cornerRadius: 6))
-            .help("Find commits by message, author, hash or branch, among those loaded")
+            .help("Find commits by message, author, hash or branch, in the selected history")
 
             if showsMenu {
                 PopUpButton(look: look, help: "Showing \(scope.help). Click to pick a branch.", menu: branchMenu) {
@@ -430,7 +449,7 @@ private struct HistoryHeader: View {
 
     private var placeholder: String {
         showsAll || store.showsCurrentBranch
-            ? "Search \(commitCount) commit\(commitCount == 1 ? "" : "s")"
+            ? "Search history"
             : "Search"
     }
 

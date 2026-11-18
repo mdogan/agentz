@@ -114,6 +114,7 @@ struct Parsed {
 }
 
 struct CacheEntry {
+    agent: Agent,
     len: u64,
     mtime: SystemTime,
     created: SystemTime,
@@ -155,53 +156,76 @@ impl Scanner {
     /// left out if no scan read it yet, so a first scan can show recent
     /// sessions sooner; a later scan without it reads the rest.
     pub fn scan(&mut self, since: Option<SystemTime>) -> Vec<Session> {
-        let mut out = Vec::new();
-        let mut seen = Vec::new();
-
+        let mut seen = std::collections::HashSet::new();
         if let Some(dir) = claude_projects_dir() {
-            let mut windows = std::mem::take(&mut self.claude_windows);
-            let sizes = windows.read();
             for path in claude_files(&dir) {
-                if let Some(mut s) = self.visit(&path, Agent::Claude, since) {
-                    if let Some(c) = &mut s.context {
-                        c.size = sizes.get(&s.id).copied();
-                    }
-                    out.push(s);
-                }
-                seen.push(path);
+                self.refresh(&path, Agent::Claude, since);
+                seen.insert(path);
             }
-            self.claude_windows = windows;
         }
-
         if let Some(home) = codex_home() {
-            // Taken out while `visit` borrows the scanner.
-            let mut thread_names = std::mem::take(&mut self.thread_names);
-            let names = thread_names.read(&home.join("session_index.jsonl"));
-            let mut files = Vec::new();
-            walk_jsonl(&home.join("sessions"), &mut files);
-            let mut by_mtime = Vec::new();
-            for path in files {
-                if let Some(mut s) = self.visit(&path, Agent::Codex, since) {
-                    if let Some(name) = names.get(&s.id) {
-                        s.title = name.clone();
-                    }
-                    out.push(s);
-                }
-                if let Some(e) = self.cache.get(&path) {
-                    by_mtime.push((e.mtime, path.clone()));
-                }
-                seen.push(path);
+            let mut paths = Vec::new();
+            walk_jsonl(&home.join("sessions"), &mut paths);
+            for path in paths {
+                self.refresh(&path, Agent::Codex, since);
+                seen.insert(path);
             }
-            by_mtime.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
-            self.codex_files = by_mtime.into_iter().map(|(_, p)| p).collect();
-            self.thread_names = thread_names;
         }
+        self.cache.retain(|path, _| seen.contains(path));
+        self.list()
+    }
 
-        let seen: std::collections::HashSet<_> = seen.into_iter().collect();
-        self.cache.retain(|p, _| seen.contains(p));
+    pub fn changed(&mut self, paths: &[PathBuf]) -> Vec<Session> {
+        let claude = claude_projects_dir();
+        let codex = codex_home().map(|h| h.join("sessions"));
+        for path in paths {
+            if path.extension().is_none_or(|ext| ext != "jsonl") {
+                continue;
+            }
+            let agent = if codex.as_ref().is_some_and(|root| path.starts_with(root)) {
+                Agent::Codex
+            } else if claude
+                .as_deref()
+                .is_some_and(|root| path.parent().and_then(Path::parent) == Some(root))
+            {
+                Agent::Claude
+            } else {
+                continue;
+            };
+            if path.is_file() {
+                self.refresh(path, agent, None);
+            } else {
+                self.cache.remove(path);
+            }
+        }
+        self.list()
+    }
 
-        out.sort_by_key(|s| std::cmp::Reverse(s.updated));
-        out
+    fn list(&mut self) -> Vec<Session> {
+        let names =
+            codex_home().map(|home| self.thread_names.read(&home.join("session_index.jsonl")));
+        let sizes = self.claude_windows.read();
+        let mut files = Vec::new();
+        let mut sessions = Vec::new();
+        for (path, entry) in &self.cache {
+            if entry.agent == Agent::Codex {
+                files.push((std::cmp::Reverse(entry.mtime), path));
+            }
+            if let Some(mut session) = Self::session(entry) {
+                if entry.agent == Agent::Codex {
+                    if let Some(name) = names.and_then(|names| names.get(&session.id)) {
+                        session.title.clone_from(name);
+                    }
+                } else if let Some(context) = &mut session.context {
+                    context.size = sizes.get(&session.id).copied();
+                }
+                sessions.push(session);
+            }
+        }
+        files.sort_unstable();
+        self.codex_files = files.into_iter().map(|(_, p)| p.clone()).collect();
+        sessions.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
+        sessions
     }
 
     /// Codex rollout files from the last scan, newest first.
@@ -209,18 +233,24 @@ impl Scanner {
         &self.codex_files
     }
 
+    #[cfg(test)]
     fn visit(&mut self, path: &Path, agent: Agent, since: Option<SystemTime>) -> Option<Session> {
+        self.refresh(path, agent, since)?;
+        Self::session(self.cache.get(path)?)
+    }
+
+    fn refresh(&mut self, path: &Path, agent: Agent, since: Option<SystemTime>) -> Option<()> {
         let meta = fs::metadata(path).ok()?;
         let len = meta.len();
         let mtime = meta.modified().ok()?;
         let created = meta.created().unwrap_or(mtime);
 
-        let entry = match self.cache.get_mut(path) {
-            Some(e) if e.len == len && e.mtime == mtime => e,
+        match self.cache.get_mut(path) {
+            Some(e) if e.len == len && e.mtime == mtime => {}
             Some(e) => {
                 // Claude transcripts are append-only; continue from where we
                 // stopped. If the file shrank, start over.
-                let prev = if len >= e.len {
+                let prev = if len > e.len && created == e.created {
                     e.parsed.clone()
                 } else {
                     Parsed::default()
@@ -228,7 +258,7 @@ impl Scanner {
                 e.parsed = parse(path, agent, prev, true);
                 e.len = len;
                 e.mtime = mtime;
-                e
+                e.created = created;
             }
             None if since.is_some_and(|t| mtime < t) => return None,
             None => {
@@ -239,16 +269,21 @@ impl Scanner {
                 self.cache.insert(
                     path.to_path_buf(),
                     CacheEntry {
+                        agent,
                         len,
                         mtime,
                         created,
                         parsed,
                     },
                 );
-                self.cache.get_mut(path).unwrap()
             }
         };
 
+        Some(())
+    }
+
+    fn session(entry: &CacheEntry) -> Option<Session> {
+        let agent = entry.agent;
         let p = &entry.parsed;
         if p.skip || p.id.is_empty() {
             return None;

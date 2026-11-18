@@ -85,6 +85,47 @@ struct SessionNotesTests {
         #expect(SessionNotes(directory: url).note(id)?.title == "Fix parser")
     }
 
+    @Test func caseOnlyRenameKeepsTheNoteAndAnExternalEdit() throws {
+        let dir = try location()
+        defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
+        let notes = SessionNotes(directory: dir)
+        let key = SessionKey(.codex, "thread")
+        let id = try #require(notes.create(for: key, title: "Parser", folder: "/project"))
+        notes.update(id, text: "Draft")
+        #expect(notes.flush())
+        var edited = try #require(notes.note(id))
+        let original = dir.appendingPathComponent(NoteFile.name(for: edited))
+        edited.text = "Saved in another editor"
+        try NoteFile.format(edited).write(to: original, atomically: true, encoding: .utf8)
+        notes.refreshMetadata([Session(agent: .codex, id: "thread", title: "parser", cwd: "/project", originator: nil,
+                                      created: Date(), updated: Date(), inProject: true, branch: nil, pr: nil,
+                                      limit: nil, turnStarted: nil, action: nil, context: nil)])
+        #expect(notes.flush())
+        let reopened = SessionNotes(directory: dir)
+        #expect(reopened.notes.count == 1)
+        #expect(reopened.note(id)?.text == edited.text)
+        #expect(reopened.note(id)?.title == "parser")
+        #expect(files(dir).count == 1)
+    }
+
+    @Test func twoEditorsChangingOneBodyKeepBothVersions() throws {
+        let dir = try location()
+        defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
+        let first = SessionNotes(directory: dir)
+        let id = try #require(first.create(for: SessionKey(.claude, "thread"), title: "Fix", folder: "/project"))
+        first.update(id, text: "Original")
+        #expect(first.flush())
+        let second = SessionNotes(directory: dir)
+        second.update(id, text: "Second draft")
+        first.update(id, text: "First draft")
+        #expect(first.flush())
+        #expect(second.flush())
+        #expect(SessionNotes(directory: dir).note(id)?.text == "Second draft")
+        let recovered = dir.appendingPathComponent("Recovered")
+        #expect(SessionNotes(directory: recovered).note(id)?.text == "First draft")
+        #expect(second.problem?.contains("Recovered") == true)
+    }
+
     @Test func unreadableFilesAreSkippedAndNeverOverwritten() throws {
         let url = try location()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

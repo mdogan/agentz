@@ -8,23 +8,29 @@ import AgentzCore
 final class FolderWatcher {
     private var stream: FSEventStreamRef?
     private let ignoring: [String]
-    private let onChange: () -> Void
+    private let onChange: ([String]?) -> Void
 
-    init(_ paths: [String], ignoring: [String], onChange: @escaping () -> Void) {
+    convenience init(_ paths: [String], ignoring: [String], onChange: @escaping () -> Void) {
+        self.init(paths, ignoring: ignoring, fileEvents: false) { _ in onChange() }
+    }
+
+    init(_ paths: [String], ignoring: [String], fileEvents: Bool, onChange: @escaping ([String]?) -> Void) {
         self.ignoring = ignoring
         self.onChange = onChange
         var context = FSEventStreamContext(
             version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil
         )
-        let callback: FSEventStreamCallback = { _, info, _, paths, _, _ in
+        let callback: FSEventStreamCallback = { _, info, count, paths, flags, _ in
             guard let info else { return }
             let watcher = Unmanaged<FolderWatcher>.fromOpaque(info).takeUnretainedValue()
             let changed = unsafeBitCast(paths, to: NSArray.self) as? [String] ?? []
-            watcher.changed(changed)
+            let lost = (0..<count).contains { flags[$0] & UInt32(kFSEventStreamEventFlagMustScanSubDirs) != 0 }
+            if lost { watcher.onChange(nil) } else { watcher.changed(changed) }
         }
         // The first change comes at once, then the ones after it
         // gathered for 0.3 seconds.
         let flags = kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagNoDefer
+            | (fileEvents ? kFSEventStreamCreateFlagFileEvents : 0)
         guard let stream = FSEventStreamCreate(
             nil, callback, &context, paths as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.3,
             FSEventStreamCreateFlags(flags)
@@ -42,8 +48,7 @@ final class FolderWatcher {
     }
 
     private func changed(_ paths: [String]) {
-        if paths.contains(where: { path in !ignoring.contains { pathStarts(path, with: $0) } }) {
-            onChange()
-        }
+        let relevant = paths.filter { path in !ignoring.contains { pathStarts(path, with: $0) } }
+        if !relevant.isEmpty { onChange(relevant) }
     }
 }

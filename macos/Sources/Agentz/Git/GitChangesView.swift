@@ -118,6 +118,7 @@ struct GitChangesView: View {
 }
 
 private struct ChangeList: View {
+    @Environment(\.compactGitDetail) private var openDetail
     @EnvironmentObject private var store: RepositoryStore
     @State private var pendingDiscard: [ChangeEntry] = []
     @State private var pendingConflictResolution: ConflictResolutionRequest?
@@ -180,6 +181,11 @@ private struct ChangeList: View {
             .focused($isListFocused)
             .onKeyPress(characters: ChangeSelectionKey.returnCharacters) { _ in
                 performKeyboardAction(for: .returnKey)
+            }
+            .onKeyPress(.rightArrow) {
+                guard let openDetail, store.selectedChange != nil else { return .ignored }
+                openDetail.wrappedValue = true
+                return .handled
             }
             .onKeyPress(.space) {
                 openSideBySideDiff()
@@ -579,6 +585,7 @@ private struct ChangeFolderRow: View {
 }
 
 private struct ChangeRow: View {
+    @Environment(\.compactGitDetail) private var openDetail
     @EnvironmentObject private var store: RepositoryStore
     @Environment(\.openChange) private var openChange
     static let indentStep: CGFloat = 12
@@ -724,6 +731,10 @@ private struct ChangeRow: View {
             store.toggleSelection(of: entry)
         } else {
             store.selectChange(change, staged: staged)
+            if let openDetail {
+                openDetail.wrappedValue = true
+                return
+            }
         }
         // The full-row button otherwise keeps keyboard focus, preventing the
         // enclosing List from handling arrows, Return, Space, and Delete.

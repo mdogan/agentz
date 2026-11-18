@@ -273,6 +273,8 @@ final class Workspace {
     var range = SessionRange.today { didSet { rebuildRows() } }
     var filter = "" { didSet { rebuildRows() } }
     private(set) var rows: [Row] = []
+    private var tabRows: [Row] = []
+    @ObservationIgnored private var visibleTabRows: [Row] = []
     /// The row the user picked in the list.
     var selection: SessionKey?
     /// The tabs on screen.
@@ -321,6 +323,7 @@ final class Workspace {
     /// away, in list order, then the ones the list's filters hide. Not the
     /// ones put off for later.
     private(set) var attentionKeys: [SessionKey] = []
+    private(set) var attentionSince: [SessionKey: Date] = [:]
     /// Sessions that want the user, put off until a time the user picked.
     /// Their row looks like any other until then.
     private(set) var snoozed: [SessionKey: Date] = [:]
@@ -633,7 +636,7 @@ final class Workspace {
         }
         let rowChanged = tabs.contains { r in
             (r.key.agent == .shell && r.linked == nil || r.key.agent == .git)
-                && rows.contains { $0.key == r.key && ($0.title != r.title || $0.git != r.git?.status) }
+                && tabRows.contains { $0.key == r.key && ($0.title != r.title || $0.git != r.git?.status) }
         }
         if cwdChanged || rowChanged {
             rebuildRows()
@@ -648,13 +651,18 @@ final class Workspace {
     }
 
     /// Results of a background scan of `dir`.
+    @ObservationIgnored private var nextRangeChange = Date.distantPast
+
     func apply(_ scan: Scan, dir: String) {
+        let limitsChanged = scan.limits != limits
+        var rowsChanged = scan.sessions != nil || Date() >= nextRangeChange
         // Nil when nothing changed since the last scan.
         if let scanned = scan.sessions { sessions = scanned }
-        loaded = true
-        if scan.complete { allLoaded = true }
+        if !loaded { loaded = true }
+        if scan.complete && !allLoaded { allLoaded = true }
         if scan.limits != limits { limits = scan.limits }
         if dir == projectDir, scan.worktrees != worktrees {
+            rowsChanged = true
             worktrees = scan.worktrees
             places = [:]
             // A worktree was added or removed in the filtered repo.
@@ -663,15 +671,21 @@ final class Workspace {
             }
         }
         let elsewhere = Dictionary(scan.elsewhere.map { (SessionKey(.claude, $0.id), $0) }) { a, b in a.busy ? a : b }
-        if elsewhere != self.elsewhere { self.elsewhere = elsewhere }
-        linkShells(scan.shells)
-        bindNewCodexSessions(scan.codexThreads)
-        notes.refreshMetadata(sessions)
-        let stops = limitInfo()
-        if stops != limitStops { limitStops = stops }
-        let left = owners(of: scan.leftovers)
-        if left != leftovers { leftovers = left }
-        rebuildRows()
+        if elsewhere != self.elsewhere { self.elsewhere = elsewhere; rowsChanged = true }
+        let shellsChanged = linkShells(scan.shells)
+        let codexChanged = bindNewCodexSessions(scan.codexThreads)
+        if let scanned = scan.sessions { notes.refreshMetadata(scanned) }
+        if scan.sessions != nil || limitsChanged || limitStops.values.contains(where: { Date().timeIntervalSince($0.stop.at) >= 7 * 86400 }) {
+            let stops = limitInfo()
+            if stops != limitStops { limitStops = stops }
+        }
+        // Ownership can change as tabs open or close, even for the same PID.
+        if !scan.leftovers.isEmpty || !leftovers.isEmpty {
+            let left = owners(of: scan.leftovers)
+            if left != leftovers { leftovers = left }
+        }
+        if rowsChanged || shellsChanged || codexChanged { rebuildRows() }
+        else { refreshStates() }
         keepPins()
     }
 
@@ -719,10 +733,11 @@ final class Workspace {
 
     /// Attaches each shell to the session of the agent the user started in
     /// it, so that session's row opens the shell instead of a second copy.
-    private func linkShells(_ shells: [ShellProcess]) {
+    private func linkShells(_ shells: [ShellProcess]) -> Bool {
         var changed = false
         for r in tabs where r.key.agent == .shell {
             let found = r.terminal?.pid.flatMap { pid in shells.first { $0.pid == pid } }
+            if r.foreground != found?.foreground { changed = true }
             r.foreground = found?.foreground
             let linked = found?.agent
             if linked != nil {
@@ -743,17 +758,20 @@ final class Workspace {
         }
         // Pane actions follow the linked agent when a shell is reused.
         if changed { onLayout?() }
+        return changed
     }
 
     /// Codex does not let us choose the id of a new session. Once the
     /// process we started has a thread open (`threads`, by pid), the tab
     /// takes that thread's id.
-    private func bindNewCodexSessions(_ threads: [Int32: String]) {
+    private func bindNewCodexSessions(_ threads: [Int32: String]) -> Bool {
+        var changed = false
         for r in tabs where r.key.agent == .codex && r.key.id.hasPrefix("new-") {
             guard let id = r.terminal?.pid.flatMap({ threads[$0] }) else { continue }
             let key = SessionKey(.codex, id)
             guard !tabs.contains(where: { $0 !== r && $0.shows(key) }) else { continue }
             let old = r.key
+            changed = true
             r.key = key
             notes.rebind(from: old, to: key)
             if let pane = panes.keys.firstIndex(of: old) { panes.keys[pane] = key }
@@ -762,6 +780,7 @@ final class Workspace {
             }
             if selection == old { selection = key }
         }
+        return changed
     }
 
     /// A row for each session, in the range unless `all`, and for each tab
@@ -770,10 +789,17 @@ final class Workspace {
         // Rows with a process of ours stay visible whatever the range, so a
         // running agent can't get lost, and so do sessions running elsewhere.
         let now = Date()
+        let cutoff = range.since(now: now)
+        if !all {
+            nextRangeChange = range == .today ? Calendar.current.dateInterval(of: .day, for: now)?.end ?? now : .distantFuture
+        }
         var rows: [Row] = sessions.compactMap { s in
             let key = s.key
             let tab = tabs.first { $0.shows(key) }
-            guard all || tab != nil || elsewhere[key] != nil || range.includes(s.updated, now: now) else { return nil }
+            guard all || tab != nil || elsewhere[key] != nil || (range != .active && cutoff.map { s.updated >= $0 } != false) else { return nil }
+            if !all, tab == nil, elsewhere[key] == nil, range == .week || range == .month {
+                nextRangeChange = min(nextRangeChange, s.updated.addingTimeInterval(range == .week ? 7 * 86400 : 30 * 86400))
+            }
             let order = tab?.spawnedAt ?? s.updated
             let place = place(s.cwd)
             return Row(
@@ -788,6 +814,19 @@ final class Workspace {
             rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.spawnedAt, pinned: r.pinned, active: true, git: r.git?.status))
         }
         return rows
+    }
+
+    /// A selected session can be outside the current sidebar filter.
+    func row(for key: SessionKey) -> Row? {
+        if let row = tabRows.first(where: { $0.key == key }) { return row }
+        if let session = sessions.first(where: { $0.key == key }) {
+            let place = place(session.cwd)
+            return Row(key: key, title: session.title, cwd: session.cwd, place: place,
+                       branch: shownBranch(session.branch, place: place), pr: session.pr,
+                       updated: session.updated, order: session.updated)
+        }
+        guard let tab = tabs.first(where: { $0.shows(key) }) else { return nil }
+        return Row(key: key, title: tab.title, cwd: tab.cwd, place: place(tab.cwd), updated: tab.spawnedAt, order: tab.spawnedAt)
     }
 
     /// Every session, whatever the range, repository and filter, for the
@@ -811,6 +850,8 @@ final class Workspace {
                 rows[i].pane = splitPane(rows[i].key, rows: rows)
             }
         }
+        let active = rows.filter(\.active)
+        if active != tabRows { tabRows = active }
         if let repo {
             rows = rows.filter { repo.contains($0.cwd) }
         }
@@ -823,6 +864,7 @@ final class Workspace {
         }
         rows.sort { $0.group != $1.group ? $0.group < $1.group : $0.order > $1.order }
         rows = pairSplits(rows)
+        visibleTabRows = rows.filter(\.active)
         if rows != self.rows { self.rows = rows }
         refreshStates()
     }
@@ -881,7 +923,7 @@ final class Workspace {
         var waitingRows: [SessionKey: String] = [:]
         var quitRows = Set<SessionKey>()
         var attention: [SessionKey] = []
-        for row in rows {
+        for row in visibleTabRows {
             guard let r = tabs.first(where: { $0.shows(row.key) && $0.isRunning }) else {
                 if tabs.contains(where: { $0.shows(row.key) && quit.contains(ObjectIdentifier($0)) }) {
                     quitRows.insert(row.key)
@@ -902,6 +944,9 @@ final class Workspace {
             if !attention.contains(where: r.shows) { attention.append(key) }
         }
         // Put off for later, until the user looks at it or it ends.
+        var dates = attentionSince.filter { attention.contains($0.key) }
+        for key in attention where dates[key] == nil { dates[key] = Date() }
+        if dates != attentionSince { attentionSince = dates }
         let snoozes = snoozed.filter { attention.contains($0.key) }
         if snoozes != snoozed { snoozed = snoozes }
         attention.removeAll { snoozed[$0] != nil }
@@ -1175,6 +1220,10 @@ final class Workspace {
     /// offers to resume it.
     func showNextAttention() {
         guard let key = attentionKeys.first(where: { !isCurrent($0) }) ?? attentionKeys.first else { return }
+        showAttention(key)
+    }
+
+    func showAttention(_ key: SessionKey) {
         selection = key
         if tabs.contains(where: { $0.shows(key) && $0.isRunning }) {
             open(key)
@@ -1731,12 +1780,18 @@ final class Scanner {
     private let queue = DispatchQueue(label: "agentz.scan", qos: .utility)
     private let scanner = SessionScanner()
     private weak var workspace: Workspace?
+    private var watcher: FolderWatcher?
+    private var changedPaths = Set<String>()
+    private var lastFull = Date.distantPast
     private var scanning = false
     private var again = false
 
     init(_ workspace: Workspace) {
         self.workspace = workspace
-        workspace.requestScan = { [weak self] in self?.scan() }
+        workspace.requestScan = { [weak self] in
+            self?.lastFull = .distantPast
+            self?.scan()
+        }
     }
 
     func scan() {
@@ -1751,9 +1806,13 @@ final class Scanner {
         let codexPids = workspace.newCodexPids
         let quickPid = workspace.quickShellPid()
         let since = workspace.range.since(now: Date())
+        let full = !workspace.allLoaded || Date().timeIntervalSince(lastFull) >= 60
+        let changes = full ? nil : Array(changedPaths)
+        if full { lastFull = Date() }
+        changedPaths.removeAll()
         let scanner = self.scanner
         queue.async {
-            let scan = scanner.scan(dir, pids, codexPids, quickPid, since)
+            let scan = scanner.scan(dir, pids, codexPids, quickPid, since, changes)
             DispatchQueue.main.async {
                 self.scanning = false
                 self.workspace?.apply(scan, dir: dir)
@@ -1767,6 +1826,22 @@ final class Scanner {
     }
 
     func start() {
+        let roots = archiveWatchPaths().map { path in
+            (logical: path, real: URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
+        }
+        let directories = Set(roots.map { $0.real.hasSuffix(".jsonl") ? ($0.real as NSString).deletingLastPathComponent : $0.real })
+        watcher = FolderWatcher(Array(directories), ignoring: [], fileEvents: true) { [weak self] paths in
+            guard let self else { return }
+            guard let paths else { lastFull = .distantPast; return }
+            for path in paths {
+                guard let root = roots.first(where: { pathStarts(path, with: $0.real) }) else { continue }
+                if path.hasSuffix(".jsonl") || root.logical.hasSuffix("/claude-context") {
+                    changedPaths.insert(root.logical + path.dropFirst(root.real.count))
+                } else if isDirectory(path) || (path as NSString).pathExtension.isEmpty {
+                    lastFull = .distantPast
+                }
+            }
+        }
         scan()
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.scan() }

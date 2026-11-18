@@ -409,7 +409,7 @@ const CONTEXT_WINDOW_AGE: Duration = Duration::from_secs(30 * 86_400);
 
 /// Where the status line saves each Claude session's context window size,
 /// in a file named after the session.
-fn context_windows_dir() -> Option<PathBuf> {
+pub(crate) fn context_windows_dir() -> Option<PathBuf> {
     Some(dirs::cache_dir()?.join("agentz").join("claude-context"))
 }
 

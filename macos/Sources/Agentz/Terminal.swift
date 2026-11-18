@@ -136,6 +136,12 @@ final class Terminal: NSObject {
     /// A program on the alternate screen, like Claude in fullscreen mode or
     /// Codex, leaves only the rows that show.
     func screenText() -> String? {
+        withScreenFile { try? String(contentsOfFile: $0, encoding: .utf8) }
+    }
+
+    /// Ghostty owns the format and location. The temporary file exists only
+    /// while the reader runs.
+    func withScreenFile<T>(_ read: (String) -> T?) -> T? {
         // Ghostty writes the file, then asks the app to open it, before
         // the action returns. Only for that moment is the catcher the
         // view's delegate: Terminal leaves opening to Ghostty, which opens
@@ -150,7 +156,7 @@ final class Terminal: NSObject {
             try? FileManager.default.removeItem(atPath: path)
             rmdir((path as NSString).deletingLastPathComponent)
         }
-        return try? String(contentsOfFile: path, encoding: .utf8)
+        return read(path)
     }
 
     // MARK: - Find

@@ -1128,3 +1128,11 @@ enum GitParser {
         return worktrees
     }
 }
+
+
+extension GitCommit {
+    func matchesHistory(_ query: String) -> Bool {
+        subject.localizedCaseInsensitiveContains(query) || authorName.localizedCaseInsensitiveContains(query)
+            || hash.localizedCaseInsensitiveContains(query) || decorations.contains { $0.localizedCaseInsensitiveContains(query) }
+    }
+}

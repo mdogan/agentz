@@ -42,7 +42,7 @@ struct SessionContents {
     }
 
     /// Asks where, then writes the file. Says how it went in the status line.
-    func save(in workspace: Workspace) {
+    func save(in workspace: Workspace) async {
         let panel = NSSavePanel()
         panel.title = "Save Session Contents"
         panel.nameFieldStringValue = fileName
@@ -50,17 +50,21 @@ struct SessionContents {
         panel.isExtensionHidden = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
+            let text = text
+            try await Task.detached { try text.write(to: url, atomically: true, encoding: .utf8) }.value
             workspace.setStatus("Saved \(what) to \(tilde(url.path)).")
         } catch {
             workspace.setStatus("Could not save to \(tilde(url.path)): \(error.localizedDescription)")
         }
     }
 
-    func copy(in workspace: Workspace) {
+    func copy(in workspace: Workspace) async {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).count
+        let text = text
+        let lines = await Task.detached {
+            text.utf8.reduce(1) { $1 == 10 ? $0 + 1 : $0 }
+        }.value
         workspace.setStatus("Copied \(what), \(lines) \(lines == 1 ? "line" : "lines").")
     }
 }
@@ -78,7 +82,7 @@ extension Workspace {
 
     /// The contents of session `key`. When it has none, says why in the
     /// status line.
-    func contents(of key: SessionKey) -> SessionContents? {
+    func contents(of key: SessionKey) async -> SessionContents? {
         let tab = tabs.first { $0.shows(key) }
         // A shell row stands for the agent running in it, if any.
         let agentKey = key.agent == .claude || key.agent == .codex ? key : tab?.linked
@@ -86,8 +90,11 @@ extension Workspace {
             let title = rows.first { $0.key == agentKey }?.title
                 ?? sessions.first { $0.key == agentKey }?.title
                 ?? tab?.title ?? agentKey.agent.displayName
-            if let markdown = transcriptMarkdown(agentKey.agent, agentKey.id) {
-                return SessionContents(title: title, text: "# \(title)\n\n" + markdown, isConversation: true)
+            let text = await Task.detached(priority: .userInitiated) {
+                transcriptMarkdown(agentKey.agent, agentKey.id).map { "# \(title)\n\n" + $0 }
+            }.value
+            if let text {
+                return SessionContents(title: title, text: text, isConversation: true)
             }
             if let terminal = tab?.terminal, let contents = SessionContents(title: title, terminal: terminal) {
                 return contents

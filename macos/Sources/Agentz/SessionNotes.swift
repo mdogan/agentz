@@ -1,5 +1,6 @@
 import AgentzCore
 import Foundation
+import Darwin
 import Observation
 
 struct SessionNote: Identifiable, Equatable {
@@ -42,6 +43,8 @@ final class SessionNotes {
     @ObservationIgnored private let directory: URL?
     /// The file each saved note is in now, so a renamed title moves it.
     @ObservationIgnored private var files: [UUID: String] = [:]
+    /// Exact data last read or written, including Markdown front matter.
+    @ObservationIgnored private var originals: [String: String] = [:]
     /// Older copies of a note left behind by an interrupted rename.
     @ObservationIgnored private var staleFiles: Set<String> = []
     @ObservationIgnored private var pendingSave: Task<Void, Never>?
@@ -66,6 +69,7 @@ final class SessionNotes {
             guard let text = try? String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8),
                   let note = NoteFile.parse(text)
             else { unreadable.append(name); continue }
+            originals[name] = text
             if note.isEmpty { continue }
             if let index = notes.firstIndex(where: { $0.id == note.id }) {
                 // The same note twice: keep the newer copy, remove the other.
@@ -96,6 +100,19 @@ final class SessionNotes {
             loadProblem = "Skipped \(unreadable.sorted().joined(separator: ", ")) in the notes folder. These files have been left untouched."
         }
         if !staleFiles.isEmpty { changed() }
+    }
+
+    /// Preserve the other writer's version when both bodies changed.
+    private func preserve(_ note: SessionNote, in directory: URL) throws {
+        let recovery = directory.appendingPathComponent("Recovered", isDirectory: true)
+        try FileManager.default.createDirectory(at: recovery, withIntermediateDirectories: true)
+        let data = Data(NoteFile.format(note).utf8)
+        let url = recovery.appendingPathComponent(NoteFile.name(for: note))
+        if (try? Data(contentsOf: url)) == data { return }
+        let target = FileManager.default.fileExists(atPath: url.path)
+            ? recovery.appendingPathComponent("\(UUID().uuidString) \(url.lastPathComponent)") : url
+        try data.write(to: target, options: .withoutOverwriting)
+        loadProblem = "Another version of this note was kept in \(recovery.path)."
     }
 
     func note(for key: SessionKey) -> SessionNote? { notes.first { $0.session == key.description } }
@@ -152,7 +169,7 @@ final class SessionNotes {
     }
 
     func refreshMetadata(_ sessions: [Session]) {
-        guard !isReadOnly else { return }
+        guard !isReadOnly, !notes.isEmpty else { return }
         let metadata = Dictionary(sessions.map { ($0.key.description, $0) }, uniquingKeysWith: { first, _ in first })
         var updated = false
         for i in notes.indices {
@@ -194,21 +211,63 @@ final class SessionNotes {
         }
         do {
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let fd = open(directory.path, O_RDONLY)
+            guard fd >= 0 else { throw POSIXError(.EIO) }
+            defer { close(fd) }
+            guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(.EIO) }
+            defer { flock(fd, LOCK_UN) }
             for id in dirty.sorted(by: { $0.uuidString < $1.uuidString }) {
-                if let note = note(id), !note.isEmpty {
-                    let name = NoteFile.name(for: note)
-                    try Data(NoteFile.format(note).utf8).write(to: directory.appendingPathComponent(name), options: .atomic)
-                    if let old = files[id], old != name { try remove(old) }
+                let old = files[id]
+                let oldURL = old.map { directory.appendingPathComponent($0) }
+                var draft = note(id)
+                if let old, let oldURL, let baseline = originals[old] {
+                    let text = try String(contentsOf: oldURL, encoding: .utf8)
+                    if text != baseline {
+                        guard let disk = NoteFile.parse(text), disk.id == id else {
+                            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: oldURL.path])
+                        }
+                        if var local = draft, let original = NoteFile.parse(baseline), local.text == original.text {
+                            local.text = disk.text
+                            local.updated = max(disk.updated, local.updated)
+                            draft = local
+                            if let i = notes.firstIndex(where: { $0.id == id }) { notes[i] = local }
+                            onChange?()
+                        } else if draft?.text != disk.text { try preserve(disk, in: directory) }
+                    }
+                }
+                if let draft, !draft.isEmpty {
+                    let name = NoteFile.name(for: draft)
+                    let url = directory.appendingPathComponent(name)
+                    let text = NoteFile.format(draft)
+                    if old != name, manager.fileExists(atPath: url.path) {
+                        let target = try url.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+                        let source = try oldURL?.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+                        guard let target, let source, target.isEqual(source) else {
+                            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: url.path])
+                        }
+                    }
+                    try Data(text.utf8).write(to: url, options: .atomic)
+                    if let old, old != name, let oldURL, manager.fileExists(atPath: oldURL.path) {
+                        let source = try oldURL.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+                        let target = try url.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+                        if let source, let target, !source.isEqual(target) { try remove(old) }
+                        originals.removeValue(forKey: old)
+                    }
                     files[id] = name
-                } else if let old = files[id] {
+                    originals[name] = text
+                } else if let old {
                     try remove(old)
                     files[id] = nil
+                    originals.removeValue(forKey: old)
                 }
                 dirty.remove(id)
             }
             for name in staleFiles.sorted() {
-                try remove(name)
+                if try String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8) == originals[name] {
+                    try remove(name)
+                }
                 staleFiles.remove(name)
+                originals.removeValue(forKey: name)
             }
             saveProblem = nil
             return true
@@ -262,7 +321,7 @@ enum NoteFile {
     }
 
     static func parse(_ file: String) -> SessionNote? {
-        guard file.hasPrefix("---\n"), let end = file.range(of: "\n---\n") else { return nil }
+        guard file.hasPrefix("---\n"), let end = file.range(of: "\n---\n"), end.lowerBound >= file.index(file.startIndex, offsetBy: 4) else { return nil }
         var fields: [String: String] = [:]
         for line in file[file.index(file.startIndex, offsetBy: 4)..<end.lowerBound].split(separator: "\n") {
             guard let colon = line.firstIndex(of: ":") else { return nil }

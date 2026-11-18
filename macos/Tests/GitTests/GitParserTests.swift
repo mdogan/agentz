@@ -2081,6 +2081,37 @@ struct GitParserTests {
 
     @Test
     @MainActor
+    func searchAndRefreshKeepAnOlderCommitSelected() async throws {
+        let (root, store, _) = try await storeWithFeatureBranch(historyPageSize: 1)
+        defer {
+            store.setMonitoringActive(false)
+            try? FileManager.default.removeItem(at: root)
+        }
+        #expect(store.commits.map(\.subject) == ["Later on main"])
+        store.searchText = "On feature"
+        store.searchText = "On main"
+        for _ in 0..<500 where store.searchingHistory { try await Task.sleep(for: .milliseconds(10)) }
+        let older = try #require(store.filteredCommits.first { $0.subject == "On main" })
+        #expect(store.commits.count == 1)
+        store.selectCommit(older)
+        // A working-tree event must leave the list and its selection in place.
+        try "dirty".write(to: root.appendingPathComponent("work.txt"), atomically: true, encoding: .utf8)
+        store.setMonitoringActive(true)
+        for _ in 0..<500 where store.changes.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(store.changes.map(\.path) == ["work.txt"])
+        #expect(store.commits.count == 1)
+        #expect(store.selectedCommit?.hash == older.hash)
+        store.setMonitoringActive(false)
+        try runGit(["commit", "--allow-empty", "-m", "Another commit"], at: root)
+        store.refresh()
+        try await settle(store)
+        #expect(store.selectedCommit?.hash == older.hash)
+        store.searchText = ""
+        #expect(store.commits.map(\.subject) == ["Another commit", "Later on main", "On main"])
+    }
+
+    @Test
+    @MainActor
     func historyCanLoadMoreAfterComingBackFromTheChanges() async throws {
         let (root, store, _) = try await storeWithFeatureBranch(historyPageSize: 2)
         defer { try? FileManager.default.removeItem(at: root) }

@@ -22,21 +22,17 @@ struct SwitcherSession: Identifiable {
     /// most recently first.
     @MainActor
     static func collect(_ workspace: Workspace) -> [SwitcherSession] {
-        workspace.switcherRows().map { row in
+        let notes = Dictionary(workspace.notes.notes.map { ($0.session, $0) }, uniquingKeysWith: { first, _ in first })
+        return workspace.switcherRows().map { row in
             let state = workspace.tabState(row.key)
             return SwitcherSession(
                 row: row,
                 state: state,
                 elsewhere: state == .notRunning ? workspace.elsewhere[row.key] : nil,
                 isCurrent: workspace.isCurrent(row.key),
-                note: workspace.notes.note(for: row.key)
+                note: notes[row.key.description]
             )
         }
-    }
-
-    @MainActor
-    static func search(_ sessions: [SwitcherSession], query: String) -> [SwitcherSession] {
-        PaletteSearch.rank(sessions, query: query, title: \.row.title, detail: \.detail)
     }
 
     /// Without a search, the session shown before the current one, so
@@ -47,15 +43,75 @@ struct SwitcherSession: Identifiable {
     }
 }
 
+/// Only the session fields that affect ranking are folded. The snapshot keeps
+/// its MRU order; equal scores go into the same bucket in that order.
+actor SessionSearchIndex {
+    private struct Entry {
+        let title: String
+        let place: String
+        let branch: String?
+        let cwd: String
+        let note: String?
+        let foldedTitle: String
+        let foldedDetail: String
+
+        init(_ s: SwitcherSession) {
+            title = s.row.title
+            place = s.row.place
+            branch = s.row.branch
+            cwd = s.row.cwd
+            note = s.note?.text
+            foldedTitle = PaletteSearch.normalized(title)
+            foldedDetail = PaletteSearch.normalized(s.detail)
+        }
+
+        func matches(_ s: SwitcherSession) -> Bool {
+            title == s.row.title && place == s.row.place && branch == s.row.branch && cwd == s.row.cwd && note == s.note?.text
+        }
+    }
+    private var cache: [SessionKey: Entry] = [:]
+    private var snapshot: UUID?
+    private var entries: [Entry] = []
+
+    func search(_ sessions: [SwitcherSession], snapshot id: UUID, query: String) -> [SwitcherSession] {
+        if snapshot != id {
+            var ordered = [Entry]()
+            var next = [SessionKey: Entry]()
+            for session in sessions {
+                if Task.isCancelled { return [] }
+                let entry: Entry
+                if let cached = cache[session.id], cached.matches(session) { entry = cached }
+                else { entry = Entry(session) }
+                next[session.id] = entry
+                ordered.append(entry)
+            }
+            cache = next
+            entries = ordered
+            snapshot = id
+        }
+        let words = PaletteSearch.normalized(query).split(whereSeparator: \.isWhitespace)
+        guard !words.isEmpty else { return sessions }
+        var buckets: [Int: [SwitcherSession]] = [:]
+        for (i, entry) in entries.enumerated() {
+            if Task.isCancelled { return [] }
+            if let score = PaletteSearch.score(words, title: entry.foldedTitle, detail: entry.foldedDetail) {
+                buckets[score, default: []].append(sessions[i])
+            }
+        }
+        return buckets.keys.sorted().flatMap { buckets[$0] ?? [] }
+    }
+}
+
 extension PaletteSheet {
     /// Go to Session: shows the picked session, or resumes it.
     func showSessions(in parent: NSWindow, workspace: Workspace) {
         let sessions = SwitcherSession.collect(workspace)
         let now = Date()
+        let snapshot = UUID(), index = sessionIndex
         show(in: parent, title: "Go to Session") { close in
             PaletteView(
                 title: "Go to Session", keys: "⌘E", prompt: "Search sessions…", empty: "No matching sessions", verb: "open",
-                items: sessions, search: SwitcherSession.search, start: SwitcherSession.start,
+                items: sessions, backgroundSearch: { await index.search(sessions, snapshot: snapshot, query: $0) }, start: SwitcherSession.start,
                 label: { "\($0.row.key.agent.name), \($0.row.title), \($0.row.place)" },
                 row: { SwitcherRow(session: $0, now: now) }
             ) { session in
