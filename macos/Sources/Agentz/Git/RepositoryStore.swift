@@ -41,7 +41,7 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var operationLabel: String?
     @Published var selectedSection: WorkspaceSection = .history
-    @Published private(set) var historyScope: CommitHistoryScope = .all
+    @Published private(set) var historyScope: CommitHistoryScope = .currentBranch
     @Published var selectedCommit: GitCommit?
     @Published private(set) var selectedChange: WorkingChange?
     @Published private(set) var selectedChangeIsStaged = false
@@ -281,7 +281,7 @@ final class RepositoryStore: ObservableObject {
             self.mainWorktreeURL = GitWorktree.mainWorktree(ofLinked: root) ?? root
             GitCommandLog.shared.registerRepository(root)
             self.prepareForRepositorySwitch()
-            try await self.reload(root: root)
+            try await self.reload(root: root, historyScope: self.historyScope)
             try Task.checkCancellation()
             guard self.isCurrentRepository(root) else { return }
             if !self.changes.isEmpty {
@@ -512,18 +512,39 @@ final class RepositoryStore: ObservableObject {
         }
     }
 
+    /// Shows the reference's commits; nil shows all branches.
     func selectReference(_ reference: GitReference?) {
+        showHistory(of: reference, scope: CommitHistoryScope(revision: reference?.fullName))
+    }
+
+    /// Shows the checked-out branch's commits, and goes on following HEAD.
+    func showCurrentBranch() {
+        showHistory(of: nil, scope: .currentBranch)
+    }
+
+    /// The history follows the checked-out branch.
+    var showsCurrentBranch: Bool {
+        historyScope == .currentBranch && selectedStash == nil
+    }
+
+    /// The history shows every branch.
+    var showsAllBranches: Bool {
+        historyScope == .all && selectedStash == nil
+    }
+
+    private func showHistory(of reference: GitReference?, scope: CommitHistoryScope) {
         guard let root = repositoryURL else { return }
         guard !isLoading else {
-            queuedPick = { [weak self] in self?.selectReference(reference) }
+            queuedPick = { [weak self] in self?.showHistory(of: reference, scope: scope) }
             return
         }
         cancelHistoryPagination()
-        _ = startOperation("Loading \(reference?.name ?? "history")") {
+        let label = reference?.name ?? (scope == .all ? "all branches" : "the current branch")
+        _ = startOperation("Loading \(label)") {
             self.selectedStash = nil
             self.selectedReference = reference
             self.selectedSection = .history
-            self.historyScope = CommitHistoryScope(revision: reference?.fullName)
+            self.historyScope = scope
             try await self.reloadHistory(root: root, scope: self.historyScope)
         }
     }
@@ -770,12 +791,13 @@ final class RepositoryStore: ObservableObject {
             self.selectedSection = .history
             // The history shows next, with the new commit in it: only a
             // filter on the current branch has that commit.
-            if case .revision = self.historyScope, self.selectedReference?.isCurrent == true {
+            if self.showsCurrentBranch
+                || self.selectedReference?.isCurrent == true && self.historyScope.revision != nil {
                 return
             }
             self.selectedStash = nil
             self.selectedReference = nil
-            self.historyScope = .all
+            self.historyScope = .currentBranch
         }
     }
 
@@ -904,7 +926,7 @@ final class RepositoryStore: ObservableObject {
                 return
             }
             self.selectedReference = nil
-            self.historyScope = .all
+            self.historyScope = .currentBranch
         }
     }
 
@@ -933,7 +955,7 @@ final class RepositoryStore: ObservableObject {
                 )
             }
             self.selectedReference = nil
-            self.historyScope = .all
+            self.historyScope = .currentBranch
         }
     }
 
@@ -953,7 +975,7 @@ final class RepositoryStore: ObservableObject {
                 try await self.client.createBranch(at: root, name: cleanName, from: start, checkout: checkout)
                 if checkout {
                     self.selectedReference = nil
-                    self.historyScope = .all
+                    self.historyScope = .currentBranch
                 }
             }
             return
@@ -1124,7 +1146,7 @@ final class RepositoryStore: ObservableObject {
     private func clearSelection(of reference: GitReference) {
         guard selectedReference == reference else { return }
         selectedReference = nil
-        historyScope = .all
+        historyScope = .currentBranch
     }
 
     func delete(_ worktree: GitWorktree) {
@@ -1336,17 +1358,19 @@ final class RepositoryStore: ObservableObject {
             // The filter's branch may be gone, deleted in a terminal or by a
             // fetch. It must not stop the changes from being read.
             guard !(error is CancellationError),
+                  historyScope != .currentBranch,
                   let revision = historyScope.revision,
                   (try? await client.commit(at: root, revision: revision)) == nil else {
                 throw error
             }
             try Task.checkCancellation()
             guard isCurrentRepository(root) else { return }
+            let fallback = CommitHistoryScope.currentBranch
             self.selectedReference = nil
-            self.historyScope = .all
+            self.historyScope = fallback
             load = try await client.snapshotAndStateToken(
                 at: root,
-                historyScope: .all,
+                historyScope: fallback,
                 historyLimit: historyPageSize
             )
         }
@@ -1621,7 +1645,7 @@ final class RepositoryStore: ObservableObject {
         conflictDocument = nil
         selectedReference = nil
         selectedStash = nil
-        historyScope = .all
+        historyScope = .currentBranch
         selectedCommit = nil
         selectedChange = nil
         changeSelection.clear()

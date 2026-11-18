@@ -348,9 +348,10 @@ private struct HistoryHeader: View {
     @AppStorage("gitReferencesShown") private var referencesShown = true
     @FocusState private var searchFocused: Bool
 
-    /// The branches list what shows, unless it is a commit or a file's history.
+    /// The branches list what shows, unless it is a commit or a file's
+    /// history. All branches always says so: it isn't the usual view.
     private var showsMenu: Bool {
-        guard referencesShown, canShowReferences else { return true }
+        guard referencesShown, canShowReferences, !showsAll else { return true }
         switch store.historyScope {
         case .commit, .path: return true
         case .all, .revision, .lostAndDangling: return false
@@ -403,11 +404,20 @@ private struct HistoryHeader: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(showsAll ? look.secondary : look.text)
+                    .font(.system(size: 11, weight: showsAll ? .semibold : .medium))
+                    .foregroundStyle(showsAll ? look.accent : look.text)
                     .frame(maxWidth: 150)
                 }
                 .fixedSize()
+                if showsAll {
+                    ToolbarIconButton(
+                        "Current Branch",
+                        systemImage: "xmark.circle.fill",
+                        help: "Show only \(store.branch) again"
+                    ) {
+                        store.showCurrentBranch()
+                    }
+                }
             }
         }
         .padding(.horizontal, 8)
@@ -415,17 +425,23 @@ private struct HistoryHeader: View {
     }
 
     private var showsAll: Bool {
-        store.historyScope == .all && store.selectedStash == nil
+        store.showsAllBranches
     }
 
     private var placeholder: String {
-        showsAll ? "Search \(commitCount) commit\(commitCount == 1 ? "" : "s")" : "Search"
+        showsAll || store.showsCurrentBranch
+            ? "Search \(commitCount) commit\(commitCount == 1 ? "" : "s")"
+            : "Search"
     }
 
-    /// All branches, then the local ones, then the remote ones.
+    /// The current branch, all branches, then the local ones, then the
+    /// remote ones.
     private func branchMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
+        let current = MenuAction("Current Branch", detail: store.branch) { store.showCurrentBranch() }
+        current.state = store.showsCurrentBranch ? .on : .off
+        menu.addItem(current)
         let all = MenuAction("All Branches") { store.selectReference(nil) }
         all.state = showsAll ? .on : .off
         menu.addItem(all)
@@ -452,9 +468,9 @@ private struct HistoryHeader: View {
         }
         switch store.historyScope {
         case .all:
-            return ("All Branches", "arrow.triangle.branch", "the commits of all branches")
+            return ("All Branches", "square.stack.3d.up", "the commits of all branches")
         case .revision:
-            let name = store.selectedReference?.name ?? "branch"
+            let name = store.selectedReference?.name ?? (store.showsCurrentBranch ? store.branch : "branch")
             return (name, store.selectedReference?.kind.icon ?? "arrow.triangle.branch", "the commits of \(name)")
         case let .commit(hash):
             let short = String(hash.prefix(8))

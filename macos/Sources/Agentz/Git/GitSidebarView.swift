@@ -44,13 +44,13 @@ struct GitSidebarView: View {
                 SidebarRow(
                     title: "All Branches",
                     icon: "square.stack.3d.up",
-                    isSelected: store.historyScope == .all && store.selectedStash == nil
+                    isSelected: store.showsAllBranches
                 ) {
                     store.selectReference(nil)
                 } badge: {
                     EmptyView()
                 }
-                .help("Show the commits of all branches")
+                .help("Show the commits of all branches. Pick the current branch to go back to it.")
 
                 let locals = references(of: .localBranch)
                 SidebarSectionHeader(title: "Branches", count: locals.count, isExpanded: $branchesExpanded) {
@@ -673,7 +673,8 @@ private struct ReferenceSidebarRow: View {
         SidebarRow(
             title: title,
             icon: icon,
-            isSelected: store.selectedReference == reference,
+            isSelected: store.selectedReference == reference
+                || reference.isCurrent && store.showsCurrentBranch,
             isProminent: reference.isCurrent,
             indent: indent,
             dragPayload: reference.kind == .localBranch ? reference.name : nil

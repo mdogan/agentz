@@ -362,11 +362,12 @@ struct GitClient: Sendable {
         if offset > 0 {
             arguments.append("--skip=\(offset)")
         }
-        if path != nil {
+        if path != nil || revision == "HEAD" {
             // A path history only filters a branch that is already on screen,
             // so a revision that has since disappeared — or a HEAD that is
             // still unborn — should come back empty instead of failing the
-            // load with a fatal Git error.
+            // load with a fatal Git error. The current branch's history of a
+            // repository without commits is empty too.
             arguments.append("--ignore-missing")
         }
         arguments.append(revision ?? "--all")

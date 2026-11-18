@@ -21,6 +21,10 @@ enum CommitHistoryScope: Equatable, Sendable {
         self = revision.map(Self.revision) ?? .all
     }
 
+    /// What the history shows unless the user picks something else: the
+    /// checked-out branch, following HEAD when another one is checked out.
+    static let currentBranch = CommitHistoryScope.revision("HEAD")
+
     /// The ref the history is limited to, when that is a ref that can go away.
     var revision: String? {
         switch self {

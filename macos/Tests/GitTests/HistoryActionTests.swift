@@ -193,6 +193,52 @@ struct HistoryActionTests {
     }
 
     @Test
+    @MainActor
+    func historyShowsTheCurrentBranchUntilAllArePicked() async throws {
+        let repo = try TestRepository()
+        defer { repo.remove() }
+        let store = RepositoryStore()
+        store.setMonitoringActive(false)
+
+        // Without commits there is nothing to show, and no error.
+        store.openRepository(repo.root)
+        try await settle(store)
+        #expect(store.errorMessage == nil)
+        #expect(store.showsCurrentBranch)
+
+        try repo.commit("a.txt", "a\n", "On main")
+        try repo.git(["switch", "-c", "side"])
+        try repo.commit("s.txt", "s\n", "On side")
+        try repo.git(["switch", "main"])
+        store.refresh()
+        try await settle(store)
+        #expect(store.historyScope == .currentBranch)
+        #expect(store.commits.map(\.subject) == ["On main"])
+
+        // A checkout elsewhere: the history follows HEAD.
+        try repo.git(["switch", "side"])
+        store.refresh()
+        try await settle(store)
+        #expect(store.commits.map(\.subject) == ["On side", "On main"])
+
+        store.selectReference(nil)
+        try await settle(store)
+        #expect(store.showsAllBranches)
+        store.showCurrentBranch()
+        try await settle(store)
+        #expect(store.showsCurrentBranch)
+        #expect(store.selectedReference == nil)
+    }
+
+    @MainActor
+    private func settle(_ store: RepositoryStore) async throws {
+        for _ in 0..<500 {
+            guard store.isLoading else { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    @Test
     func readsTheGitDirectoryOfALinkedWorktree() throws {
         let repo = try TestRepository()
         defer { repo.remove() }

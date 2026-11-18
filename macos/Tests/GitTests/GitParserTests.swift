@@ -2084,6 +2084,8 @@ struct GitParserTests {
     func historyCanLoadMoreAfterComingBackFromTheChanges() async throws {
         let (root, store, _) = try await storeWithFeatureBranch(historyPageSize: 2)
         defer { try? FileManager.default.removeItem(at: root) }
+        store.selectReference(nil)
+        try await settle(store)
         #expect(store.canLoadMoreHistory)
 
         store.selectChanges()
@@ -2114,7 +2116,7 @@ struct GitParserTests {
 
         #expect(store.errorMessage == nil)
         #expect(store.changes.map(\.path) == ["new.txt"])
-        #expect(store.historyScope == .all)
+        #expect(store.historyScope == .currentBranch)
         #expect(store.selectedReference == nil)
         #expect(store.commits.map(\.subject) == ["Later on main", "On main"])
     }
@@ -2137,7 +2139,7 @@ struct GitParserTests {
         store.createCommit()
         try await settle(store)
         #expect(store.selectedSection == .history)
-        #expect(store.historyScope == .all)
+        #expect(store.historyScope == .currentBranch)
         #expect(store.selectedReference == nil)
         #expect(store.commits.first?.subject == "First")
 

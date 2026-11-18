@@ -185,7 +185,7 @@ struct CommitHashPickerTests {
 
         store.openCommit(hash: String(fourthHash.prefix(7)))
         try await settle(store)
-        #expect(store.historyScope == .all)
+        #expect(store.historyScope == .currentBranch)
         #expect(store.commits.map(\.subject) == ["Commit 5", "Commit 4"])
         #expect(store.selectedCommit?.hash == fourthHash)
         #expect(store.commitReveal?.hash == fourthHash)
