@@ -46,7 +46,7 @@ struct SidebarView: View {
     let actions: SidebarActions
     @FocusState private var listFocused: Bool
     @FocusState private var filterFocused: Bool
-    @State private var wideRows = false
+    @State private var actionLayout = RowActionLayout.onHover
     @State private var hovered: SessionKey?
     @State private var newWorktree: WorktreeRequest?
     @State private var cleanup: CleanupRequest?
@@ -60,7 +60,7 @@ struct SidebarView: View {
         .foregroundStyle(look.text)
         .background(look.sidebar.ignoresSafeArea())
         .tint(look.accent)
-        .onGeometryChange(for: Bool.self, of: { $0.size.width >= 380 }) { wideRows = $0 }
+        .onGeometryChange(for: RowActionLayout.self, of: { RowActionLayout(width: $0.size.width) }) { actionLayout = $0 }
         .onChange(of: focus.serial) {
             switch focus.target {
             case .list: listFocused = true
@@ -353,6 +353,9 @@ struct SidebarView: View {
         let running = workspace.runningKeys.contains(row.key)
         let quit = workspace.quitKeys.contains(row.key)
         let closable = (running || quit) && !row.pinned
+        let compact = actionLayout == .menu
+        let showsActions = hovered == row.key || compact
+        let actionWidth = compact ? RowButtons.size : RowButtons.width(closable: closable)
         return RowView(
             row: row,
             look: look,
@@ -369,7 +372,7 @@ struct SidebarView: View {
             limit: workspace.limitStops[row.key],
             continues: workspace.continueAtReset.contains(row.key),
             leftovers: workspace.leftovers[row.key] ?? [],
-            actionWidth: wideRows ? RowButtons.width(closable: closable) : RowButtons.size,
+            actionWidth: showsActions || actionLayout == .reserved ? actionWidth : 0,
             hovered: hovered == row.key,
             now: workspace.now,
             toggleContinue: running ? { workspace.setContinueAtReset(row.key, !workspace.continueAtReset.contains(row.key)) } : nil,
@@ -387,11 +390,11 @@ struct SidebarView: View {
         // After the row's gestures, so a click on it does not also select
         // the row.
         .overlay(alignment: .trailing) {
-            if hovered == row.key || !wideRows {
+            if showsActions {
                 RowButtons(
                     look: look,
                     closable: closable,
-                    compact: !wideRows,
+                    compact: compact,
                     start: { agent in workspace.newSession(agent, cwd: row.cwd) },
                     close: { actions.close(row.key) }
                 )
@@ -647,7 +650,6 @@ private struct RowView: View {
     /// Programs left running in its folder.
     let leftovers: [Leftover]
     let actionWidth: CGFloat
-    /// The list shows its buttons where the state would be.
     let hovered: Bool
     let now: Date
     /// Turns `continues` on or off; nil when no agent of ours runs it.
@@ -721,9 +723,11 @@ private struct RowView: View {
                     details
                 }
             }
-            Spacer(minLength: 4)
-            Color.clear.frame(width: actionWidth, height: 1)
-            state.frame(width: 16)
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+            .clipped()
+            .padding(.trailing, actionWidth)
+            Color.clear.frame(width: 16, height: 16)
+                .overlay { state }
         }
         .padding(.leading, 8)
         .padding(.trailing, 6)
@@ -1085,6 +1089,18 @@ struct FolderApp: Identifiable {
         } else {
             NSWorkspace.shared.open([folder], withApplicationAt: url, configuration: NSWorkspace.OpenConfiguration())
         }
+    }
+}
+
+private enum RowActionLayout {
+    case menu, onHover, reserved
+
+    init(width: CGFloat) {
+        // The default 260-point sidebar fits all five buttons on hover.
+        // Wider rows can keep that space reserved even before hovering.
+        if width < 250 { self = .menu }
+        else if width < 380 { self = .onHover }
+        else { self = .reserved }
     }
 }
 

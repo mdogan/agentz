@@ -30,7 +30,7 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 
 ⌘N, ⇧⌘N and ⌘T ask where to start in a sheet: one list of the recent folders, each repo with its worktrees under it and **New Worktree…**, then **Open Folder…** and **Create Folder…**. The shown session's folder is picked already, so ⌘N and ↩ start Claude in the same folder. A folder that is not in the list, like a subfolder a shell went to, gets a row of its own on top. Type to narrow the list by folder, repo, branch or path (`api fix` finds the worktrees of `api` on a `fix/…` branch), ↑ ↓ to pick, ↩ to start, ⎋ to cancel. An agent started this way takes the place of the shown shell if it is idle.
 
-- A wide sidebar shows Claude, Codex, Git, and Shell actions on hover. In a narrow sidebar, the ellipsis menu has the same actions.
+- Hover over a session and click Claude, Codex, Git, or Shell to open it in that session's folder. Below 250 points, the sidebar puts these actions in the ellipsis menu.
 - **Click** a running session to show it. Click an inactive session to read its last prompt, reply, and note. **Show older turns** opens more of its conversation. **Double-click** or press **Return** on any session to open it: it switches to it if it runs, otherwise it resumes it.
 - A spinner means the agent is working. A green dot means it waits for you.
 - While any agent is working, agentz keeps the Mac awake, including for sessions off screen or Claude sessions running in another app. Once all agents are idle or have quit, normal sleep resumes. The display can still sleep.
