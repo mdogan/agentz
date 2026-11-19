@@ -30,7 +30,10 @@ final class Tab {
     /// What its pane shows.
     let content: PaneContent
     var cwd: String
-    let spawnedAt = Date()
+    let spawnedAt: Date
+    /// Where its row is in the list, newest first: when it started, until
+    /// the user drags the row somewhere else.
+    var order: Date
     var fallbackTitle: String
     /// Started by resuming an existing transcript.
     let resumed: Bool
@@ -55,6 +58,9 @@ final class Tab {
         self.key = key
         self.content = content
         self.cwd = cwd
+        let now = Date()
+        spawnedAt = now
+        order = now
         fallbackTitle = title
         self.resumed = resumed
     }
@@ -103,6 +109,7 @@ struct Row: Identifiable, Equatable {
     /// What the list sorts by, newest first. For a session with a tab of
     /// ours, when the tab started: new and resumed sessions go to the top
     /// and stay there, instead of moving up each time the agent writes.
+    /// The user can drag those rows to another place.
     var order: Date
     /// Pinned rows come first.
     var pinned = false
@@ -504,7 +511,8 @@ final class Workspace {
     func savedState() -> SavedState {
         var state = SavedState(project: projectDir)
         var index: [SessionKey: UInt32] = [:]
-        for r in tabs where r.isRunning || r.pinned {
+        // In the list's order, oldest first, as `restore` starts them.
+        for r in tabs.sorted(by: { $0.order < $1.order }) where r.isRunning || r.pinned {
             index[r.key] = UInt32(state.tabs.count)
             state.tabs.append(saved(r))
         }
@@ -543,7 +551,7 @@ final class Workspace {
     /// unpinned, or their session or folder moved on.
     private func keepPins() {
         guard let savePins else { return }
-        let pins = tabs.filter(\.pinned).map(saved)
+        let pins = tabs.filter(\.pinned).sorted { $0.order < $1.order }.map(saved)
         guard pins != savedPins else { return }
         savedPins = pins
         savePins(pins)
@@ -800,7 +808,7 @@ final class Workspace {
             if !all, tab == nil, elsewhere[key] == nil, range == .week || range == .month {
                 nextRangeChange = min(nextRangeChange, s.updated.addingTimeInterval(range == .week ? 7 * 86400 : 30 * 86400))
             }
-            let order = tab?.spawnedAt ?? s.updated
+            let order = tab?.order ?? s.updated
             let place = place(s.cwd)
             return Row(
                 key: key, title: s.title, cwd: s.cwd, place: place, branch: shownBranch(s.branch, place: place), pr: s.pr,
@@ -811,7 +819,7 @@ final class Workspace {
         // Sessions we started that have no transcript yet, and shells. A
         // shell running an agent is shown as that agent's session.
         for r in tabs where !rows.contains(where: { r.shows($0.key) }) {
-            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.spawnedAt, pinned: r.pinned, active: true, git: r.git?.status))
+            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.order, pinned: r.pinned, active: true, git: r.git?.status))
         }
         return rows
     }
@@ -826,7 +834,7 @@ final class Workspace {
                        updated: session.updated, order: session.updated)
         }
         guard let tab = tabs.first(where: { $0.shows(key) }) else { return nil }
-        return Row(key: key, title: tab.title, cwd: tab.cwd, place: place(tab.cwd), updated: tab.spawnedAt, order: tab.spawnedAt)
+        return Row(key: key, title: tab.title, cwd: tab.cwd, place: place(tab.cwd), updated: tab.spawnedAt, order: tab.order)
     }
 
     /// Every session, whatever the range, repository and filter, for the
@@ -1042,6 +1050,34 @@ final class Workspace {
             // Its folder is gone. Keep the pin until the user unpins it.
             tabs.append(contentsOf: ended.filter(\.pinned))
         }
+    }
+
+    /// The row of `key` can be dragged to where the row of `target` is:
+    /// both have a tab, and both are pinned or both are not. Other rows
+    /// keep their place by time.
+    func canMoveRow(_ key: SessionKey, to target: SessionKey) -> Bool {
+        guard let a = tabs.first(where: { $0.shows(key) }), let b = tabs.first(where: { $0.shows(target) }) else { return false }
+        return a !== b && a.pinned == b.pinned
+    }
+
+    /// Puts the row of `key` where the row of `target` is: above it when it
+    /// moves up, below it when it moves down. The rows of its group keep
+    /// their times, in the new order, so rows the filters hide stay put.
+    func moveRow(_ key: SessionKey, to target: SessionKey) {
+        guard canMoveRow(key, to: target),
+              let moved = tabs.first(where: { $0.shows(key) }),
+              let onto = tabs.first(where: { $0.shows(target) }) else { return }
+        var group = tabs.filter { $0.pinned == moved.pinned }.sorted { $0.order > $1.order }
+        let times = group.map(\.order)
+        guard let from = group.firstIndex(where: { $0 === moved }),
+              let to = group.firstIndex(where: { $0 === onto }) else { return }
+        group.remove(at: from)
+        group.insert(moved, at: to)
+        for (tab, time) in zip(group, times) {
+            tab.order = time
+        }
+        rebuildRows()
+        keepPins()
     }
 
     func isPinned(_ key: SessionKey) -> Bool {

@@ -253,6 +253,33 @@ final class SmokeTest {
         ws.close(unpinned.key)
         check("unpinned tab closes", ws.tabs.isEmpty, "\(ws.tabs.count) left")
 
+        // Rows with a tab can be dragged to another place in their group,
+        // and the saved tabs keep that order.
+        let shells = (0 ..< 3).compactMap { _ -> Tab? in
+            ws.newSession(.shell, cwd: tmp)
+            return ws.currentTab
+        }
+        guard shells.count == 3 else { return finish("no shells to move") }
+        let (oldest, middle, newest) = (shells[0], shells[1], shells[2])
+        check("tab rows start newest first", ws.rows.prefix(3).map(\.key) == [newest.key, middle.key, oldest.key])
+        ws.moveRow(oldest.key, to: newest.key)
+        check("a row dragged up goes above the row it is dropped on",
+              ws.rows.prefix(3).map(\.key) == [oldest.key, newest.key, middle.key], "\(ws.rows.prefix(3).map(\.key))")
+        ws.moveRow(oldest.key, to: middle.key)
+        check("a row dragged down goes below the row it is dropped on",
+              ws.rows.prefix(3).map(\.key) == [newest.key, middle.key, oldest.key], "\(ws.rows.prefix(3).map(\.key))")
+        ws.moveRow(newest.key, to: middle.key)
+        // Saved oldest first, which `restore` starts in turn.
+        check("tabs are saved in the list's order", ws.savedState().tabs.count == 3
+            && ws.tabs.sorted { $0.order < $1.order }.map(\.key) == [oldest.key, newest.key, middle.key]
+            && ws.rows.prefix(3).map(\.key) == [middle.key, newest.key, oldest.key])
+        ws.setPinned(middle.key, true)
+        check("a row can't be dragged out of its group", !ws.canMoveRow(oldest.key, to: middle.key))
+        ws.setPinned(middle.key, false)
+        for tab in shells {
+            ws.close(tab.key)
+        }
+
         // A split shows two tabs. The new pane gets the focus and a shell in
         // the shown tab's folder.
         ws.newSession(.shell, cwd: tmp)

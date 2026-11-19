@@ -48,6 +48,8 @@ struct SidebarView: View {
     @FocusState private var filterFocused: Bool
     @State private var actionLayout = RowActionLayout.onHover
     @State private var hovered: SessionKey?
+    /// The row being dragged, to move it around the list.
+    @State private var dragged: SessionKey?
     @State private var newWorktree: WorktreeRequest?
     @State private var cleanup: CleanupRequest?
 
@@ -379,8 +381,13 @@ struct SidebarView: View {
             note: workspace.notes.note(for: row.key),
             editNote: { actions.editNote(row.key) }
         )
-        // Onto the terminal, to show it in a split.
-        .onDrag { SessionDrag.provider(row.key) }
+        // Onto the terminal, to show it in a split, or onto another row
+        // to move it there.
+        .onDrag {
+            dragged = row.key
+            return SessionDrag.provider(row.key)
+        }
+        .onDrop(of: [SessionDrag.utType], delegate: RowDrop(target: row.key, workspace: workspace, dragged: $dragged))
         .onTapGesture(count: 2) { workspace.open(row.key) }
         .simultaneousGesture(TapGesture().onEnded {
             workspace.selection = row.key
@@ -1393,4 +1400,35 @@ func laterTimes() -> [(String, Date)] {
         times.append((when.prefix(1).uppercased() + when.dropFirst(), nine))
     }
     return times
+}
+
+/// Moves the dragged row to where it is over, as the mouse goes. Rows of
+/// another group, or with no tab, don't take it.
+private struct RowDrop: DropDelegate {
+    let target: SessionKey
+    let workspace: Workspace
+    @Binding var dragged: SessionKey?
+
+    func validateDrop(info _: DropInfo) -> Bool {
+        dragged != nil
+    }
+
+    func dropEntered(info _: DropInfo) {
+        guard let dragged, workspace.canMoveRow(dragged, to: target) else { return }
+        withAnimation(.easeOut(duration: 0.15)) {
+            workspace.moveRow(dragged, to: target)
+        }
+    }
+
+    func dropUpdated(info _: DropInfo) -> DropProposal? {
+        guard let dragged, dragged == target || workspace.canMoveRow(dragged, to: target) else {
+            return DropProposal(operation: .forbidden)
+        }
+        return DropProposal(operation: .move)
+    }
+
+    func performDrop(info _: DropInfo) -> Bool {
+        dragged = nil
+        return true
+    }
 }

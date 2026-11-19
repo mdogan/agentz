@@ -1,6 +1,7 @@
 import AgentzCore
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The window: sessions on the left, the shown terminal or git tab in the
 /// middle, and the Changes panel on the right while it is shown.
@@ -849,6 +850,8 @@ final class PaneViewController: NSViewController {
 /// terminal does not take it as text to type.
 enum SessionDrag {
     static let type = NSPasteboard.PasteboardType("io.dogan.agentz.session")
+    /// The same, for SwiftUI drops. Info.plist declares it.
+    static let utType = UTType(exportedAs: type.rawValue)
 
     /// What a row of the list hands to the drag.
     static func provider(_ key: SessionKey) -> NSItemProvider {
