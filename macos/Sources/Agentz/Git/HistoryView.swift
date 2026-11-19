@@ -40,12 +40,8 @@ struct HistoryView: View {
                                 graphColumnCount: graph?.columnCount ?? 0,
                                 showsGraph: showsGraph
                             )
-                            .contentShape(Rectangle())
-                            .simultaneousGesture(TapGesture().onEnded {
-                                if let openDetail {
-                                    store.selectCommit(commit)
-                                    openDetail.wrappedValue = true
-                                }
+                            .modifier(OpenDetailOnTap(openDetail: openDetail) {
+                                store.selectCommit(commit)
                             })
                             .tag(commit.hash)
                             .contextMenu {
@@ -130,6 +126,28 @@ struct HistoryView: View {
             return false
         case .all, .revision, .commit:
             return true
+        }
+    }
+}
+
+/// In a narrow pane, a click on a commit also opens its detail. The tap
+/// gesture is only attached there: on macOS any tap gesture on a `List` row,
+/// even a simultaneous one, takes the click from the List and stops it from
+/// selecting the row.
+private struct OpenDetailOnTap: ViewModifier {
+    let openDetail: Binding<Bool>?
+    let select: () -> Void
+
+    func body(content: Content) -> some View {
+        if let openDetail {
+            content
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    select()
+                    openDetail.wrappedValue = true
+                }
+        } else {
+            content
         }
     }
 }
