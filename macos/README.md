@@ -44,7 +44,7 @@ The list shows sessions from all repos. At start it shows today's sessions. The 
 - Claude sessions running outside agentz (in another terminal, your editor or another agentz window) show in the list whatever its filter, with a gray spinner while they work and a window icon otherwise. Opening one here offers to fork it: a new session starts with a copy of the conversation, and the one outside goes on as it is. Two Claude processes never write to the same conversation that way. To continue the session itself here, quit it there first. For the same reason, a saved tab whose session now runs elsewhere is not resumed at launch; the next launch tries again.
 - When an agent stops at its plan's rate limit, its row says when the limit resets, e.g. "Rate limit · resets in 1h20m", from what the agent said (or, if it said no time, from the rate limits at the bottom of the list). Click **Continue then** on that line, or right-click and pick **Continue When the Rate Limit Resets**, and agentz types `continue` into the session a minute after that time. It does so once per stop, only while the agent runs here and is not working, and not in its first seconds after a resume. If the limit stops it again, it continues after the next reset too. This choice is kept across launches, until the session goes on or you close it.
 - Programs that were started in the background and outlived what started them, like a dev server an agent ran with `nohup … &`, show on the row of the session that ran in their folder when they started, with the memory they use, e.g. "1.2 GB". The bottom of the list adds them up ("2 programs left running · 1.4 GB"); click it to stop one or all. Right-click a session to stop the ones from its folder. agentz asks first, then asks them to quit and stops them if they still run 3 seconds later, with what they started. It never stops anything by itself. Programs in an app or in your home folder, and Codex's background server (`codex app-server`), are not counted.
-- Right-click a session to open it in a split, close it, pin it, show its folder, or copy its id.
+- Right-click a session to open it in a split, close it, pin it, bookmark it, show its folder, or copy its id.
 - A pinned session stays at the top of the list and can't be closed until you unpin it (right-click, or **File › Unpin Session**). A line separates pinned and active sessions from other sessions when both are shown. If its agent or shell ends, its row stays; open it to start it again. Pinned sessions come back on every launch, even after a crash.
 - Drag a pinned or open session up or down in the list to change its place. It moves among the sessions of its own group (pinned, or open), and keeps that place on the next launch. Other sessions stay in order of when they were last used.
 
@@ -108,11 +108,18 @@ The **Git** menu works on the git tab in the focused pane, or else on the Change
 - Notes are local, personal annotations; nothing is sent to the agent. Each note is its own Markdown file in `~/Library/Application Support/Agentz/notes/`, named after the session's title (for example `Fix parser 1a2b3c4d.md`). A short front matter block at the top keeps the session ID, title, folder and last change; the rest of the file is the note exactly as written. The file follows session title changes and keeps edits made in another editor. If both editors change the body, Agentz saves its draft and puts the other version under `notes/Recovered/`. Agentz skips files in the folder it cannot read and never changes them. Notes live independently of tabs and transcripts. Closing a session, deleting its transcript, or archiving it does not delete the note. All Notes keeps the last known session title and folder and shows **Session unavailable** when Agentz cannot find it.
 - Resuming a session keeps its note. A fork has its own note. A draft written in a new Codex tab follows the real session ID when Agentz discovers it. Notes on an agent running inside a shell belong to that agent session.
 
+**Bookmarks.** Bookmark a Claude or Codex session to find it again later, days or weeks from now. Right-click it and pick **Bookmark**, or press ⇧⌘B (**File › Bookmark Session**) for the selected session. Shells and git tabs can't be bookmarked. A bookmarked session has a small bookmark icon beside its title.
+
+- The bookmark button at the right of the sidebar session counts, or **Bookmarked Sessions** in the filter menu or the **Sessions** menu, shows only the bookmarked sessions, whatever their age, newest first. Click the button again to go back to the sessions you showed before. The repository filter and the text filter still work on top.
+- Right-click a session and pick **Remove Bookmark**, or press ⇧⌘B again, to remove it. Closing a session or quitting agentz keeps its bookmark.
+- Bookmarks are kept in `~/Library/Application Support/Agentz/bookmarks.json`, with each session's last known title and folder. If a session's transcript is deleted, its row stays in the bookmarked list as **Session unavailable** until you remove the bookmark. A fork does not get the bookmark of the session it came from.
+
 | Shortcut | Action |
 | --- | --- |
 | ⇧⌘P | all actions: search commands, ↑ / ↓ to select, ↩ to run, ⎋ to close |
 | ⌘E | go to session: search all sessions, ↩ to show or resume, ⎋ to close |
 | ⌥⌘N / ⇧⌘M | edit the selected session's note / open All Notes |
+| ⇧⌘B | bookmark the selected session, or remove its bookmark |
 | ⌘N / ⇧⌘N | new Claude / Codex session: asks where, and takes the place of the shown shell if it is idle |
 | ⌘T | new shell: asks where |
 | ⌘W | close the shown session (asks first if it is working) |
@@ -148,7 +155,7 @@ An agent only quits when you tell it to, in its own tab. If one quits while you 
 
 A shell can tell you when a long command ends, as Ghostty does: set `notify-on-command-finish` (`unfocused` or `always`) in your Ghostty config. `notify-on-command-finish-after` sets how long a command must run (5s by default). `notify-on-command-finish-action` picks `bell` (bounce the Dock icon and mark the row), `notify` (a notification), or both. Like in Ghostty, `bell` is on unless you write `no-bell`. The shell has to mark its commands: fish 4 does this by itself, and Ghostty's shell integration does it for zsh and bash.
 
-**Quit** (⌘Q) asks first if an agent or a command is still running. The open tabs come back on the next launch.
+**Quit** (⌘Q) asks first if an agent or a command is still running. The open tabs come back on the next launch. agentz also saves them each time they change, so they come back after a crash too.
 
 Rate limits for Claude and Codex show at the bottom of the list. To also get Claude's limits, and the size of its context window, from a `claude` you start by hand, use **Agentz › Install Claude Status Line**.
 

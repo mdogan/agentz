@@ -113,6 +113,10 @@ struct Row: Identifiable, Equatable {
     var order: Date
     /// Pinned rows come first.
     var pinned = false
+    /// The user bookmarked it.
+    var bookmarked = false
+    /// A bookmark whose session is gone: its transcript was deleted.
+    var missing = false
     /// Has a tab of ours: a running agent or shell, or one that just
     /// ended. Active rows come before the rest, whatever their time.
     var active = false
@@ -157,10 +161,11 @@ enum BoxHalf {
     case top, bottom
 }
 
-/// Which sessions the list shows, by when they were last used. Sessions
-/// with a running agent or shell show in all of them.
+/// Which sessions the list shows, by when they were last used, or the
+/// bookmarked ones. Sessions with a running agent or shell show in all of
+/// them but the bookmarked one.
 enum SessionRange: CaseIterable {
-    case active, today, week, month, all
+    case active, today, week, month, all, bookmarked
 
     var title: String {
         switch self {
@@ -169,20 +174,22 @@ enum SessionRange: CaseIterable {
         case .week: "Last 7 Days' Sessions"
         case .month: "Last 30 Days' Sessions"
         case .all: "All Sessions"
+        case .bookmarked: "Bookmarked Sessions"
         }
     }
 
     func includes(_ updated: Date, now: Date) -> Bool {
-        guard self != .active else { return false }
+        guard self != .active, self != .bookmarked else { return false }
         return since(now: now).map { updated >= $0 } ?? true
     }
 
     /// The oldest a session in the range can be, nil for no limit. Active
     /// sessions get today's, as most of them ran today: the first scan
-    /// reads only sessions this new.
+    /// reads only sessions this new. Bookmarks get today's too: until the
+    /// scan reads the older ones, their rows show what the bookmark kept.
     func since(now: Date) -> Date? {
         switch self {
-        case .active, .today: Calendar.current.startOfDay(for: now)
+        case .active, .today, .bookmarked: Calendar.current.startOfDay(for: now)
         case .week: now.addingTimeInterval(-7 * 86400)
         case .month: now.addingTimeInterval(-30 * 86400)
         case .all: nil
@@ -277,7 +284,12 @@ final class Workspace {
     /// Show only this repo's sessions; nil shows all repos.
     var repo: RepoFilter? { didSet { rebuildRows() } }
     /// At start, today's sessions.
-    var range = SessionRange.today { didSet { rebuildRows() } }
+    var range = SessionRange.today {
+        didSet {
+            if range == .bookmarked, oldValue != .bookmarked { rangeBeforeBookmarks = oldValue }
+            rebuildRows()
+        }
+    }
     var filter = "" { didSet { rebuildRows() } }
     private(set) var rows: [Row] = []
     private var tabRows: [Row] = []
@@ -300,13 +312,17 @@ final class Workspace {
                 rebuildRows()
             }
             onLayout?()
+            scheduleKeep()
         }
     }
     /// Splits off screen, because the user picked a session outside them.
     /// Picking one of their sessions shows them again. They never hold a
     /// tab that ended.
     private(set) var hiddenSplits: [PaneLayout] = [] {
-        didSet { rebuildRows() }
+        didSet {
+            rebuildRows()
+            scheduleKeep()
+        }
     }
     /// The tab shown in the focused pane, by its own key.
     private(set) var current: SessionKey? {
@@ -360,6 +376,7 @@ final class Workspace {
                 endHiddenSplit(with: old.key)
             }
             onLayout?()
+            scheduleKeep()
         }
     }
     @ObservationIgnored let sleepBlocker = SleepBlocker()
@@ -406,15 +423,27 @@ final class Workspace {
     /// Asks whether to fork the session `title`, which runs in another
     /// app, instead of resuming it. True to fork.
     @ObservationIgnored var confirmFork: ((_ title: String, _ elsewhere: RunningElsewhere) -> Bool)?
+    /// The open tabs changed, and should be kept, so they come back after
+    /// a crash.
+    @ObservationIgnored var keepTabs: ((SavedState) -> Void)?
+    /// What `keepTabs` got last.
+    @ObservationIgnored private var keptTabs: SavedState?
+    @ObservationIgnored private var keepPending = false
+    /// Saved tabs the last launch could not open, e.g. as their session ran
+    /// in another app. They are saved with the open tabs, so a later launch
+    /// tries them again.
+    @ObservationIgnored var unopened: [SavedTab] = []
     /// The pinned tabs changed, and should be kept for the next launch.
     @ObservationIgnored var savePins: (([SavedTab]) -> Void)?
     /// What `savePins` got last.
     @ObservationIgnored private var savedPins: [SavedTab]?
 
     let notes: SessionNotes
+    let bookmarks: SessionBookmarks
 
-    init(projectDir: String, notes: SessionNotes? = nil) {
+    init(projectDir: String, notes: SessionNotes? = nil, bookmarks: SessionBookmarks? = nil) {
         self.notes = notes ?? SessionNotes()
+        self.bookmarks = bookmarks ?? SessionBookmarks()
         let dir = URL(fileURLWithPath: projectDir).standardizedFileURL.path
         self.projectDir = dir
         root = dir
@@ -424,24 +453,52 @@ final class Workspace {
                 self?.onLayout?()
             }
         }
+        self.bookmarks.onChange = { [weak self] in self?.rebuildRows() }
         findRoot()
     }
 
     /// Resolve a shell to the agent currently running inside it. Bare shells
-    /// and Git tabs do not own agent-session notes.
-    func noteKey(_ key: SessionKey) -> SessionKey? {
+    /// and Git tabs have no agent session, for notes or bookmarks.
+    func agentKey(_ key: SessionKey) -> SessionKey? {
         let key = tabs.first(where: { $0.key == key })?.linked ?? key
         return key.agent == .claude || key.agent == .codex ? key : nil
     }
 
-    var selectedNoteKey: SessionKey? { (selection ?? currentLinked ?? current).flatMap(noteKey) }
+    /// The agent session of the selected row, else of the shown tab.
+    var selectedAgentKey: SessionKey? { (selection ?? currentLinked ?? current).flatMap(agentKey) }
+
+    func isBookmarked(_ key: SessionKey) -> Bool {
+        agentKey(key).map(bookmarks.contains) ?? false
+    }
+
+    /// Bookmarks the agent session of `key`, or removes its bookmark.
+    func toggleBookmark(_ key: SessionKey) {
+        guard let key = agentKey(key) else { return }
+        if bookmarks.contains(key) {
+            bookmarks.remove(key)
+        } else {
+            let session = sessions.first { $0.key == key }
+            let tab = tabs.first { $0.shows(key) }
+            bookmarks.add(key, title: session?.title ?? tab?.title ?? key.agent.displayName,
+                          folder: session?.cwd ?? tab?.cwd ?? projectDir)
+        }
+        if let problem = bookmarks.problem { setStatus(problem) }
+    }
+
+    /// The range the list showed before the bookmarked sessions.
+    @ObservationIgnored private var rangeBeforeBookmarks = SessionRange.today
+
+    /// Shows the bookmarked sessions, or goes back to the range before.
+    func toggleBookmarkedRange() {
+        range = range == .bookmarked ? rangeBeforeBookmarks : .bookmarked
+    }
 
     func hasNoteSession(_ key: SessionKey) -> Bool {
         sessions.contains { $0.key == key } || tabs.contains { $0.shows(key) }
     }
 
     func ensureNote(_ key: SessionKey) -> UUID? {
-        guard let key = noteKey(key) else { return nil }
+        guard let key = agentKey(key) else { return nil }
         let session = sessions.first { $0.key == key }
         let tab = tabs.first { $0.shows(key) }
         return notes.create(for: key, title: session?.title ?? tab?.title ?? key.agent.displayName,
@@ -511,10 +568,15 @@ final class Workspace {
     func savedState() -> SavedState {
         var state = SavedState(project: projectDir)
         var index: [SessionKey: UInt32] = [:]
+        let open = tabs.sorted(by: { $0.order < $1.order }).filter { $0.isRunning || $0.pinned }.map { ($0, saved($0)) }
+        // Older than the open tabs. Not the ones opened since.
+        state.tabs = unopened.filter { tab in
+            tab.id == nil || !open.contains { $0.1.agent == tab.agent && $0.1.id == tab.id }
+        }
         // In the list's order, oldest first, as `restore` starts them.
-        for r in tabs.sorted(by: { $0.order < $1.order }) where r.isRunning || r.pinned {
+        for (r, tab) in open {
             index[r.key] = UInt32(state.tabs.count)
-            state.tabs.append(saved(r))
+            state.tabs.append(tab)
         }
         state.active = current.flatMap { index[$0] }
         func savedSplit(_ layout: PaneLayout) -> SavedSplit? {
@@ -545,6 +607,33 @@ final class Workspace {
         }
         let title = session?.title ?? (agent == .shell ? Launch.shellName : r.title)
         return SavedTab(agent: agent, id: id, cwd: cwd, title: title, pinned: r.pinned)
+    }
+
+    /// Hands the open tabs to `keepTabs` soon, once for all changes made
+    /// until then.
+    private func scheduleKeep() {
+        guard keepTabs != nil, !keepPending else { return }
+        keepPending = true
+        DispatchQueue.main.async { [weak self] in
+            self?.keepPending = false
+            self?.keepOpenTabs()
+        }
+    }
+
+    /// Hands the open tabs to `keepTabs` when they changed: opened, closed,
+    /// moved, split, or their session or folder moved on.
+    func keepOpenTabs() {
+        guard let keepTabs else { return }
+        let state = savedState()
+        guard state != keptTabs else { return }
+        keptTabs = state
+        keepTabs(state)
+    }
+
+    /// The open tabs were saved on quit, which removed the copy kept for a
+    /// crash.
+    func forgetKeptTabs() {
+        keptTabs = nil
     }
 
     /// Hands the pinned tabs to `savePins` when they changed: pinned,
@@ -682,7 +771,10 @@ final class Workspace {
         if elsewhere != self.elsewhere { self.elsewhere = elsewhere; rowsChanged = true }
         let shellsChanged = linkShells(scan.shells)
         let codexChanged = bindNewCodexSessions(scan.codexThreads)
-        if let scanned = scan.sessions { notes.refreshMetadata(scanned) }
+        if let scanned = scan.sessions {
+            notes.refreshMetadata(scanned)
+            bookmarks.refreshMetadata(scanned)
+        }
         if scan.sessions != nil || limitsChanged || limitStops.values.contains(where: { Date().timeIntervalSince($0.stop.at) >= 7 * 86400 }) {
             let stops = limitInfo()
             if stops != limitStops { limitStops = stops }
@@ -695,6 +787,7 @@ final class Workspace {
         if rowsChanged || shellsChanged || codexChanged { rebuildRows() }
         else { refreshStates() }
         keepPins()
+        keepOpenTabs()
     }
 
     /// The sessions that stopped at the rate limit this week, and when
@@ -782,6 +875,7 @@ final class Workspace {
             changed = true
             r.key = key
             notes.rebind(from: old, to: key)
+            bookmarks.rebind(from: old, to: key)
             if let pane = panes.keys.firstIndex(of: old) { panes.keys[pane] = key }
             for i in hiddenSplits.indices {
                 if let pane = hiddenSplits[i].keys.firstIndex(of: old) { hiddenSplits[i].keys[pane] = key }
@@ -801,10 +895,15 @@ final class Workspace {
         if !all {
             nextRangeChange = range == .today ? Calendar.current.dateInterval(of: .day, for: now)?.end ?? now : .distantFuture
         }
+        let onlyBookmarks = !all && range == .bookmarked
         var rows: [Row] = sessions.compactMap { s in
             let key = s.key
             let tab = tabs.first { $0.shows(key) }
-            guard all || tab != nil || elsewhere[key] != nil || (range != .active && cutoff.map { s.updated >= $0 } != false) else { return nil }
+            if onlyBookmarks {
+                guard bookmarks.contains(key) else { return nil }
+            } else {
+                guard all || tab != nil || elsewhere[key] != nil || (range != .active && cutoff.map { s.updated >= $0 } != false) else { return nil }
+            }
             if !all, tab == nil, elsewhere[key] == nil, range == .week || range == .month {
                 nextRangeChange = min(nextRangeChange, s.updated.addingTimeInterval(range == .week ? 7 * 86400 : 30 * 86400))
             }
@@ -813,13 +912,24 @@ final class Workspace {
             return Row(
                 key: key, title: s.title, cwd: s.cwd, place: place, branch: shownBranch(s.branch, place: place), pr: s.pr,
                 updated: s.updated, turnStarted: s.turnStarted, action: s.action, context: s.context, order: order,
-                pinned: tab?.pinned ?? false, active: tab != nil
+                pinned: tab?.pinned ?? false, bookmarked: bookmarks.contains(key), active: tab != nil
             )
         }
         // Sessions we started that have no transcript yet, and shells. A
         // shell running an agent is shown as that agent's session.
         for r in tabs where !rows.contains(where: { r.shows($0.key) }) {
-            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.order, pinned: r.pinned, active: true, git: r.git?.status))
+            guard !onlyBookmarks || bookmarks.contains(r.key) else { continue }
+            rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.order,
+                            pinned: r.pinned, bookmarked: bookmarks.contains(r.key), active: true, git: r.git?.status))
+        }
+        // Bookmarks the scan has not read yet, or whose session is gone,
+        // from what the bookmark kept.
+        if onlyBookmarks {
+            for b in bookmarks.bookmarks {
+                guard let key = b.key, !rows.contains(where: { $0.key == key }) else { continue }
+                rows.append(Row(key: key, title: b.title, cwd: b.folder, place: place(b.folder), updated: b.added, order: b.added,
+                                bookmarked: true, missing: allLoaded))
+            }
         }
         return rows
     }
@@ -831,7 +941,7 @@ final class Workspace {
             let place = place(session.cwd)
             return Row(key: key, title: session.title, cwd: session.cwd, place: place,
                        branch: shownBranch(session.branch, place: place), pr: session.pr,
-                       updated: session.updated, order: session.updated)
+                       updated: session.updated, order: session.updated, bookmarked: bookmarks.contains(key))
         }
         guard let tab = tabs.first(where: { $0.shows(key) }) else { return nil }
         return Row(key: key, title: tab.title, cwd: tab.cwd, place: place(tab.cwd), updated: tab.spawnedAt, order: tab.order)
@@ -1006,6 +1116,10 @@ final class Workspace {
             focusTerminal?()
             return
         }
+        if rows.first(where: { $0.key == key })?.missing == true {
+            setStatus("This session's transcript is gone. Its bookmark is kept until you remove it.")
+            return
+        }
         guard let mode = resumeMode(key) else { return }
         makeRoom()
         resume(key, mode)
@@ -1078,6 +1192,7 @@ final class Workspace {
         }
         rebuildRows()
         keepPins()
+        scheduleKeep()
     }
 
     func isPinned(_ key: SessionKey) -> Bool {
@@ -1096,6 +1211,7 @@ final class Workspace {
         }
         rebuildRows()
         keepPins()
+        scheduleKeep()
     }
 
     /// The list selection moved. Running sessions are shown right away;

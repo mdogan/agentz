@@ -146,6 +146,14 @@ struct SidebarView: View {
                 }
                 .lineLimit(1)
                 Spacer(minLength: 0)
+                let bookmarks = workspace.range == .bookmarked
+                Button(action: workspace.toggleBookmarkedRange) {
+                    Image(systemName: bookmarks ? "bookmark.fill" : "bookmark")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(bookmarks ? look.accent : look.secondary)
+                .help(bookmarks ? "Back to the other sessions" : "Bookmarked Sessions")
+                .accessibilityLabel("Bookmarked Sessions")
                 Button(action: actions.allNotes) {
                     Label("All Notes", systemImage: "note.text")
                 }
@@ -430,11 +438,24 @@ struct SidebarView: View {
 
     @ViewBuilder
     private func rowMenu(_ key: SessionKey) -> some View {
+        if workspace.rows.first(where: { $0.key == key })?.missing == true {
+            // Its transcript is gone: there is nothing to resume.
+            Button("Remove Bookmark") { workspace.toggleBookmark(key) }
+            Button("Copy Session ID") { copy(key.id) }
+        } else {
+            sessionMenu(key)
+        }
+    }
+
+    @ViewBuilder
+    private func sessionMenu(_ key: SessionKey) -> some View {
         let running = workspace.runningKeys.contains(key)
         let pinned = workspace.isPinned(key)
         Button(running ? "Show" : workspace.elsewhere[key] != nil ? "Fork…" : "Resume") { workspace.open(key) }
-        if let key = workspace.noteKey(key) {
+        if let key = workspace.agentKey(key) {
             Button(workspace.notes.note(for: key) == nil ? "Add Note" : "Edit Note") { actions.editNote(key) }
+            Button(workspace.bookmarks.contains(key) ? "Remove Bookmark" : "Bookmark") { workspace.toggleBookmark(key) }
+                .disabled(workspace.bookmarks.isReadOnly)
         }
         // A git tab is never in a split.
         if key.agent != .git {
@@ -501,6 +522,10 @@ struct SidebarView: View {
         case .today: return "No sessions today.\nShow all with ⇧⌘I."
         case .week: return "No sessions in the last 7 days.\nShow all with ⇧⌘I."
         case .month: return "No sessions in the last 30 days.\nShow all with ⇧⌘I."
+        case .bookmarked:
+            if workspace.bookmarks.bookmarks.isEmpty {
+                return workspace.bookmarks.problem ?? "No bookmarks yet.\nBookmark a session from its menu, or with ⇧⌘B."
+            }
         case .all: break
         }
         if let repo = workspace.repo { return "No sessions in \(repo.name).\nShow all repos from the filter menu." }
@@ -696,6 +721,12 @@ private struct RowView: View {
                             .foregroundStyle(look.secondary)
                             .help("Pinned. Unpin it to close it.")
                     }
+                    if row.bookmarked {
+                        Image(systemName: "bookmark.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(look.secondary)
+                            .help("Bookmarked")
+                    }
                 }
                 if let attention {
                     // What it wants, in place of where and when it ran.
@@ -726,6 +757,11 @@ private struct RowView: View {
                     .font(.system(size: 11))
                 } else if working {
                     activity
+                } else if row.missing {
+                    Text("Session unavailable · \(tilde(row.cwd))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(look.secondary)
+                        .lineLimit(1)
                 } else {
                     details
                 }

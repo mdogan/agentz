@@ -436,16 +436,25 @@ pub fn shell_quote(s: String) -> String {
 
 // ---------- saved tabs ----------
 
-/// Saves the open tabs on quit. Tabs saved by other windows are kept.
+/// Saves the open tabs on quit. Tabs saved by other windows are kept, and
+/// the copy `keep_open_tabs` kept is removed.
 #[uniffi::export]
 pub fn save_tabs(state: SavedState) -> Result<(), CoreError> {
     Ok(state::save(state)?)
 }
 
-/// Takes the saved tabs, so only one launch restores them.
+/// Takes the saved tabs, so only one launch restores them: those saved on
+/// quit, and those of an agentz that crashed.
 #[uniffi::export]
 pub fn take_tabs() -> Result<Option<SavedState>, CoreError> {
     Ok(state::take()?)
+}
+
+/// Keeps the open tabs as they are now, so they come back after a crash.
+/// Empty removes them.
+#[uniffi::export]
+pub fn keep_open_tabs(state: SavedState) -> Result<(), CoreError> {
+    Ok(state::keep_live(state)?)
 }
 
 /// Keeps the pinned tabs, for launches after a crash. Empty removes them.

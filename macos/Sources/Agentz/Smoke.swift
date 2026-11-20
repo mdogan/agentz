@@ -253,6 +253,39 @@ final class SmokeTest {
         ws.close(unpinned.key)
         check("unpinned tab closes", ws.tabs.isEmpty, "\(ws.tabs.count) left")
 
+        // The open tabs are kept as they change, so they come back after a
+        // crash.
+        var kept: [SavedState] = []
+        ws.keepTabs = { kept.append($0) }
+        ws.newSession(.shell, cwd: tmp)
+        guard let keptShell = ws.currentTab else { return finish("no shell to keep") }
+        check("opening a tab keeps the open tabs", await wait(2) { kept.last?.tabs.count == 1 }, "\(kept.map(\.tabs.count))")
+        ws.close(keptShell.key)
+        check("closing a tab keeps the open tabs", await wait(2) { kept.last?.tabs.isEmpty == true }, "\(kept.map(\.tabs.count))")
+        ws.keepTabs = nil
+
+        // Only an agent session can be bookmarked. The bookmarked sessions
+        // show on their own.
+        ws.newSession(.shell, cwd: tmp)
+        guard let plain = ws.currentTab else { return finish("no shell to bookmark") }
+        ws.toggleBookmark(plain.key)
+        check("a shell can't be bookmarked", !ws.isBookmarked(plain.key) && ws.bookmarks.bookmarks.isEmpty)
+        ws.newSession(.codex, cwd: tmp)
+        guard let marked = ws.currentTab, marked.key.agent == .codex else { return finish("no codex tab to bookmark") }
+        ws.toggleBookmark(marked.key)
+        check("an agent session can be bookmarked", ws.rows.first { $0.key == marked.key }?.bookmarked == true)
+        ws.toggleBookmarkedRange()
+        check("the bookmarked sessions show only bookmarks", ws.range == .bookmarked && ws.rows.map(\.key) == [marked.key],
+              "\(ws.rows.map(\.key))")
+        snapshot("bookmarks")
+        ws.toggleBookmarkedRange()
+        check("back to the range before", ws.range == .today)
+        ws.toggleBookmark(marked.key)
+        check("a bookmark can be removed", ws.bookmarks.bookmarks.isEmpty)
+        ws.close(marked.key)
+        ws.close(plain.key)
+        check("bookmark tabs close", ws.tabs.isEmpty, "\(ws.tabs.count) left")
+
         // Rows with a tab can be dragged to another place in their group,
         // and the saved tabs keep that order.
         let shells = (0 ..< 3).compactMap { _ -> Tab? in

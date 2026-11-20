@@ -154,6 +154,11 @@ private struct SwitcherRow: View {
                             .font(.system(size: 9))
                             .foregroundStyle(look.secondary)
                     }
+                    if row.bookmarked {
+                        Image(systemName: "bookmark.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(look.secondary)
+                    }
                 }
                 subtitle.font(.system(size: 11))
             }

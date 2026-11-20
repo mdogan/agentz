@@ -725,7 +725,7 @@ final class PaneViewController: NSViewController {
         var empty = Set(layout.keys.indices)
         for i in noteButtons.indices {
             let tab = layout.keys.indices.contains(i) ? workspace.tabs.first { $0.key == layout.keys[i] } : nil
-            let key = tab.flatMap { workspace.noteKey($0.key) }
+            let key = tab.flatMap { workspace.agentKey($0.key) }
             let note = key.flatMap { workspace.notes.note(for: $0) }
             let button = noteButtons[i]
             button.image = NSImage(systemSymbolName: note == nil ? "square.and.pencil" : "note.text", accessibilityDescription: nil)

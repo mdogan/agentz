@@ -1,5 +1,7 @@
 //! Open tabs saved on normal quit and claimed by the next interactive launch,
-//! and pinned tabs, kept until unpinned so they come back after any start.
+//! the open tabs of each running agentz, kept as they change so they come
+//! back after a crash, and pinned tabs, kept until unpinned so they come
+//! back after any start.
 
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -76,6 +78,11 @@ pub struct SavedState {
 const STEM: &str = "open-tabs";
 /// The pinned tabs, rewritten each time they change.
 const PINS: &str = "pinned-tabs.json";
+/// The open tabs of the running agentz with this process id, rewritten
+/// each time they change. A normal quit removes it.
+fn live_name(pid: u32) -> String {
+    format!("live-tabs-{pid}.json")
+}
 
 fn state_dir() -> Result<PathBuf> {
     Ok(dirs::data_local_dir()
@@ -84,14 +91,24 @@ fn state_dir() -> Result<PathBuf> {
 }
 
 pub fn save(state: SavedState) -> Result<()> {
-    if state.tabs.is_empty() {
-        return Ok(());
-    }
-    save_in(&state_dir()?, state)
+    save_in(&state_dir()?, std::process::id(), state)
 }
 
 pub fn take() -> Result<Option<SavedState>> {
-    take_in(&state_dir()?)
+    take_in(&state_dir()?, std::process::id(), process_runs)
+}
+
+pub fn keep_live(state: SavedState) -> Result<()> {
+    keep_live_in(&state_dir()?, std::process::id(), state)
+}
+
+/// True if a process with this id runs, ours or not.
+fn process_runs(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    let sent = unsafe { libc::kill(pid, 0) } == 0;
+    sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 pub fn save_pins(tabs: Vec<SavedTab>) -> Result<()> {
@@ -127,56 +144,122 @@ fn pins_in(dir: &Path) -> Result<Vec<SavedTab>> {
     })
 }
 
-fn save_in(dir: &Path, state: SavedState) -> Result<()> {
-    if state.tabs.is_empty() {
-        return Ok(());
-    }
+/// Adds `state`, the last window's tabs, to the tabs saved on quit, and
+/// removes the live copy of process `pid`, which quits.
+fn save_in(dir: &Path, pid: u32, state: SavedState) -> Result<()> {
     with_lock(dir, || {
-        let path = dir.join(format!("{STEM}.json"));
-        let mut saved = read(&path)?.unwrap_or_default();
-        let base = saved.tabs.len();
-        saved.tabs.extend(state.tabs);
-        saved.project = state.project.or(saved.project);
-        // Two agentz windows can show the same agent. Resume that session
-        // once, using the last window's tab, selection and split.
-        let mut unique = Vec::new();
-        // Where each tab in `unique` was in `saved.tabs`.
-        let mut origin = Vec::new();
-        for (i, tab) in saved.tabs.into_iter().enumerate() {
-            if let Some(id) = &tab.id
-                && let Some(previous) = unique.iter().position(|other: &SavedTab| {
-                    other.agent == tab.agent && other.id.as_ref() == Some(id)
-                })
-            {
-                unique.remove(previous);
-                origin.remove(previous);
-            }
-            unique.push(tab);
-            origin.push(i);
+        remove_if_there(&dir.join(live_name(pid)))?;
+        if state.tabs.is_empty() {
+            return Ok(());
         }
-        // An index into the last window's tabs, as an index into `unique`.
-        let kept = |i: u32| {
-            let i = origin.iter().position(|&o| o == base + i as usize)?;
-            Some(i as u32)
-        };
-        let kept_split = |split: SavedSplit| SavedSplit {
-            panes: split.panes.iter().map(|p| p.and_then(kept)).collect(),
-            ..split
-        };
-        saved.tabs = unique;
-        saved.active = state.active.and_then(kept);
-        saved.split = state.split.map(kept_split);
-        saved.hidden_splits = state.hidden_splits.into_iter().map(kept_split).collect();
-        write_atomic(&path, &saved)
+        let path = dir.join(format!("{STEM}.json"));
+        let saved = read(&path)?.unwrap_or_default();
+        write_atomic(&path, &merge(saved, state))
     })
 }
 
-fn take_in(dir: &Path) -> Result<Option<SavedState>> {
+/// Replaces the live copy of the tabs of process `pid`. Empty removes it.
+fn keep_live_in(dir: &Path, pid: u32, state: SavedState) -> Result<()> {
+    with_lock(dir, || {
+        let path = dir.join(live_name(pid));
+        if state.tabs.is_empty() {
+            return remove_if_there(&path);
+        }
+        write_atomic(&path, &state)
+    })
+}
+
+/// `saved` with the tabs of the window `state` after its own. Two agentz
+/// windows can show the same agent. That session is resumed once, using
+/// the last window's tab, selection and split.
+fn merge(mut saved: SavedState, state: SavedState) -> SavedState {
+    let base = saved.tabs.len();
+    saved.tabs.extend(state.tabs);
+    saved.project = state.project.or(saved.project);
+    let mut unique = Vec::new();
+    // Where each tab in `unique` was in `saved.tabs`.
+    let mut origin = Vec::new();
+    for (i, tab) in saved.tabs.into_iter().enumerate() {
+        if let Some(id) = &tab.id
+            && let Some(previous) = unique.iter().position(|other: &SavedTab| {
+                other.agent == tab.agent && other.id.as_ref() == Some(id)
+            })
+        {
+            unique.remove(previous);
+            origin.remove(previous);
+        }
+        unique.push(tab);
+        origin.push(i);
+    }
+    // An index into the last window's tabs, as an index into `unique`.
+    let kept = |i: u32| {
+        let i = origin.iter().position(|&o| o == base + i as usize)?;
+        Some(i as u32)
+    };
+    let kept_split = |split: SavedSplit| SavedSplit {
+        panes: split.panes.iter().map(|p| p.and_then(kept)).collect(),
+        ..split
+    };
+    saved.tabs = unique;
+    saved.active = state.active.and_then(kept);
+    saved.split = state.split.map(kept_split);
+    saved.hidden_splits = state.hidden_splits.into_iter().map(kept_split).collect();
+    saved
+}
+
+fn remove_if_there(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("removing {}", path.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Takes the tabs saved on quit, and the live tabs of agentz processes
+/// that ended without quitting, e.g. in a crash. Process `pid` is the one
+/// that asks; `runs` tells if a process still runs, so the tabs of
+/// another running agentz are left to it.
+fn take_in(dir: &Path, pid: u32, runs: impl Fn(u32) -> bool) -> Result<Option<SavedState>> {
     with_lock(dir, || {
         let path = dir.join(format!("{STEM}.json"));
-        let state = read(&path)?;
-        if state.is_some() {
-            fs::remove_file(&path)?;
+        let mut state = read(&path)?;
+        let mut taken = vec![path];
+        let mut live: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(other) = name
+                .to_str()
+                .and_then(|n| n.strip_prefix("live-tabs-")?.strip_suffix(".json"))
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if other != pid && runs(other) {
+                continue;
+            }
+            let modified = entry.metadata()?.modified()?;
+            live.push((modified, entry.path()));
+        }
+        // The window that changed last goes last, so its selection wins.
+        live.sort();
+        for (_, path) in live {
+            if let Some(more) = read(&path)? {
+                state = Some(match state {
+                    Some(saved) => merge(saved, more),
+                    None => more,
+                });
+            }
+            taken.push(path);
+        }
+        for path in taken {
+            remove_if_there(&path)?;
         }
         Ok(state)
     })
@@ -254,6 +337,7 @@ mod tests {
         };
         save_in(
             &dir,
+            1,
             SavedState {
                 tabs: vec![
                     tab(Agent::Shell, None),
@@ -267,6 +351,7 @@ mod tests {
         .unwrap();
         save_in(
             &dir,
+            1,
             SavedState {
                 tabs: vec![
                     tab(Agent::Claude, Some("one")),
@@ -277,14 +362,14 @@ mod tests {
             },
         )
         .unwrap();
-        let saved = take_in(&dir).unwrap().unwrap();
+        let saved = take_in(&dir, 1, |_| false).unwrap().unwrap();
         assert_eq!(saved.tabs.len(), 4);
         assert_eq!(saved.tabs[0].agent, Agent::Shell);
         assert_eq!(saved.tabs[1].agent, Agent::Git);
         assert_eq!(saved.tabs[2].id.as_deref(), Some("one"));
         assert_eq!(saved.tabs[3].id.as_deref(), Some("two"));
         assert_eq!(saved.active, Some(3));
-        assert_eq!(take_in(&dir).unwrap(), None);
+        assert_eq!(take_in(&dir, 1, |_| false).unwrap(), None);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -309,8 +394,8 @@ mod tests {
             tabs: vec![tab.clone()],
             ..SavedState::default()
         };
-        save_in(&dir, state).unwrap();
-        let saved = take_in(&dir).unwrap().unwrap();
+        save_in(&dir, 1, state).unwrap();
+        let saved = take_in(&dir, 1, |_| false).unwrap().unwrap();
         assert_eq!(saved.tabs.len(), 2);
         assert_eq!(saved.tabs[0].id, None);
         assert_eq!(saved.tabs[1], tab);
@@ -330,6 +415,7 @@ mod tests {
         };
         save_in(
             &dir,
+            1,
             SavedState {
                 tabs: vec![tab("one"), tab("two")],
                 split: Some(SavedSplit {
@@ -345,6 +431,7 @@ mod tests {
         // goes, and the second window's tabs move down by one.
         save_in(
             &dir,
+            1,
             SavedState {
                 tabs: vec![tab("three"), tab("one"), tab("four"), tab("five")],
                 active: Some(1),
@@ -364,7 +451,7 @@ mod tests {
         .unwrap();
         let text = fs::read_to_string(dir.join("open-tabs.json")).unwrap();
         assert!(text.contains(r#""direction":"right""#), "{text}");
-        let saved = take_in(&dir).unwrap().unwrap();
+        let saved = take_in(&dir, 1, |_| false).unwrap().unwrap();
         let ids: Vec<_> = saved.tabs.iter().filter_map(|t| t.id.as_deref()).collect();
         assert_eq!(ids, ["two", "three", "one", "four", "five"]);
         assert_eq!(saved.active, Some(2));
@@ -414,8 +501,50 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agentz-state-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("open-tabs.json"), b"broken").unwrap();
-        assert!(take_in(&dir).is_err());
+        assert!(take_in(&dir, 1, |_| false).is_err());
         assert!(dir.join("open-tabs.json").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn live_tabs_come_back_only_when_their_process_is_gone() {
+        let dir = std::env::temp_dir().join(format!("agentz-state-{}", uuid::Uuid::new_v4()));
+        let tab = |id: &str| SavedTab {
+            agent: Agent::Claude,
+            id: Some(id.into()),
+            cwd: PathBuf::from("/tmp"),
+            title: "tab".into(),
+            pinned: false,
+        };
+        let state = |ids: &[&str]| SavedState {
+            tabs: ids.iter().map(|id| tab(id)).collect(),
+            active: Some(0),
+            ..SavedState::default()
+        };
+        // Each change replaces the copy; it does not add to it.
+        keep_live_in(&dir, 10, state(&["one"])).unwrap();
+        keep_live_in(&dir, 10, state(&["one", "two"])).unwrap();
+        keep_live_in(&dir, 20, state(&["three"])).unwrap();
+        // Process 20 still runs, so its tabs stay where they are.
+        let saved = take_in(&dir, 30, |pid| pid == 20).unwrap().unwrap();
+        let ids: Vec<_> = saved.tabs.iter().filter_map(|t| t.id.as_deref()).collect();
+        assert_eq!(ids, ["one", "two"]);
+        assert!(!dir.join(live_name(10)).exists());
+        assert!(dir.join(live_name(20)).exists());
+        // Quitting saves the tabs and removes the live copy.
+        save_in(&dir, 20, state(&["three"])).unwrap();
+        assert!(!dir.join(live_name(20)).exists());
+        // Closing every tab removes the copy too.
+        keep_live_in(&dir, 40, state(&["four"])).unwrap();
+        keep_live_in(&dir, 40, SavedState::default()).unwrap();
+        assert!(!dir.join(live_name(40)).exists());
+        // Tabs saved on quit and live tabs of a crash come back together.
+        keep_live_in(&dir, 50, state(&["five"])).unwrap();
+        let saved = take_in(&dir, 60, |_| false).unwrap().unwrap();
+        let ids: Vec<_> = saved.tabs.iter().filter_map(|t| t.id.as_deref()).collect();
+        assert_eq!(ids, ["three", "five"]);
+        assert_eq!(saved.active, Some(1));
+        assert_eq!(take_in(&dir, 60, |_| false).unwrap(), None);
         fs::remove_dir_all(dir).unwrap();
     }
 }

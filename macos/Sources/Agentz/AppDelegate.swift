@@ -82,7 +82,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         UserDefaults.standard.set(dir, forKey: "project")
 
         let notes = SessionNotes(directory: SmokeTest.logPath == nil ? SessionNotes.defaultDirectory : nil)
-        let workspace = Workspace(projectDir: isDirectory(dir) ? dir : NSHomeDirectory(), notes: notes)
+        let bookmarks = SessionBookmarks(url: SmokeTest.logPath == nil ? SessionBookmarks.defaultURL : nil)
+        if let issue = bookmarks.problem { problem = problem ?? issue }
+        let workspace = Workspace(projectDir: isDirectory(dir) ? dir : NSHomeDirectory(), notes: notes, bookmarks: bookmarks)
         self.workspace = workspace
         let look = Look.shared
         self.look = look
@@ -138,6 +140,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             ) ?? false
         }
         if SmokeTest.logPath == nil {
+            workspace.keepTabs = { [weak workspace] state in
+                do { try keepOpenTabs(state) } catch { workspace?.setStatus("Could not keep open tabs: \(error)") }
+            }
             workspace.savePins = { [weak workspace] pins in
                 do { try savePinnedTabs(pins) } catch { workspace?.setStatus("Could not save pinned tabs: \(error)") }
             }
@@ -171,8 +176,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if let log = SmokeTest.logPath {
             Task { await SmokeTest(workspace: workspace, window: controller, quick: quick, logPath: log).run() }
         } else if let saved {
-            let failed = workspace.restore(saved)
-            do { try saveTabs(failed) } catch { problem = "Could not keep unopened tabs: \(error)" }
+            // Kept with the open tabs, for the next launch to try again.
+            workspace.unopened = workspace.restore(saved).tabs
+            workspace.keepOpenTabs()
         }
         if let issue = setUpHotKey() { problem = issue }
         if let issue = GhosttyApp.configIssue {
@@ -356,6 +362,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
         do {
             try saveTabs(workspace.savedState())
+            // That removed the copy kept for a crash. If the quit is
+            // cancelled, the next change keeps a new one.
+            workspace.forgetKeptTabs()
         } catch {
             guard confirm(
                 "Could not save open tabs.",
@@ -373,6 +382,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     func applicationWillTerminate(_: Notification) {
         tickTimer?.invalidate()
+        workspace?.keepTabs = nil
         workspace?.sleepBlocker.setWorking(false)
     }
 
@@ -398,8 +408,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc func editSessionNote(_: Any?) {
-        guard let key = workspace?.selectedNoteKey else { return }
+        guard let key = workspace?.selectedAgentKey else { return }
         editNote(key)
+    }
+
+    /// ⇧⌘B: bookmarks the selected agent session, or removes its bookmark.
+    @objc func toggleBookmark(_: Any?) {
+        guard let workspace, let key = workspace.selectedAgentKey else { return }
+        workspace.toggleBookmark(key)
+    }
+
+    @objc func showBookmarks(_: Any?) {
+        workspace?.toggleBookmarkedRange()
     }
 
     @objc func showAllNotes(_: Any?) {
@@ -803,7 +823,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// What works on the session list and the shown session. It waits
     /// while the quick terminal has the keyboard.
     private static let sessionActions: Set<Selector> = [
-        #selector(editSessionNote(_:)), #selector(showSessionSwitcher(_:)),
+        #selector(editSessionNote(_:)), #selector(toggleBookmark(_:)), #selector(showBookmarks(_:)), #selector(showSessionSwitcher(_:)),
         #selector(newClaude(_:)), #selector(newCodex(_:)), #selector(newShell(_:)), #selector(togglePin(_:)),
         #selector(toggleAllSessions(_:)), #selector(selectRange(_:)), #selector(focusList(_:)), #selector(focusFilter(_:)),
         #selector(focusTerminal(_:)), #selector(nextSession(_:)), #selector(previousSession(_:)), #selector(nextAttention(_:)),
@@ -833,6 +853,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item.state = workspace.range == .all ? .on : .off
         case #selector(selectRange(_:)):
             item.state = workspace.range == SessionRange.allCases[item.tag] ? .on : .off
+        case #selector(showBookmarks(_:)):
+            item.state = workspace.range == .bookmarked ? .on : .off
         case #selector(togglePin(_:)):
             item.title = workspace.currentTab?.pinned == true ? "Unpin Session" : "Pin Session"
             return workspace.currentTab != nil
@@ -845,7 +867,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         case #selector(focusTerminal(_:)):
             return workspace.currentTab != nil
         case #selector(editSessionNote(_:)):
-            return workspace.selectedNoteKey != nil && !workspace.notes.isReadOnly
+            return workspace.selectedAgentKey != nil && !workspace.notes.isReadOnly
+        case #selector(toggleBookmark(_:)):
+            let key = workspace.selectedAgentKey
+            item.title = key.map(workspace.isBookmarked) == true ? "Remove Bookmark" : "Bookmark Session"
+            return key != nil && !workspace.bookmarks.isReadOnly
         case #selector(find(_:)):
             return !editingNote && activeTerminal != nil
         case #selector(saveContents(_:)):
@@ -919,6 +945,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         add(file, "Save Session Contents…", #selector(saveContents(_:)), "s")
         add(file, "Copy Session Contents", #selector(copyContents(_:)), "c").keyEquivalentModifierMask = [.command, .option]
         add(file, "Edit Session Note", #selector(editSessionNote(_:)), "n").keyEquivalentModifierMask = [.command, .option]
+        add(file, "Bookmark Session", #selector(toggleBookmark(_:)), "B")
         file.addItem(.separator())
         add(file, "Pin Session", #selector(togglePin(_:)))
         add(file, "Close Session", #selector(closeCurrent(_:)), "w")
@@ -983,6 +1010,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         for (i, range) in SessionRange.allCases.enumerated() {
             if range == .all {
                 add(sessions, range.title, #selector(toggleAllSessions(_:)), "I")
+            } else if range == .bookmarked {
+                sessions.addItem(.separator())
+                add(sessions, range.title, #selector(showBookmarks(_:)))
             } else {
                 add(sessions, range.title, #selector(selectRange(_:))).tag = i
             }
