@@ -149,11 +149,6 @@ private struct SwitcherRow: View {
                             .font(.system(size: 10))
                             .foregroundStyle(look.accent)
                     }
-                    if row.pinned {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(look.secondary)
-                    }
                     if row.bookmarked {
                         Image(systemName: "bookmark.fill")
                             .font(.system(size: 9))

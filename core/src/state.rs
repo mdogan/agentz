@@ -1,7 +1,6 @@
 //! Open tabs saved on normal quit and claimed by the next interactive launch,
-//! the open tabs of each running agentz, kept as they change so they come
-//! back after a crash, and pinned tabs, kept until unpinned so they come
-//! back after any start.
+//! and the open tabs of each running agentz, kept as they change so they
+//! come back after a crash.
 
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
@@ -22,14 +21,6 @@ pub struct SavedTab {
     pub id: Option<String>,
     pub cwd: PathBuf,
     pub title: String,
-    /// Pinned tabs can't be closed, and come back even after a crash.
-    #[uniffi(default = false)]
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub pinned: bool,
-}
-
-fn is_false(b: &bool) -> bool {
-    !b
 }
 
 /// Where the second pane goes when the pane area is split.
@@ -76,8 +67,6 @@ pub struct SavedState {
 
 /// The name of the state file, and of its lock.
 const STEM: &str = "open-tabs";
-/// The pinned tabs, rewritten each time they change.
-const PINS: &str = "pinned-tabs.json";
 /// The open tabs of the running agentz with this process id, rewritten
 /// each time they change. A normal quit removes it.
 fn live_name(pid: u32) -> String {
@@ -109,39 +98,6 @@ fn process_runs(pid: u32) -> bool {
     };
     let sent = unsafe { libc::kill(pid, 0) } == 0;
     sent || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-pub fn save_pins(tabs: Vec<SavedTab>) -> Result<()> {
-    save_pins_in(&state_dir()?, tabs)
-}
-
-pub fn pins() -> Result<Vec<SavedTab>> {
-    pins_in(&state_dir()?)
-}
-
-fn save_pins_in(dir: &Path, tabs: Vec<SavedTab>) -> Result<()> {
-    with_lock(dir, || {
-        let path = dir.join(PINS);
-        if tabs.is_empty() {
-            return match fs::remove_file(&path) {
-                Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
-                _ => Ok(()),
-            };
-        }
-        write_atomic(&path, &tabs)
-    })
-}
-
-fn pins_in(dir: &Path) -> Result<Vec<SavedTab>> {
-    with_lock(dir, || {
-        let path = dir.join(PINS);
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
-        serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
-    })
 }
 
 /// Adds `state`, the last window's tabs, to the tabs saved on quit, and
@@ -333,7 +289,6 @@ mod tests {
             id: id.map(str::to_string),
             cwd: PathBuf::from("/tmp"),
             title: "tab".into(),
-            pinned: false,
         };
         save_in(
             &dir,
@@ -388,7 +343,6 @@ mod tests {
             id: Some("one".into()),
             cwd: PathBuf::from("/repo"),
             title: "tab".into(),
-            pinned: false,
         };
         let state = SavedState {
             tabs: vec![tab.clone()],
@@ -411,7 +365,6 @@ mod tests {
             id: Some(id.into()),
             cwd: PathBuf::from("/tmp"),
             title: "tab".into(),
-            pinned: false,
         };
         save_in(
             &dir,
@@ -475,28 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn pins_are_kept_until_unpinned() {
-        let dir = std::env::temp_dir().join(format!("agentz-state-{}", uuid::Uuid::new_v4()));
-        assert_eq!(pins_in(&dir).unwrap(), vec![]);
-        let tab = SavedTab {
-            agent: Agent::Claude,
-            id: Some("one".into()),
-            cwd: PathBuf::from("/repo"),
-            title: "tab".into(),
-            pinned: true,
-        };
-        save_pins_in(&dir, vec![tab.clone()]).unwrap();
-        // Reading does not take them, unlike the open tabs.
-        assert_eq!(pins_in(&dir).unwrap(), vec![tab.clone()]);
-        assert_eq!(pins_in(&dir).unwrap(), vec![tab]);
-        save_pins_in(&dir, vec![]).unwrap();
-        assert!(!dir.join(PINS).exists());
-        save_pins_in(&dir, vec![]).unwrap();
-        assert_eq!(pins_in(&dir).unwrap(), vec![]);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn malformed_state_is_not_consumed() {
         let dir = std::env::temp_dir().join(format!("agentz-state-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
@@ -514,7 +445,6 @@ mod tests {
             id: Some(id.into()),
             cwd: PathBuf::from("/tmp"),
             title: "tab".into(),
-            pinned: false,
         };
         let state = |ids: &[&str]| SavedState {
             tabs: ids.iter().map(|id| tab(id)).collect(),

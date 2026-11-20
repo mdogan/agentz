@@ -229,30 +229,6 @@ final class SmokeTest {
         check("closing the quit agent's row removes it", !ws.quitKeys.contains(quitKey) && ws.tabs.count == 1)
         ws.close(shown.key)
 
-        // A pinned tab can't be closed, goes first in the list, and stays
-        // when its program ends, until the user opens it again.
-        ws.newSession(.shell, cwd: tmp)
-        guard let pinned = ws.currentTab else { return finish("no shell to pin") }
-        ws.newSession(.shell, cwd: tmp)
-        guard let unpinned = ws.currentTab else { return finish("no second shell") }
-        ws.setPinned(pinned.key, true)
-        check("pinned row goes first", ws.rows.first?.key == pinned.key && ws.rows.first?.pinned == true)
-        ws.close(pinned.key)
-        check("pinned tab is not closed", ws.tabs.contains { $0 === pinned })
-        check("saved state keeps the pin", ws.savedState().tabs.first?.pinned == true)
-        pinned.terminal!.run("exit")
-        check("pinned tab stays when its shell exits", await wait(5) { !pinned.isRunning && ws.tabs.contains { $0 === pinned } })
-        ws.open(unpinned.key)
-        check("moving around keeps the ended pinned tab", ws.tabs.contains { $0 === pinned })
-        ws.open(pinned.key)
-        check("opening the ended pinned tab starts it again", ws.currentTab.map { $0.pinned && $0.isRunning && $0 !== pinned } ?? false)
-        if let key = ws.currentTab?.key {
-            ws.setPinned(key, false)
-            ws.close(key)
-        }
-        ws.close(unpinned.key)
-        check("unpinned tab closes", ws.tabs.isEmpty, "\(ws.tabs.count) left")
-
         // The open tabs are kept as they change, so they come back after a
         // crash.
         var kept: [SavedState] = []
@@ -286,8 +262,8 @@ final class SmokeTest {
         ws.close(plain.key)
         check("bookmark tabs close", ws.tabs.isEmpty, "\(ws.tabs.count) left")
 
-        // Rows with a tab can be dragged to another place in their group,
-        // and the saved tabs keep that order.
+        // Rows with a tab can be dragged to another place among them, and
+        // the saved tabs keep that order.
         let shells = (0 ..< 3).compactMap { _ -> Tab? in
             ws.newSession(.shell, cwd: tmp)
             return ws.currentTab
@@ -306,9 +282,6 @@ final class SmokeTest {
         check("tabs are saved in the list's order", ws.savedState().tabs.count == 3
             && ws.tabs.sorted { $0.order < $1.order }.map(\.key) == [oldest.key, newest.key, middle.key]
             && ws.rows.prefix(3).map(\.key) == [middle.key, newest.key, oldest.key])
-        ws.setPinned(middle.key, true)
-        check("a row can't be dragged out of its group", !ws.canMoveRow(oldest.key, to: middle.key))
-        ws.setPinned(middle.key, false)
         for tab in shells {
             ws.close(tab.key)
         }
@@ -1415,8 +1388,8 @@ final class SmokeTest {
         // An earlier version let git tabs into splits. Such a saved split
         // comes back as its tabs on their own.
         var saved = SavedState(tabs: [
-            SavedTab(agent: .git, id: nil, cwd: root, title: "main", pinned: false),
-            SavedTab(agent: .shell, id: nil, cwd: root, title: Launch.shellName, pinned: false),
+            SavedTab(agent: .git, id: nil, cwd: root, title: "main"),
+            SavedTab(agent: .shell, id: nil, cwd: root, title: Launch.shellName),
         ], project: ws.projectDir)
         saved.split = SavedSplit(direction: .right, panes: [0, 1], focused: 0)
         let tabsBefore = ws.tabs.map(\.key)

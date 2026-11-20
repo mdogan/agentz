@@ -64,16 +64,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             saved = nil
             problem = "Could not restore tabs: \(error)"
         }
-        // No tabs saved on quit: agentz crashed or was killed. The pinned
-        // tabs still come back.
-        if saved == nil, SmokeTest.logPath == nil {
-            do {
-                let pins = try pinnedTabs()
-                if !pins.isEmpty { saved = SavedState(tabs: pins) }
-            } catch {
-                problem = "Could not restore pinned tabs: \(error)"
-            }
-        }
         let dir = pendingProject
             ?? argumentProject()
             ?? saved?.project
@@ -142,9 +132,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if SmokeTest.logPath == nil {
             workspace.keepTabs = { [weak workspace] state in
                 do { try keepOpenTabs(state) } catch { workspace?.setStatus("Could not keep open tabs: \(error)") }
-            }
-            workspace.savePins = { [weak workspace] pins in
-                do { try savePinnedTabs(pins) } catch { workspace?.setStatus("Could not save pinned tabs: \(error)") }
             }
             let continues = UserDefaults.standard.stringArray(forKey: Self.continuesKey) ?? []
             workspace.restoreContinues(continues.compactMap { SessionKey(parsing: $0) })
@@ -538,11 +525,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     private func closeSession(_ key: SessionKey) {
         guard let workspace, let tab = workspace.tabs.first(where: { $0.shows(key) }) else { return }
-        if tab.pinned {
-            NSSound.beep()
-            workspace.setStatus("The session is pinned. Unpin it to close it.")
-            return
-        }
         let agent = tab.linked?.agent ?? tab.key.agent
         if tab.isBusy {
             guard confirm("\(agent.displayName) is working.", "Closing stops it.", button: "Close") else { return }
@@ -606,11 +588,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     @objc func copyContents(_: Any?) {
         withCurrentContents { await $0.copy(in: $1) }
-    }
-
-    @objc func togglePin(_: Any?) {
-        guard let workspace, let tab = workspace.currentTab else { return }
-        workspace.setPinned(tab.key, !tab.pinned)
     }
 
     /// ⇧⌘I: all sessions, or back to today's.
@@ -824,7 +801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// while the quick terminal has the keyboard.
     private static let sessionActions: Set<Selector> = [
         #selector(editSessionNote(_:)), #selector(toggleBookmark(_:)), #selector(showBookmarks(_:)), #selector(showSessionSwitcher(_:)),
-        #selector(newClaude(_:)), #selector(newCodex(_:)), #selector(newShell(_:)), #selector(togglePin(_:)),
+        #selector(newClaude(_:)), #selector(newCodex(_:)), #selector(newShell(_:)),
         #selector(toggleAllSessions(_:)), #selector(selectRange(_:)), #selector(focusList(_:)), #selector(focusFilter(_:)),
         #selector(focusTerminal(_:)), #selector(nextSession(_:)), #selector(previousSession(_:)), #selector(nextAttention(_:)),
         #selector(toggleSessionList(_:)), #selector(toggleAutoHide(_:)), #selector(splitRight(_:)), #selector(splitDown(_:)),
@@ -855,9 +832,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item.state = workspace.range == SessionRange.allCases[item.tag] ? .on : .off
         case #selector(showBookmarks(_:)):
             item.state = workspace.range == .bookmarked ? .on : .off
-        case #selector(togglePin(_:)):
-            item.title = workspace.currentTab?.pinned == true ? "Unpin Session" : "Pin Session"
-            return workspace.currentTab != nil
         case #selector(closeCurrent(_:)):
             if keyPanelWindow != nil { item.title = "Close Window"; return true }
             if inNotes { item.title = "Close Notes"; return true }
@@ -947,7 +921,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         add(file, "Edit Session Note", #selector(editSessionNote(_:)), "n").keyEquivalentModifierMask = [.command, .option]
         add(file, "Bookmark Session", #selector(toggleBookmark(_:)), "B")
         file.addItem(.separator())
-        add(file, "Pin Session", #selector(togglePin(_:)))
         add(file, "Close Session", #selector(closeCurrent(_:)), "w")
 
         let edit = submenu(main, "Edit")

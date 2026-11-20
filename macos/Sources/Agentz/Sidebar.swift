@@ -280,10 +280,9 @@ struct SidebarView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    // Pinned rows, then active ones, then the rest. Only the
-                    // passive rows have a line before them.
+                    // Active rows, then the rest, with a line between them.
                     let dividerAfter = Set(zip(workspace.rows, workspace.rows.dropFirst())
-                        .filter { $0.group != 2 && $1.group == 2 }.map(\.0.key))
+                        .filter { $0.group == 0 && $1.group == 1 }.map(\.0.key))
                     ForEach(workspace.rows) { row in
                         item(row)
                             // The two rows of a split share one box.
@@ -362,7 +361,7 @@ struct SidebarView: View {
     private func item(_ row: Row) -> some View {
         let running = workspace.runningKeys.contains(row.key)
         let quit = workspace.quitKeys.contains(row.key)
-        let closable = (running || quit) && !row.pinned
+        let closable = running || quit
         let compact = actionLayout == .menu
         let showsActions = hovered == row.key || compact
         let actionWidth = compact ? RowButtons.size : RowButtons.width(closable: closable)
@@ -450,7 +449,6 @@ struct SidebarView: View {
     @ViewBuilder
     private func sessionMenu(_ key: SessionKey) -> some View {
         let running = workspace.runningKeys.contains(key)
-        let pinned = workspace.isPinned(key)
         Button(running ? "Show" : workspace.elsewhere[key] != nil ? "Fork…" : "Resume") { workspace.open(key) }
         if let key = workspace.agentKey(key) {
             Button(workspace.notes.note(for: key) == nil ? "Add Note" : "Edit Note") { actions.editNote(key) }
@@ -465,10 +463,7 @@ struct SidebarView: View {
             Button("Open in Split Down") { workspace.openInSplit(key, .down) }
                 .disabled(!splittable)
         }
-        if running || pinned || workspace.quitKeys.contains(key) {
-            Button(pinned ? "Unpin" : "Pin") { workspace.setPinned(key, !pinned) }
-        }
-        if (running || workspace.quitKeys.contains(key)) && !pinned {
+        if running || workspace.quitKeys.contains(key) {
             Button("Close") { actions.close(key) }
         }
         if workspace.snoozed[key] != nil {
@@ -714,12 +709,6 @@ private struct RowView: View {
                             .font(.system(size: 10))
                             .foregroundStyle(pane.shown ? look.accent : look.secondary)
                             .help(pane.help)
-                    }
-                    if row.pinned {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(look.secondary)
-                            .help("Pinned. Unpin it to close it.")
                     }
                     if row.bookmarked {
                         Image(systemName: "bookmark.fill")

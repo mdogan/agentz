@@ -47,9 +47,6 @@ final class Tab {
     let turns = TurnTracker()
     /// What `turns` said on the last tick.
     var busy = false
-    /// Can't be closed, stays when its program ends, and comes back on
-    /// every launch.
-    var pinned = false
     /// When it last became the tab the user works in, for the session
     /// switcher's order.
     var shownAt: Date?
@@ -111,8 +108,6 @@ struct Row: Identifiable, Equatable {
     /// and stay there, instead of moving up each time the agent writes.
     /// The user can drag those rows to another place.
     var order: Date
-    /// Pinned rows come first.
-    var pinned = false
     /// The user bookmarked it.
     var bookmarked = false
     /// A bookmark whose session is gone: its transcript was deleted.
@@ -129,8 +124,8 @@ struct Row: Identifiable, Equatable {
     var box: BoxHalf?
     var id: SessionKey { key }
 
-    /// The list's groups, in order: pinned, active, the rest.
-    var group: Int { pinned ? 0 : active ? 1 : 2 }
+    /// The list's groups, in order: active, the rest.
+    var group: Int { active ? 0 : 1 }
 }
 
 /// Where a session is in a split.
@@ -433,10 +428,6 @@ final class Workspace {
     /// in another app. They are saved with the open tabs, so a later launch
     /// tries them again.
     @ObservationIgnored var unopened: [SavedTab] = []
-    /// The pinned tabs changed, and should be kept for the next launch.
-    @ObservationIgnored var savePins: (([SavedTab]) -> Void)?
-    /// What `savePins` got last.
-    @ObservationIgnored private var savedPins: [SavedTab]?
 
     let notes: SessionNotes
     let bookmarks: SessionBookmarks
@@ -562,13 +553,13 @@ final class Workspace {
 
     // MARK: - Saving and restoring
 
-    /// Save only tabs that still have a process, and pinned ones, and the
+    /// Save only tabs that still have a process, and the
     /// split. The screen and shell history are transient; agents continue
     /// from their transcripts.
     func savedState() -> SavedState {
         var state = SavedState(project: projectDir)
         var index: [SessionKey: UInt32] = [:]
-        let open = tabs.sorted(by: { $0.order < $1.order }).filter { $0.isRunning || $0.pinned }.map { ($0, saved($0)) }
+        let open = tabs.sorted(by: { $0.order < $1.order }).filter(\.isRunning).map { ($0, saved($0)) }
         // Older than the open tabs. Not the ones opened since.
         state.tabs = unopened.filter { tab in
             tab.id == nil || !open.contains { $0.1.agent == tab.agent && $0.1.id == tab.id }
@@ -606,7 +597,7 @@ final class Workspace {
             r.cwd
         }
         let title = session?.title ?? (agent == .shell ? Launch.shellName : r.title)
-        return SavedTab(agent: agent, id: id, cwd: cwd, title: title, pinned: r.pinned)
+        return SavedTab(agent: agent, id: id, cwd: cwd, title: title)
     }
 
     /// Hands the open tabs to `keepTabs` soon, once for all changes made
@@ -636,16 +627,6 @@ final class Workspace {
         keptTabs = nil
     }
 
-    /// Hands the pinned tabs to `savePins` when they changed: pinned,
-    /// unpinned, or their session or folder moved on.
-    private func keepPins() {
-        guard let savePins else { return }
-        let pins = tabs.filter(\.pinned).sorted { $0.order < $1.order }.map(saved)
-        guard pins != savedPins else { return }
-        savedPins = pins
-        savePins(pins)
-    }
-
     /// Recreates saved tabs in their original order, then shows the tab that
     /// was selected on quit, or the split, and keeps the hidden splits.
     /// Returns tabs that could not be opened so the next launch can try them
@@ -661,7 +642,6 @@ final class Workspace {
             let elsewhere = tab.agent == .claude ? tab.id.flatMap { claudeRunningElsewhere($0, quickShellPid()) } : nil
             if elsewhere != nil { skipped += 1 }
             if elsewhere == nil, start(tab.agent, resume: tab.id, cwd: tab.cwd, title: tab.title, focus: false) {
-                tabs.last?.pinned = tab.pinned
                 started[i] = current
             } else {
                 if saved.active.map(Int.init) == i { failed.active = UInt32(failed.tabs.count) }
@@ -690,7 +670,6 @@ final class Workspace {
             current = nil
         }
         rebuildRows()
-        keepPins()
         if skipped > 0 {
             setStatus(skipped == 1
                 ? "A saved session runs in another app, so agentz did not resume it."
@@ -786,7 +765,6 @@ final class Workspace {
         }
         if rowsChanged || shellsChanged || codexChanged { rebuildRows() }
         else { refreshStates() }
-        keepPins()
         keepOpenTabs()
     }
 
@@ -912,7 +890,7 @@ final class Workspace {
             return Row(
                 key: key, title: s.title, cwd: s.cwd, place: place, branch: shownBranch(s.branch, place: place), pr: s.pr,
                 updated: s.updated, turnStarted: s.turnStarted, action: s.action, context: s.context, order: order,
-                pinned: tab?.pinned ?? false, bookmarked: bookmarks.contains(key), active: tab != nil
+                bookmarked: bookmarks.contains(key), active: tab != nil
             )
         }
         // Sessions we started that have no transcript yet, and shells. A
@@ -920,7 +898,7 @@ final class Workspace {
         for r in tabs where !rows.contains(where: { r.shows($0.key) }) {
             guard !onlyBookmarks || bookmarks.contains(r.key) else { continue }
             rows.append(Row(key: r.key, title: r.title, cwd: r.cwd, place: place(r.cwd), updated: r.spawnedAt, order: r.order,
-                            pinned: r.pinned, bookmarked: bookmarks.contains(r.key), active: true, git: r.git?.status))
+                            bookmarked: bookmarks.contains(r.key), active: true, git: r.git?.status))
         }
         // Bookmarks the scan has not read yet, or whose session is gone,
         // from what the bookmark kept.
@@ -1148,40 +1126,28 @@ final class Workspace {
             startFromActiveShell(.claude, resume: key.id, fork: true, cwd: cwd, title: title)
             return
         }
-        // The tab of an agent that quit makes way for the resumed one, and
-        // hands it its pin.
-        let ended = tabs.filter { $0.shows(key) && !$0.isRunning }
+        // The tab of an agent that quit makes way for the resumed one.
         tabs.removeAll { $0.shows(key) && !$0.isRunning }
         // A Codex session that never got a transcript starts fresh.
         let resume = key.id.hasPrefix("new-") || key.agent == .shell ? nil : key.id
-        let started = startFromActiveShell(key.agent, resume: resume, cwd: cwd, title: title)
-        guard ended.contains(where: \.pinned) else { return }
-        if started {
-            currentTab?.pinned = true
-            rebuildRows()
-            keepPins()
-        } else {
-            // Its folder is gone. Keep the pin until the user unpins it.
-            tabs.append(contentsOf: ended.filter(\.pinned))
-        }
+        startFromActiveShell(key.agent, resume: resume, cwd: cwd, title: title)
     }
 
     /// The row of `key` can be dragged to where the row of `target` is:
-    /// both have a tab, and both are pinned or both are not. Other rows
-    /// keep their place by time.
+    /// both have a tab. Other rows keep their place by time.
     func canMoveRow(_ key: SessionKey, to target: SessionKey) -> Bool {
         guard let a = tabs.first(where: { $0.shows(key) }), let b = tabs.first(where: { $0.shows(target) }) else { return false }
-        return a !== b && a.pinned == b.pinned
+        return a !== b
     }
 
     /// Puts the row of `key` where the row of `target` is: above it when it
-    /// moves up, below it when it moves down. The rows of its group keep
-    /// their times, in the new order, so rows the filters hide stay put.
+    /// moves up, below it when it moves down. The tabs keep their times,
+    /// in the new order, so rows the filters hide stay put.
     func moveRow(_ key: SessionKey, to target: SessionKey) {
         guard canMoveRow(key, to: target),
               let moved = tabs.first(where: { $0.shows(key) }),
               let onto = tabs.first(where: { $0.shows(target) }) else { return }
-        var group = tabs.filter { $0.pinned == moved.pinned }.sorted { $0.order > $1.order }
+        var group = tabs.sorted { $0.order > $1.order }
         let times = group.map(\.order)
         guard let from = group.firstIndex(where: { $0 === moved }),
               let to = group.firstIndex(where: { $0 === onto }) else { return }
@@ -1191,26 +1157,6 @@ final class Workspace {
             tab.order = time
         }
         rebuildRows()
-        keepPins()
-        scheduleKeep()
-    }
-
-    func isPinned(_ key: SessionKey) -> Bool {
-        tabs.contains { $0.shows(key) && $0.pinned }
-    }
-
-    /// Pins or unpins the session's tab. Sessions without a tab can't be
-    /// pinned.
-    func setPinned(_ key: SessionKey, _ pinned: Bool) {
-        guard let r = tabs.first(where: { $0.shows(key) }), r.pinned != pinned else { return }
-        r.pinned = pinned
-        r.placeholder = false
-        if !pinned, !r.isRunning, !quit.contains(ObjectIdentifier(r)), !isLaidOut(r.key) {
-            // An ended tab was only kept for its pin.
-            tabs.removeAll { $0 === r }
-        }
-        rebuildRows()
-        keepPins()
         scheduleKeep()
     }
 
@@ -1472,9 +1418,9 @@ final class Workspace {
     }
 
     /// The shell shown in the pane can be replaced only when it is at its
-    /// prompt and not pinned.
+    /// prompt.
     private func activeIdleShell() -> SessionKey? {
-        guard let r = currentTab, r.key.agent == .shell, r.isRunning, r.linked == nil, !r.pinned,
+        guard let r = currentTab, r.key.agent == .shell, r.isRunning, r.linked == nil,
               r.terminal?.hasForegroundJob == false
         else { return nil }
         return r.key
@@ -1496,12 +1442,12 @@ final class Workspace {
 
     /// Placeholder shells are kept only until the user moves on. Drops
     /// them and ended tabs that are in no pane, on screen or in a hidden
-    /// split, except pinned ones and agents that quit while the user was
+    /// split, except agents that quit while the user was
     /// away.
     private func prune() {
         let count = tabs.count
         tabs.removeAll { r in
-            !isLaidOut(r.key) && !r.pinned && !quit.contains(ObjectIdentifier(r)) && (!r.isRunning || r.placeholder)
+            !isLaidOut(r.key) && !quit.contains(ObjectIdentifier(r)) && (!r.isRunning || r.placeholder)
         }
         if tabs.count != count { rebuildRows() }
     }
@@ -1810,12 +1756,7 @@ final class Workspace {
             let title = sessions.first { $0.key == key }?.title ?? tab.fallbackTitle
             notify?("\(key.agent.displayName) quit", title, "It quit while you were away. Open the session to resume it.", key)
         }
-        if tab.pinned {
-            // A pinned tab stays, without a process, until the user opens
-            // it again. The pane offers to resume it.
-            if unexpected { quit.insert(ObjectIdentifier(tab)) }
-            if let pane { panes.keys[pane] = nil }
-        } else if let pane {
+        if let pane {
             tabs.remove(at: i)
             if key.agent == .shell {
                 // Like closing a terminal tab, or a split.
@@ -1869,9 +1810,8 @@ final class Workspace {
     /// Stops the session's agent or shell and closes its tab, then shows the
     /// next running one. In a split, the other pane takes the space instead;
     /// a hidden split ends.
-    /// Pinned tabs have to be unpinned first.
     func close(_ key: SessionKey) {
-        guard let i = tabs.firstIndex(where: { $0.shows(key) }), !tabs[i].pinned else { return }
+        guard let i = tabs.firstIndex(where: { $0.shows(key) }) else { return }
         let pane = panes.keys.firstIndex(of: tabs[i].key)
         let wasShown = pane == panes.focused
         // Nothing types into it any more.
