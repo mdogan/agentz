@@ -320,7 +320,7 @@ final class SmokeTest {
             && ws.hiddenSplits == [PaneLayout(keys: [left.key, right.key], split: .right, focused: 0, ratio: 0.3)],
             "\(ws.panes) \(ws.hiddenSplits)")
         check("the split's tabs run on, hidden", left.isRunning && right.isRunning && leftView.isHidden && rightView.isHidden
-            && thirdView.frame == thirdView.superview?.bounds)
+            && thirdView.frame == underHeader(thirdView.superview?.bounds), "\(thirdView.frame)")
         check("the list marks the hidden split", ws.rows.first { $0.key == right.key }?.pane
             == SplitPane(direction: .right, index: 1, partner: left.key, shown: false))
 
@@ -372,7 +372,7 @@ final class SmokeTest {
         // Unsplitting keeps the focused pane's tab; the other one runs on.
         ws.unsplit()
         check("unsplit keeps the focused tab", ws.panes == PaneLayout(keys: [fourth.key]))
-        check("it fills the pane again", fourth.terminal!.view.frame == fourth.terminal!.view.superview?.bounds, "\(fourth.terminal!.view.frame)")
+        check("it fills the pane again, under its header", fourth.terminal!.view.frame == underHeader(fourth.terminal!.view.superview?.bounds), "\(fourth.terminal!.view.frame)")
         check("the other tab runs on, hidden", third.isRunning && thirdView.isHidden)
         check("the hidden split stays", ws.hiddenSplits.map(\.keys) == [[left.key, right.key]])
 
@@ -1317,16 +1317,24 @@ final class SmokeTest {
         window.setGitShown(true)
         check("the Changes panel shows over the shell", window.isGitShown && app.validateMenuItem(changes))
         check("Open Git works from a shell in a repository", app.validateMenuItem(item))
+        let titleButtons = window.window?.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .trailing }?.view
+        let buttonsWidth = titleButtons?.frame.width ?? 0
         app.openGit(nil)
         guard let tab = ws.tabs.first(where: { $0.key == key }), let git = tab.git else {
             return check("Open Git opens a git tab for the shell's worktree", false, "\(ws.tabs.map(\.key))")
         }
         check("Open Git opens a git tab for the shell's worktree", ws.current == key && tab.terminal == nil)
+        check("a git tab has no pane header", await wait(3) {
+            tab.content.paneView.frame == tab.content.paneView.superview?.bounds
+        }, "\(tab.content.paneView.frame)")
         check("the Changes panel hides over it, and can't be shown", await wait(3) {
             !self.window.isGitShown && self.window.gitPanelWidth == 0
         } && !app.validateMenuItem(changes), "width \(window.gitPanelWidth)")
         app.toggleGit(nil)
         check("not even with ⇧⌘C", !window.isGitShown)
+        check("the title bar drops the Changes button", await wait(3) {
+            (titleButtons?.frame.width ?? 0) < buttonsWidth - 20
+        }, "\(buttonsWidth) -> \(titleButtons?.frame.width ?? 0)")
         check("it reads the repository, and its row is named after the branch", await wait(8) {
             git.store.branch == "main" && ws.rows.contains { $0.key == key && $0.title == "main" }
         }, "\(git.store.branch) \(ws.rows.map(\.title))")
@@ -1766,6 +1774,10 @@ final class SmokeTest {
         check("Zed and Git buttons sit next to Note", buttons("zed").count == 1 && buttons("git").count == 1
               && buttons().first!.frame.maxX < buttons("zed").first!.frame.minX
               && buttons("zed").first!.frame.maxX < buttons("git").first!.frame.minX)
+        let paneFrame = tab.content.paneView.frame
+        check("the buttons sit at the top right, above the terminal", buttons("git").first.map {
+            $0.frame.minY >= paneFrame.maxY && paneFrame.maxX - $0.frame.maxX < 12
+        } ?? false, "\(buttons("git").first?.frame ?? .zero) \(paneFrame)")
         buttons().first?.performClick(nil)
         check("note opens in a separate popup", await wait(3) { popup()?.isKeyWindow == true && !editors(in: popup()?.contentView).isEmpty })
         check("opening a note preserves the terminal's size", editors(in: window.window?.contentView).isEmpty && tab.content.paneView.frame == terminalFrame)
@@ -1880,6 +1892,11 @@ final class SmokeTest {
     private func pick(_ key: SessionKey) {
         workspace.selection = key
         workspace.select(key)
+    }
+
+    /// `bounds` without the pane header on top, where a lone terminal goes.
+    private func underHeader(_ bounds: NSRect?) -> NSRect? {
+        bounds.map { NSRect(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height - PaneViewController.headerHeight) }
     }
 
     private func check(_ name: String, _ ok: Bool, _ detail: String = "") {

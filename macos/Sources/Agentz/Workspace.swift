@@ -1495,6 +1495,11 @@ final class Workspace {
         }
     }
 
+    /// A git tab is on screen. It is never in a split.
+    var showsGitTab: Bool {
+        panes.keys.contains { $0?.agent == .git }
+    }
+
     /// ⌘D and ⇧⌘D split the pane, turn the split or end it: all but while
     /// a git tab shows, which is never in a split.
     var canSplit: Bool {

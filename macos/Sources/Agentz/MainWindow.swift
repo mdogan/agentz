@@ -22,9 +22,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// The list over the terminal, in auto-hide mode.
     let overlay = SidebarOverlay()
     /// The buttons at the right end of the title bar. Their width changes
-    /// with the number of sessions that want the user, which they show.
+    /// with the number of sessions that want the user, which they show,
+    /// and with the Changes button, which a git tab hides.
     private var titleButtons: NSView?
-    private var titleButtonsCount = 0
+    private var titleButtonsShape = (waiting: 0, changes: true)
     /// The list is out of the split, and shows over the terminal when
     /// wanted.
     private(set) var autoHide = false
@@ -66,6 +67,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // The terminal's background shows through, like Ghostty's
         // transparent title bar.
         window.titlebarAppearsTransparent = true
+        // The pane header says what is shown. The title is still set, for
+        // the Window menu and Mission Control.
+        window.titleVisibility = .hidden
         super.init(window: window)
 
         sidebarItem.minimumThickness = Self.listWidths.lowerBound
@@ -178,8 +182,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let waiting = workspace.attentionKeys.count
         let badge = waiting > 0 ? String(waiting) : nil
         if NSApp.dockTile.badgeLabel != badge { NSApp.dockTile.badgeLabel = badge }
-        if let buttons = titleButtons, waiting != titleButtonsCount {
-            titleButtonsCount = waiting
+        let shape = (waiting: waiting, changes: !workspace.showsGitTab)
+        if let buttons = titleButtons, shape != titleButtonsShape {
+            titleButtonsShape = shape
             // SwiftUI redraws the buttons on the next pass; measure after it.
             DispatchQueue.main.async { buttons.frame.size.width = buttons.fittingSize.width }
         }
@@ -377,16 +382,17 @@ private struct SplitButtons: View {
     let toggleGit: () -> Void
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: PaneViewController.buttonGap) {
             if !workspace.attentionKeys.isEmpty {
                 AttentionButton(workspace: workspace, look: look)
                     .padding(.trailing, 6)
             }
             SplitButton(workspace: workspace, look: look, direction: .right)
             SplitButton(workspace: workspace, look: look, direction: .down)
-            GitButton(git: git, look: look, blocked: workspace.panes.keys.contains { $0?.agent == .git }, toggle: toggleGit)
+            // A git tab shows the changes itself.
+            if !workspace.showsGitTab { GitButton(git: git, look: look, toggle: toggleGit) }
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, PaneViewController.buttonsInset)
         .frame(maxHeight: .infinity)
     }
 }
@@ -422,8 +428,6 @@ private struct AttentionButton: View {
 private struct GitButton: View {
     let git: GitPanelModel
     let look: Look
-    /// A git tab is on screen.
-    let blocked: Bool
     let toggle: () -> Void
     @State private var hovered = false
 
@@ -433,15 +437,13 @@ private struct GitButton: View {
             Image(systemName: "plus.forwardslash.minus")
                 .font(.system(size: 12, weight: on ? .semibold : .regular))
                 .foregroundStyle(on ? look.accent : look.secondary)
-                .frame(width: 26, height: 22)
+                .frame(width: PaneViewController.buttonWidth, height: PaneViewController.buttonHeight)
                 .background(hovered ? look.selection : .clear, in: RoundedRectangle(cornerRadius: 5))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(blocked)
-        .opacity(blocked ? 0.4 : 1)
         .onHover { hovered = $0 }
-        .help(blocked ? "The git tab shows the changes itself" : on ? "Hide Changes (⇧⌘C)" : "Show Changes (⇧⌘C)")
+        .help(on ? "Hide Changes (⇧⌘C)" : "Show Changes (⇧⌘C)")
         .accessibilityLabel(on ? "Hide Changes" : "Show Changes")
     }
 }
@@ -462,7 +464,7 @@ private struct SplitButton: View {
             Image(systemName: on ? icon + ".fill" : icon)
                 .font(.system(size: 13))
                 .foregroundStyle(on ? look.accent : look.secondary)
-                .frame(width: 26, height: 22)
+                .frame(width: PaneViewController.buttonWidth, height: PaneViewController.buttonHeight)
                 .background(hovered ? look.selection : .clear, in: RoundedRectangle(cornerRadius: 5))
                 .contentShape(Rectangle())
         }
@@ -475,7 +477,7 @@ private struct SplitButton: View {
     }
 }
 
-private struct SplitPaneHeader: View {
+private struct PaneHeader: View {
     let workspace: Workspace
     let pane: Int
     @State private var otherTree: Worktree?
@@ -488,14 +490,17 @@ private struct SplitPaneHeader: View {
     }
 
     var body: some View {
-        let key = workspace.panes.split != nil && workspace.panes.keys.indices.contains(pane) ? workspace.panes.keys[pane] : nil
+        let key = workspace.panes.keys.indices.contains(pane) ? workspace.panes.keys[pane] : nil
         let tab = key.flatMap { key in workspace.tabs.first { $0.key == key } }
         let row = tab.flatMap { workspace.row(for: $0.linked ?? $0.key) }
         let folder = row?.cwd ?? tab?.cwd
         let known = folder.flatMap { worktree(containing: $0, in: workspace.worktrees) }
         let tree = known ?? otherTree
         let branch = tree.map { $0.branch ?? "Detached at " + $0.head.prefix(8) } ?? row?.branch
-        let focused = pane == workspace.panes.focused
+        // Only a split has a pane to pick, so only then is one marked.
+        let focused = workspace.panes.split != nil && pane == workspace.panes.focused
+        // Room for the Note, Zed and Git buttons, which sit on the right.
+        let buttons = tab.flatMap { workspace.agentKey($0.key) } != nil
         Button { workspace.focusPane(pane) } label: {
             HStack(spacing: 6) {
                 if let key { (tab?.linked ?? key).agent.icon }
@@ -506,7 +511,8 @@ private struct SplitPaneHeader: View {
             }
             .font(.system(size: 11))
             .lineLimit(1)
-            .padding(.horizontal, 8)
+            .padding(.leading, 8)
+            .padding(.trailing, buttons ? PaneViewController.headerButtonsWidth : 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Look.shared.sidebar)
             .overlay(alignment: .bottom) { Rectangle().fill(focused ? Look.shared.accent : Look.shared.divider).frame(height: focused ? 2 : 1) }
@@ -552,7 +558,7 @@ final class PaneViewController: NSViewController {
     private let gitButtons = [NSButton(), NSButton()]
     /// One per pane, shown while the pane has no terminal.
     private let placeholders: [PaneHostingView<EmptyPaneView>]
-    private let headers: [PaneHostingView<SplitPaneHeader>]
+    private let headers: [PaneHostingView<PaneHeader>]
     /// Fades the pane the user does not work in, as Ghostty does.
     private let fade = FadeView()
     private let divider = PaneDivider()
@@ -566,7 +572,7 @@ final class PaneViewController: NSViewController {
         self.workspace = workspace
         self.look = look
         self.editNote = editNote
-        headers = [0, 1].map { PaneHostingView(rootView: SplitPaneHeader(workspace: workspace, pane: $0)) }
+        headers = [0, 1].map { PaneHostingView(rootView: PaneHeader(workspace: workspace, pane: $0)) }
         placeholders = [0, 1].map { PaneHostingView(rootView: EmptyPaneView(workspace: workspace, look: look, pane: $0)) }
         super.init(nibName: nil, bundle: nil)
     }
@@ -604,10 +610,11 @@ final class PaneViewController: NSViewController {
                 button.title = ""
                 button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
                 button.imagePosition = .imageOnly
+                button.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
                 button.isBordered = false
                 button.setButtonType(.momentaryChange)
                 button.wantsLayer = true
-                button.layer?.cornerRadius = 6
+                button.layer?.cornerRadius = 5
                 button.toolTip = label
                 button.setAccessibilityLabel(label)
                 button.target = self
@@ -693,7 +700,8 @@ final class PaneViewController: NSViewController {
             if v.superview !== terminals {
                 // At its pane's size from the start, so the program does
                 // not start at one size and get resized right away.
-                v.frame = pane.map { contentRect(rects[$0], split: layout.split != nil) } ?? terminals.bounds
+                let header = tab.key.agent != .git
+                v.frame = contentRect(pane.map { rects[$0] } ?? terminals.bounds, header: header)
                 terminals.addSubview(v)
             }
             // A hidden first responder hands the keyboard to the next view
@@ -705,9 +713,21 @@ final class PaneViewController: NSViewController {
         layoutPanes()
     }
 
-    private func contentRect(_ rect: NSRect, split: Bool) -> NSRect {
-        guard split else { return rect }
-        return NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: max(0, rect.height - 24))
+    static let headerHeight: CGFloat = 24
+    /// The buttons in the title bar and in the pane headers share a size,
+    /// a gap and an inset from the right, so the two rows line up.
+    static let buttonWidth: CGFloat = 26
+    static let buttonHeight: CGFloat = 22
+    static let buttonGap: CGFloat = 2
+    static let buttonsInset: CGFloat = 8
+    /// The header's room on the right for the three buttons.
+    static let headerButtonsWidth: CGFloat = 3 * buttonWidth + 2 * buttonGap + buttonsInset + 8
+
+    /// A pane's rect without its header on top. A git tab has none: it has
+    /// its own bar.
+    private func contentRect(_ rect: NSRect, header: Bool) -> NSRect {
+        guard header else { return rect }
+        return NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: max(0, rect.height - Self.headerHeight))
     }
 
     /// Puts the shown terminals, the placeholders, the divider and the fade
@@ -715,11 +735,14 @@ final class PaneViewController: NSViewController {
     private func layoutPanes() {
         let layout = workspace.panes
         let rects = paneRects(layout.split, ratio: draggedRatio ?? layout.ratio)
-        let contentRects = rects.map { contentRect($0, split: layout.split != nil) }
+        let hasHeader = rects.indices.map { i in
+            !(layout.keys.indices.contains(i) && layout.keys[i]?.agent == .git)
+        }
+        let contentRects = rects.indices.map { contentRect(rects[$0], header: hasHeader[$0]) }
         for (i, header) in headers.enumerated() {
-            header.isHidden = layout.split == nil
+            header.isHidden = i >= rects.count || !hasHeader[i]
             if !header.isHidden {
-                header.frame = NSRect(x: rects[i].minX, y: contentRects[i].maxY, width: rects[i].width, height: 24)
+                header.frame = NSRect(x: rects[i].minX, y: contentRects[i].maxY, width: rects[i].width, height: Self.headerHeight)
             }
         }
         var empty = Set(layout.keys.indices)
@@ -732,11 +755,17 @@ final class PaneViewController: NSViewController {
             let label = note == nil ? "Add Note" : "Edit Note"
             button.toolTip = label
             button.setAccessibilityLabel(label)
-            button.contentTintColor = note == nil ? NSColor(look.colors.foreground).withAlphaComponent(0.65) : NSColor(look.accent)
+            button.contentTintColor = note == nil ? NSColor(look.secondary) : NSColor(look.accent)
+            // On the right of the pane's header, Git last.
+            let width = Self.buttonWidth, height = Self.buttonHeight, step = width + Self.buttonGap
             for (offset, control) in [gitButtons[i], zedButtons[i], button].enumerated() {
-                control.isHidden = key == nil
+                control.isHidden = key == nil || i >= rects.count
                 if i < rects.count {
-                    control.frame = NSRect(x: rects[i].maxX - 34 - CGFloat(offset * 30), y: rects[i].minY + 8, width: 26, height: 26)
+                    control.frame = NSRect(
+                        x: rects[i].maxX - Self.buttonsInset - width - CGFloat(offset) * step,
+                        y: contentRects[i].maxY + (Self.headerHeight - height) / 2,
+                        width: width, height: height
+                    )
                 }
             }
         }
@@ -836,8 +865,8 @@ final class PaneViewController: NSViewController {
             fade.color = NSColor(splitLook.unfocusedFill ?? colors.background).withAlphaComponent(1 - splitLook.unfocusedOpacity)
             container.highlight.color = NSColor(look.accent)
             for button in noteButtons + zedButtons + gitButtons {
-                button.layer?.backgroundColor = NSColor(colors.background).withAlphaComponent(0.92).cgColor
-                button.contentTintColor = NSColor(colors.foreground).withAlphaComponent(0.65)
+                button.layer?.backgroundColor = nil
+                button.contentTintColor = NSColor(look.secondary)
             }
         } onChange: { [weak self] in
             DispatchQueue.main.async { self?.restyle() }
