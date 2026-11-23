@@ -28,6 +28,13 @@ enum WordIndex {
         return end
     }
 
+    /// The whole word around `location`, which a completion replaces: with
+    /// the cursor in "repo|URL", all of "repoURL".
+    static func wordRange(in text: NSString, at location: Int) -> NSRange {
+        let start = wordStart(in: text, before: location)
+        return NSRange(location: start, length: wordEnd(in: text, after: location) - start)
+    }
+
     /// How often each word is in `text`.
     static func counts(in text: String) -> [String: Int] {
         var counts: [String: Int] = [:]
@@ -169,11 +176,10 @@ final class WordCompletion: CodeSuggestionDelegate {
     ) {
         guard let cursor = cursorPosition ?? textView.cursorPositions.first else { return }
         let text = textView.text as NSString
-        let location = min(cursor.range.location, text.length)
-        let start = WordIndex.wordStart(in: text, before: location)
+        let range = WordIndex.wordRange(in: text, at: min(cursor.range.location, text.length))
         isShowing = false
-        completedAt = start + (item.label as NSString).length
-        textView.textView.replaceCharacters(in: [NSRange(location: start, length: location - start)], with: item.label)
+        completedAt = range.location + (item.label as NSString).length
+        textView.textView.replaceCharacters(in: [range], with: item.label)
     }
 
     func completionWindowDidClose() {

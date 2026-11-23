@@ -329,6 +329,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
         guard let workspace, SmokeTest.logPath == nil else { return .terminateNow }
+        let unsaved = FileEditorModel.saveAll()
+        if !unsaved.isEmpty {
+            guard confirm(
+                "\(unsavedTitle(unsaved)) not saved.",
+                "\(unsaved.joined(separator: ", ")) changed on disk while you edited. Quitting drops your edits.",
+                button: "Quit Anyway"
+            ) else { return .terminateCancel }
+        }
         var (working, idle, commands) = workspace.quitCounts()
         if quickTerminal?.terminal?.hasForegroundJob == true { commands += 1 }
         if working > 0 {
@@ -372,6 +380,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         tickTimer?.invalidate()
         workspace?.keepTabs = nil
         workspace?.sleepBlocker.setWorking(false)
+    }
+
+    private func unsavedTitle(_ paths: [String]) -> String {
+        paths.count == 1 ? "Your edits to \((paths[0] as NSString).lastPathComponent) are" : "Your edits to \(paths.count) files are"
     }
 
     private func confirm(_ message: String, _ info: String, button: String) -> Bool {
@@ -526,6 +538,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     private func closeSession(_ key: SessionKey) {
         guard let workspace, let tab = workspace.tabs.first(where: { $0.shows(key) }) else { return }
+        if let unsaved = tab.git?.store.editors.saveAll(), !unsaved.isEmpty {
+            guard confirm(
+                "\(unsavedTitle(unsaved)) not saved.",
+                "\(unsaved.joined(separator: ", ")) changed on disk while you edited. Closing drops your edits.",
+                button: "Close"
+            ) else { return }
+        }
         let agent = tab.linked?.agent ?? tab.key.agent
         if tab.isBusy {
             guard confirm("\(agent.displayName) is working.", "Closing stops it.", button: "Close") else { return }

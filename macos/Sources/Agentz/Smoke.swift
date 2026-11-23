@@ -1252,6 +1252,15 @@ final class SmokeTest {
         check("an unedited file follows an agent's write", await wait(4) {
             editor.text == "one\ntwo\nthree\nfour\n" && editor.bridge.controller?.text == editor.text
         }, editor.text)
+        // The reload made a new controller; ⌘S must still find the editor.
+        try? await Task.sleep(for: .milliseconds(300))
+        if let fresh = editor.bridge.controller {
+            fresh.view.window?.makeFirstResponder(fresh.textView)
+            check("⌘S still finds the editor after a reload", fresh !== controller
+                && FileEditorModel.focused(in: fresh.view.window) === editor)
+        } else {
+            check("⌘S still finds the editor after a reload", false, "no controller")
+        }
 
         editor.bridge.controller.map { c in
             c.textView.replaceCharacters(in: [NSRange(location: (c.text as NSString).length, length: 0)], with: "mine\n")

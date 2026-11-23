@@ -29,6 +29,29 @@ struct EditableTextTests {
         #expect(EditableText.indent(for: "a:\n  b:\n    c: 1\n  d: 2\n") == .spaces(count: 2))
         #expect(EditableText.indent(for: "def a():\n    b()\n    if c:\n        d()\n") == .spaces(count: 4))
         #expect(EditableText.indent(for: "no indent\n") == .spaces(count: 4))
+        #expect(EditableText.indent(for: "a:\r\n  b:\r\n    c: 1\r\n  d: 2\r\n") == .spaces(count: 2))
+    }
+
+    @Test
+    func comparesBytesNotCanonicalEquivalence() {
+        #expect(EditableText.same("caf\u{E9}", "caf\u{E9}"))
+        #expect(!EditableText.same("caf\u{E9}", "cafe\u{301}"))
+        #expect(EditableText.same(nil, nil) && !EditableText.same("", nil))
+    }
+
+    @Test
+    func leavesSymbolicLinksAndFoldersOut() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("dir"), withIntermediateDirectories: true)
+        try Data("x\n".utf8).write(to: root.appendingPathComponent("file.txt"))
+        try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("link").path, withDestinationPath: "file.txt")
+        func change(_ path: String) -> WorkingChange {
+            WorkingChange(path: path, originalPath: nil, indexStatus: " ", workTreeStatus: "M")
+        }
+        #expect(EditableText.url(root: root, change: change("file.txt")) != nil)
+        #expect(EditableText.url(root: root, change: change("link")) == nil)
+        #expect(EditableText.url(root: root, change: change("dir")) == nil)
+        #expect(EditableText.url(root: root, change: change("gone.txt")) == nil)
     }
 }
 
@@ -109,6 +132,67 @@ struct FileEditorModelTests {
     }
 
     @Test
+    func aWriteBetweenTheCheckAndTheSaveIsKept() throws {
+        let url = try file("one\n")
+        let model = FileEditorModel(url: url, path: "a.swift")
+        model.textDidChange("mine\n")
+        model.beforeReplace = { try? Data("theirs\n".utf8).write(to: url) }
+        #expect(!model.save())
+        #expect(disk(url) == "theirs\n" && model.diskChange == .modified && model.isDirty)
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path)
+        #expect(leftovers == ["a.swift"])
+
+        model.beforeReplace = nil
+        model.keepMine()
+        #expect(model.save() && disk(url) == "mine\n")
+    }
+
+    @Test
+    func aDeletedFileIsNotRecreatedOverANewOne() throws {
+        let url = try file("one\n")
+        let model = FileEditorModel(url: url, path: "a.swift")
+        model.textDidChange("mine\n")
+        try FileManager.default.removeItem(at: url)
+        model.diskDidChange()
+        model.keepMine()
+        model.beforeReplace = { try? Data("new\n".utf8).write(to: url) }
+        #expect(!model.save())
+        #expect(disk(url) == "new\n" && model.diskChange == .modified)
+    }
+
+    @Test
+    func unicodeNormalizationCountsAsAChange() throws {
+        let composed = "caf\u{E9}\n", decomposed = "cafe\u{301}\n"
+        let url = try file(composed)
+        let model = FileEditorModel(url: url, path: "a.swift")
+        model.textDidChange(decomposed)
+        #expect(model.isDirty)
+        #expect(model.save())
+        #expect(try Data(contentsOf: url) == Data(decomposed.utf8))
+
+        // An agent's normalization is a change on disk, never saved over.
+        model.textDidChange(decomposed + "more\n")
+        try Data(composed.utf8).write(to: url)
+        model.diskDidChange()
+        #expect(model.diskChange == .modified)
+        #expect(!model.save())
+        #expect(try Data(contentsOf: url) == Data(composed.utf8))
+    }
+
+    @Test
+    func editorsKeepADraftWhoseFileWasDeleted() throws {
+        let url = try file("one\n")
+        let editors = FileEditors()
+        let model = editors.model(for: url, path: "a.swift", otherFiles: [])
+        model.textDidChange("mine\n")
+        try FileManager.default.removeItem(at: url)
+        model.diskDidChange()
+        #expect(editors.draft(path: "a.swift") === model)
+        #expect(editors.saveAll() == ["a.swift"], "a draft over a deleted file needs the user")
+        #expect(disk(url) == nil)
+    }
+
+    @Test
     func aDeletedFile() throws {
         let url = try file("one\n")
         let model = FileEditorModel(url: url, path: "a.swift")
@@ -135,6 +219,7 @@ struct WordIndexTests {
         #expect(WordIndex.wordEnd(in: text, after: 7) == 10)
         #expect(WordIndex.wordStart(in: text, before: 18) == 13)
         #expect(WordIndex.wordStart(in: text, before: 4) == 4)
+        #expect(WordIndex.wordRange(in: "x repoURL y", at: 6) == NSRange(location: 2, length: 7))
     }
 
     @Test

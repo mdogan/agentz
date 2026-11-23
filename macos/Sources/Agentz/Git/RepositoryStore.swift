@@ -50,6 +50,9 @@ final class RepositoryStore: ObservableObject {
     @Published private(set) var selectedChangeIsStaged = false
     /// The Changes view shows the selected file in the editor, not its diff.
     @Published var isEditingFile = false
+    /// The files open in the editor. Kept here, with the git session, so
+    /// unsaved text outlives the views that show it.
+    let editors = FileEditors()
     @Published private(set) var changeSelection = ChangeSelectionModel()
     @Published var selectedReference: GitReference?
     @Published var selectedStash: GitStash?

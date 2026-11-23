@@ -50,7 +50,8 @@ enum EditableText: Equatable {
     /// lines have them.
     static func indent(for text: String) -> IndentOption {
         var tabs = 0, spaced = 0, byTwo = 0
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true).prefix(2000) {
+        // `isNewline` takes "\r\n", one Character, as a line break too.
+        for line in text.split(whereSeparator: \.isNewline).prefix(2000) {
             if line.first == "\t" {
                 tabs += 1
                 continue
@@ -66,15 +67,24 @@ enum EditableText: Equatable {
     }
 
     /// The file a change edits, when there is one to edit: conflicts have
-    /// their own view, and a deleted file has nothing on disk.
+    /// their own view, and a deleted file has nothing on disk. A symbolic
+    /// link is left out: git tracks the link itself, not what it points to.
     static func url(root: URL?, change: WorkingChange) -> URL? {
         guard let root, !change.isConflicted else { return nil }
         let url = root.appendingPathComponent(change.path)
-        var isFolder: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), !isFolder.boolValue else {
-            return nil
-        }
-        return url
+        // Does not follow a link in the last part of the path.
+        let type = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType
+        return type == .typeRegular ? url : nil
+    }
+
+    /// Whether two texts are the same bytes. Swift's `==` takes "é" and
+    /// "e" with a combining accent as equal; git and the disk do not.
+    static func same(_ a: String?, _ b: String?) -> Bool {
+        guard let a, let b else { return a == nil && b == nil }
+        // Different UTF-16 lengths are different bytes; checking that first
+        // is quick for the editor's text, which is an NSString.
+        guard (a as NSString).length == (b as NSString).length else { return false }
+        return a.utf8.elementsEqual(b.utf8)
     }
 }
 
@@ -91,7 +101,6 @@ final class FileEditorModel: ObservableObject {
         case deleted
     }
 
-    /// The file, with symbolic links resolved so a save writes through them.
     let url: URL
     /// As the Changes list shows it.
     let path: String
@@ -113,11 +122,14 @@ final class FileEditorModel: ObservableObject {
     let completion: WordCompletion
     let bridge = EditorBridge()
     private var watcher: FolderWatcher?
+    /// For tests: runs after a save has checked the file and before it
+    /// replaces it, where another writer could still come in.
+    var beforeReplace: (() -> Void)?
 
     private static let live = NSHashTable<FileEditorModel>.weakObjects()
 
     init(url: URL, path: String, otherFiles: [URL] = []) {
-        self.url = url.resolvingSymlinksInPath()
+        self.url = url.standardizedFileURL
         self.path = path
         completion = WordCompletion(otherFiles: otherFiles)
         bridge.onChange = { [weak self] text in self?.textDidChange(text) }
@@ -139,14 +151,19 @@ final class FileEditorModel: ObservableObject {
         live.allObjects.first { $0.path == path }
     }
 
-    /// Before quitting.
-    static func saveAll() {
-        for model in live.allObjects { model.saveIfPossible() }
+    /// Saves every open editor that can be saved. Returns the paths of the
+    /// ones that still hold unsaved text, such as one an agent changed.
+    @discardableResult
+    static func saveAll() -> [String] {
+        live.allObjects.compactMap { model in
+            model.saveIfPossible()
+            return model.isDirty ? model.path : nil
+        }
     }
 
     func textDidChange(_ text: String) {
         self.text = text
-        let dirty = text != baseline
+        let dirty = !EditableText.same(text, baseline)
         if dirty != isDirty { isDirty = dirty }
     }
 
@@ -156,18 +173,14 @@ final class FileEditorModel: ObservableObject {
     func save() -> Bool {
         guard phase == .ready else { return false }
         guard isDirty else { return true }
-        let disk = EditableText.read(url)
-        let unchanged = switch disk {
-        case .text(let s): s == baseline || s == text
-        case .missing: baseline == nil
-        case .unavailable: false
-        }
-        guard unchanged else {
-            diskChange = disk == .missing ? .deleted : .modified
-            return false
-        }
+        // A change already on disk shows without touching the file.
+        guard matchesDisk() else { return false }
         do {
-            try write(text)
+            guard try replace(expecting: baseline) else {
+                _ = matchesDisk()
+                if diskChange == nil { diskChange = .modified }
+                return false
+            }
             baseline = text
             isDirty = false
             diskChange = nil
@@ -176,6 +189,19 @@ final class FileEditorModel: ObservableObject {
             errorMessage = "Could not save \(path): \(error.localizedDescription)"
             return false
         }
+    }
+
+    /// Whether the file still holds what the editor read, or already holds
+    /// the editor's text. If not, it shows that the file changed.
+    private func matchesDisk() -> Bool {
+        let disk = EditableText.read(url)
+        let unchanged = switch disk {
+        case .text(let s): EditableText.same(s, baseline) || EditableText.same(s, text)
+        case .missing: baseline == nil
+        case .unavailable: false
+        }
+        if !unchanged { diskChange = disk == .missing ? .deleted : .modified }
+        return unchanged
     }
 
     /// When the editor goes away: keeps the edits on disk, unless that
@@ -197,7 +223,7 @@ final class FileEditorModel: ObservableObject {
         case .unavailable: return
         }
         diskChange = nil
-        isDirty = text != baseline
+        isDirty = !EditableText.same(text, baseline)
     }
 
     func diskDidChange() {
@@ -208,9 +234,9 @@ final class FileEditorModel: ObservableObject {
         }
         switch disk {
         case .text(let s):
-            if s == baseline {
+            if EditableText.same(s, baseline) {
                 if diskChange != nil { diskChange = nil }
-            } else if !isDirty || s == text {
+            } else if !isDirty || EditableText.same(s, text) {
                 adopt(disk)
             } else if diskChange != .modified {
                 diskChange = .modified
@@ -256,14 +282,44 @@ final class FileEditorModel: ObservableObject {
         diskChange = nil
     }
 
-    private func write(_ text: String) throws {
+    /// Puts the text in the file only if the file holds `expected` (nil:
+    /// no file) right then; returns false when another writer came first.
+    ///
+    /// The text goes to a new file next to it, which then swaps places with
+    /// the file in one step. What comes out of the swap is exactly what was
+    /// replaced: if that is not `expected`, it is swapped back.
+    private func replace(expecting expected: String?) throws -> Bool {
         let fm = FileManager.default
-        // An atomic write makes a new file; keep the old one's mode, such
-        // as the executable bit.
-        let mode = (try? fm.attributesOfItem(atPath: url.path))?[.posixPermissions]
-        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data(text.utf8).write(to: url, options: .atomic)
-        if let mode { try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path) }
+        let folder = url.deletingLastPathComponent()
+        let temp = folder.appendingPathComponent(".\(url.lastPathComponent).agentz-\(UUID().uuidString.prefix(8))")
+        let attributes = try? fm.attributesOfItem(atPath: url.path)
+        if attributes?[.type] as? FileAttributeType == .typeSymbolicLink {
+            throw CocoaError(.fileWriteNoPermission, userInfo: [NSLocalizedDescriptionKey: "It is now a symbolic link."])
+        }
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: temp)
+        defer { try? fm.removeItem(at: temp) }
+        // Keep the file's mode, such as the executable bit.
+        if let mode = attributes?[.posixPermissions] {
+            try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: temp.path)
+        }
+        beforeReplace?()
+
+        guard let expected else {
+            // The file was deleted; put it back only if nobody made a new one.
+            if renamex_np(temp.path, url.path, UInt32(RENAME_EXCL)) == 0 { return true }
+            if errno == EEXIST { return false }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard renamex_np(temp.path, url.path, UInt32(RENAME_SWAP)) == 0 else {
+            if errno == ENOENT { return false }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let replaced = try? Data(contentsOf: temp)
+        if replaced == Data(expected.utf8) || replaced == Data(text.utf8) { return true }
+        // Another writer came in between: theirs goes back.
+        _ = renamex_np(temp.path, url.path, UInt32(RENAME_SWAP))
+        return false
     }
 
     private func watch() {
@@ -289,9 +345,8 @@ final class EditorBridge: TextViewCoordinator {
         onChange?(controller.text)
     }
 
-    func destroy() {
-        controller = nil
-    }
+    // No `destroy()`: a reload makes the new controller before the old one
+    // goes, and `controller` is weak anyway.
 }
 
 /// The open editors of one git view. A file's editor stays while it has
@@ -301,12 +356,28 @@ final class FileEditors: ObservableObject {
     private var models: [String: FileEditorModel] = [:]
 
     func model(for url: URL, path: String, otherFiles: @autoclosure () -> [URL]) -> FileEditorModel {
-        let key = url.resolvingSymlinksInPath().path
+        let key = url.standardizedFileURL.path
         if let model = models[key] { return model }
         models = models.filter { $0.value.isDirty }
         let model = FileEditorModel(url: url, path: path, otherFiles: otherFiles())
         models[key] = model
         return model
+    }
+
+    /// The editor holding unsaved text for a path, even when the file is
+    /// gone from disk, so its bar can still offer to keep the text.
+    func draft(path: String) -> FileEditorModel? {
+        models.values.first { $0.path == path && $0.isDirty }
+    }
+
+    /// Saves what can be saved. Returns the paths still holding unsaved
+    /// text, such as files an agent changed under the edits.
+    func saveAll() -> [String] {
+        models.values.compactMap { model in
+            model.saveIfPossible()
+            return model.isDirty ? model.path : nil
+        }
+        .sorted()
     }
 }
 

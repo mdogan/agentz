@@ -124,7 +124,6 @@ struct DetailView: View {
     @State private var focusedFileID: Int?
     @State private var scrollToTopToken: UUID?
     @State private var changeDiffMode = ChangeDiffMode.stageOrUnstage
-    @StateObject private var editors = FileEditors()
 
     /// The parsed files, but only once they describe the diff on screen, so the
     /// file chooser never lists the previous selection's files.
@@ -150,13 +149,15 @@ struct DetailView: View {
                     scrollToTopToken: scrollToTopToken
                 )
             } else if let change = store.selectedChange, store.selectedSection == .changes {
+                // Unsaved text comes first: its file may be gone from disk.
+                let draft = store.editors.draft(path: change.path)
                 let editURL = EditableText.url(root: store.repositoryURL, change: change)
-                let editor = store.isEditingFile ? editURL.map { editor(for: $0, change: change) } : nil
+                let editor = store.isEditingFile ? draft ?? editURL.map { editor(for: $0, change: change) } : nil
                 ChangeHeader(
                     change: change,
                     staged: store.selectedChangeIsStaged,
                     diffMode: $changeDiffMode,
-                    canEdit: editURL != nil,
+                    canEdit: draft != nil || editURL != nil,
                     editor: editor
                 )
                 Rectangle().fill(Look.shared.divider).frame(height: 1)
@@ -203,7 +204,7 @@ struct DetailView: View {
 
     /// The other changed files give the editor more words to complete.
     private func editor(for url: URL, change: WorkingChange) -> FileEditorModel {
-        editors.model(for: url, path: change.path, otherFiles: store.changes.compactMap { other in
+        store.editors.model(for: url, path: change.path, otherFiles: store.changes.compactMap { other in
             other.path == change.path ? nil : EditableText.url(root: store.repositoryURL, change: other)
         })
     }
