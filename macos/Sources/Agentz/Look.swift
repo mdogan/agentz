@@ -90,6 +90,7 @@ final class Look {
     var yellow: Color { ansi(3, isDark ? RGB(0.9, 0.75, 0.24) : RGB(0.65, 0.41, 0)) }
     var red: Color { ansi(1, isDark ? RGB(0.94, 0.4, 0.4) : RGB(0.75, 0.15, 0.15)) }
     var magenta: Color { ansi(5, isDark ? RGB(0.73, 0.52, 0.93) : RGB(0.48, 0.24, 0.62)) }
+    var cyan: Color { ansi(6, isDark ? RGB(0.4, 0.78, 0.84) : RGB(0.05, 0.47, 0.53)) }
 
     func color(for agent: Agent) -> Color {
         switch agent {

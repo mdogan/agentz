@@ -11,6 +11,10 @@ let package = Package(
         // XCFramework, and Ghostty's themes for when Ghostty.app is not
         // installed. Only Sources/Agentz/Terminal.swift imports them.
         .package(url: "https://github.com/Lakr233/libghostty-spm.git", exact: "2.2.2026110702"),
+        // The code editor in the git panel's Changes view: tree-sitter
+        // highlighting, find, and a completion popup. Only
+        // Sources/Agentz/Git/FileEditor.swift imports it.
+        .package(url: "https://github.com/CodeEditApp/CodeEditSourceEditor.git", exact: "0.15.2"),
     ],
     targets: [
         // The Rust core (../core). Built by build-core.sh.
@@ -25,6 +29,7 @@ let package = Package(
                 "AgentzCore",
                 .product(name: "GhosttyTerminal", package: "libghostty-spm"),
                 .product(name: "GhosttyTheme", package: "libghostty-spm"),
+                .product(name: "CodeEditSourceEditor", package: "CodeEditSourceEditor"),
             ],
             path: "Sources/Agentz",
             resources: [.process("Resources")],

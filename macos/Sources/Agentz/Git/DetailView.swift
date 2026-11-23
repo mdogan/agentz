@@ -124,6 +124,7 @@ struct DetailView: View {
     @State private var focusedFileID: Int?
     @State private var scrollToTopToken: UUID?
     @State private var changeDiffMode = ChangeDiffMode.stageOrUnstage
+    @StateObject private var editors = FileEditors()
 
     /// The parsed files, but only once they describe the diff on screen, so the
     /// file chooser never lists the previous selection's files.
@@ -149,15 +150,22 @@ struct DetailView: View {
                     scrollToTopToken: scrollToTopToken
                 )
             } else if let change = store.selectedChange, store.selectedSection == .changes {
+                let editURL = EditableText.url(root: store.repositoryURL, change: change)
+                let editor = store.isEditingFile ? editURL.map { editor(for: $0, change: change) } : nil
                 ChangeHeader(
                     change: change,
                     staged: store.selectedChangeIsStaged,
-                    diffMode: $changeDiffMode
+                    diffMode: $changeDiffMode,
+                    canEdit: editURL != nil,
+                    editor: editor
                 )
                 Rectangle().fill(Look.shared.divider).frame(height: 1)
                 if change.isConflicted,
                    let conflictDocument = store.conflictDocument {
                     ConflictDocumentView(document: conflictDocument)
+                } else if let editor {
+                    FileEditorView(model: editor, staged: store.selectedChangeIsStaged)
+                        .id(editor.url)
                 } else {
                     DiffTextView(
                         text: store.diff,
@@ -191,6 +199,13 @@ struct DetailView: View {
             // A new commit brings a new set of files; never carry a filter over.
             focusedFileID = nil
         }
+    }
+
+    /// The other changed files give the editor more words to complete.
+    private func editor(for url: URL, change: WorkingChange) -> FileEditorModel {
+        editors.model(for: url, path: change.path, otherFiles: store.changes.compactMap { other in
+            other.path == change.path ? nil : EditableText.url(root: store.repositoryURL, change: other)
+        })
     }
 }
 
@@ -403,6 +418,10 @@ private struct ChangeHeader: View {
     let change: WorkingChange
     let staged: Bool
     @Binding var diffMode: ChangeDiffMode
+    /// The file is on disk and is not in conflict.
+    let canEdit: Bool
+    /// Set while the file shows in the editor.
+    let editor: FileEditorModel?
     @State private var isConfirmingFileDiscard = false
     @State private var pendingConflictSide: ConflictResolutionSide?
 
@@ -472,7 +491,21 @@ private struct ChangeHeader: View {
                 .buttonStyle(GitForkHoverButtonStyle(.toolbarAction))
                 .help("Stage the file’s current contents as the resolved version")
                 .disabled(store.isLoading)
+            } else if let editor {
+                ToolbarIconButton("Show Diff", systemImage: "doc.text.magnifyingglass", help: "Save and go back to the diff") {
+                    store.isEditingFile = false
+                }
+                EditorSaveButton(model: editor)
+                    .padding(.leading, 4)
             } else {
+                ToolbarIconButton("Edit File", systemImage: "pencil", help: canEdit
+                    ? "Edit this file here, with the diff out of the way"
+                    : "Only a file that is on disk, and not in conflict, can be edited")
+                {
+                    store.isEditingFile = true
+                }
+                .disabled(!canEdit)
+
                 ToolbarIconButton(
                     diffMode == .stageOrUnstage ? "Plain Diff" : "Diff to Stage Lines",
                     systemImage: diffMode == .stageOrUnstage ? "doc.plaintext" : "checklist",

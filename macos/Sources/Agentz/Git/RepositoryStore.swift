@@ -48,6 +48,8 @@ final class RepositoryStore: ObservableObject {
     @Published var selectedCommit: GitCommit?
     @Published private(set) var selectedChange: WorkingChange?
     @Published private(set) var selectedChangeIsStaged = false
+    /// The Changes view shows the selected file in the editor, not its diff.
+    @Published var isEditingFile = false
     @Published private(set) var changeSelection = ChangeSelectionModel()
     @Published var selectedReference: GitReference?
     @Published var selectedStash: GitStash?

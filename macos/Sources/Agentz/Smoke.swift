@@ -1,5 +1,6 @@
 import AgentzCore
 import AppKit
+import CodeEditSourceEditor
 import SwiftUI
 
 /// A scripted check of the real app with real Ghostty terminals, started by
@@ -1166,6 +1167,9 @@ final class SmokeTest {
                 } ?? false
             }, "\(ws.currentTab?.key.description ?? "none")")
             snapshot("git-tab-change")
+            if let tabStore = ws.currentTab?.git?.store {
+                await fileEditor(tabStore, write: write, read: { try? String(contentsOfFile: repo + "/" + $0, encoding: .utf8) })
+            }
             if let key = ws.currentTab?.key, key.agent == .git { ws.close(key) }
             ws.open(shell.key)
         }
@@ -1200,6 +1204,81 @@ final class SmokeTest {
         check("⇧⌘C hides it again", !window.isGitShown && !git.isShown && item.state == .off)
         check("and it is out of sight", await wait(3) { self.window.gitPanelWidth == 0 }, "width \(window.gitPanelWidth)")
         ws.close(shell.key)
+    }
+
+    /// Editing a changed file in the Changes view, while an agent may
+    /// write the same file.
+    private func fileEditor(
+        _ store: RepositoryStore,
+        write: (String, String) -> Void,
+        read: (String) -> String?
+    ) async {
+        guard let a = store.changeEntries.first(where: { $0.change.path == "a.txt" && !$0.staged }) else {
+            return check("a.txt is a change to edit", false, "\(store.changes)")
+        }
+        // As a click on the file does it.
+        if store.selectedSection != .changes { store.selectChanges() }
+        store.selectChangeEntry(a.id)
+        store.isEditingFile = true
+        var editor: FileEditorModel?
+        check("a changed file opens in the editor", await wait(5) {
+            editor = FileEditorModel.open(path: "a.txt")
+            return editor?.bridge.controller?.view.window != nil
+        }, "section \(store.selectedSection) change \(store.selectedChange?.path ?? "none") editing \(store.isEditingFile) "
+            + "detail \(store.compactDetailShown) model \(editor != nil) controller \(editor?.bridge.controller != nil)")
+        guard let editor, let controller = editor.bridge.controller else { return }
+        check("with the file's text", editor.text == "one\ntwo\n", editor.text)
+        snapshot("git-editor")
+
+        func type(_ text: String) {
+            let end = (controller.text as NSString).length
+            controller.textView.replaceCharacters(in: [NSRange(location: end, length: 0)], with: text)
+        }
+        type("three\nth")
+        check("typing marks it edited", editor.isDirty && editor.text == "one\ntwo\nthree\nth", editor.text)
+        let end = (controller.text as NSString).length
+        let offered = await editor.completion.completionSuggestionsRequested(
+            textView: controller, cursorPosition: CursorPosition(range: NSRange(location: end, length: 0))
+        )
+        check("words in the file are offered", offered?.items.map(\.label) == ["three"], "\(offered?.items.map(\.label) ?? [])")
+        controller.textView.replaceCharacters(in: [NSRange(location: end - 2, length: 2)], with: "")
+        controller.view.window?.makeFirstResponder(controller.textView)
+        check("⌘S is the editor's while it has the focus", FileEditorModel.focused(in: controller.view.window) === editor)
+        (NSApp.delegate as! AppDelegate).saveContents(nil)
+        check("⌘S writes the file", !editor.isDirty && read("a.txt") == "one\ntwo\nthree\n", read("a.txt") ?? "none")
+        check("and the diff shows the saved line", await wait(6) { store.diff.contains("+three") }, store.diff)
+
+        write("a.txt", "one\ntwo\nthree\nfour\n")
+        check("an unedited file follows an agent's write", await wait(4) {
+            editor.text == "one\ntwo\nthree\nfour\n" && editor.bridge.controller?.text == editor.text
+        }, editor.text)
+
+        editor.bridge.controller.map { c in
+            c.textView.replaceCharacters(in: [NSRange(location: (c.text as NSString).length, length: 0)], with: "mine\n")
+        }
+        write("a.txt", "theirs\n")
+        check("an agent's write over unsaved edits is shown, not lost", await wait(4) { editor.diskChange == .modified })
+        snapshot("git-editor-conflict")
+        check("and not saved over", !editor.save() && read("a.txt") == "theirs\n", read("a.txt") ?? "none")
+        editor.reloadFromDisk()
+        check("Reload takes the file from disk", !editor.isDirty && editor.text == "theirs\n", editor.text)
+
+        // A code file: tree-sitter's grammars load from the app bundle.
+        write("c.swift", "let greeting = \"hello\"\n")
+        check("a new Swift file shows", await wait(6) { store.changeEntries.contains { $0.change.path == "c.swift" } })
+        if let c = store.changeEntries.first(where: { $0.change.path == "c.swift" }) { store.selectChangeEntry(c.id) }
+        let strings = EditorTheme.agentz(Look.shared).strings.color
+        check("it is highlighted as Swift", await wait(6) {
+            guard let swift = FileEditorModel.open(path: "c.swift"), swift.language.id == .swift,
+                  let storage = swift.bridge.controller?.textView.textStorage, storage.length > 20 else { return false }
+            let color = storage.attribute(.foregroundColor, at: 17, effectiveRange: nil) as? NSColor
+            return color == strings
+        }, "\(FileEditorModel.open(path: "c.swift")?.language.id.rawValue ?? "no editor")")
+        snapshot("git-editor-swift")
+        try? FileManager.default.removeItem(atPath: (store.repositoryURL?.path ?? "") + "/c.swift")
+
+        store.isEditingFile = false
+        check("Show Diff goes back to the diff", await wait(3) { FileEditorModel.open(path: "a.txt")?.bridge.controller?.view.window == nil })
     }
 
     /// A git tab: GitFork's whole client for a worktree, in a pane like a

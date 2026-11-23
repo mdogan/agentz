@@ -368,6 +368,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     func applicationWillTerminate(_: Notification) {
+        FileEditorModel.saveAll()
         tickTimer?.invalidate()
         workspace?.keepTabs = nil
         workspace?.sleepBlocker.setWorking(false)
@@ -579,6 +580,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc func saveContents(_: Any?) {
+        if let editor = FileEditorModel.focused(in: NSApp.keyWindow ?? NSApp.mainWindow) {
+            editor.save()
+            return
+        }
         if inNotesWindow || NSApp.keyWindow?.firstResponder is NoteSourceTextView {
             workspace?.notes.flush()
             return
@@ -849,6 +854,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         case #selector(find(_:)):
             return !editingNote && activeTerminal != nil
         case #selector(saveContents(_:)):
+            if FileEditorModel.focused(in: NSApp.keyWindow ?? NSApp.mainWindow) != nil {
+                item.title = "Save File"
+                return true
+            }
             item.title = editingNote ? "Save Notes" : "Save Session Contents…"
             return editingNote || activeTerminal != nil
         case #selector(copyContents(_:)):
