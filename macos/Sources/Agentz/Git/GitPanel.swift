@@ -121,6 +121,9 @@ struct GitPanel: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Up to the window's top edge, next to the pane headers: there is
+        // no title bar.
+        .ignoresSafeArea(.container, edges: .top)
         .foregroundStyle(look.text)
         .background(look.sidebar.ignoresSafeArea())
         .tint(look.accent)
@@ -173,6 +176,6 @@ struct GitPanel: View {
         }
         .padding(.leading, 10)
         .padding(.trailing, 6)
-        .frame(height: 36)
+        .frame(height: PaneViewController.headerHeight)
     }
 }

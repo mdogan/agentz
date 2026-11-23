@@ -268,9 +268,10 @@ private struct GitSessionBar: View {
                 repository.padding(.leading, 8)
             }
         }
-        .padding(.leading, 6)
-        .padding(.trailing, 10)
-        .frame(height: 36)
+        // Room for the window's buttons, which lie over the bar's ends.
+        .padding(.leading, 6 + PaneChrome.shared.gitBarLeading)
+        .padding(.trailing, 10 + PaneChrome.shared.gitBarTrailing)
+        .frame(height: PaneViewController.headerHeight)
     }
 
     private func showLog() {

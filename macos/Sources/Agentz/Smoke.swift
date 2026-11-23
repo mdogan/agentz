@@ -456,8 +456,29 @@ final class SmokeTest {
         for tab in ws.tabs {
             ws.close(tab.key)
         }
-        let accessories = NSApp.windows.first { $0.isVisible }?.titlebarAccessoryViewControllers ?? []
-        check("split buttons in the title bar", accessories.contains { $0.layoutAttribute == .trailing && !$0.view.isHidden })
+        if let main = window.window, let frame = main.contentView?.superview, let buttons = window.windowButtons {
+            main.layoutIfNeeded()
+            check("no title bar accessories", main.titlebarAccessoryViewControllers.isEmpty)
+            let header = descendants(of: frame).compactMap { $0 as? PaneHeaderView }.first { !$0.isHidden }
+            let top = header.map { $0.convert($0.bounds, to: nil) }
+            check("the pane header reaches the window's top", top.map { abs($0.maxY - frame.bounds.height) < 0.5 } ?? false, "\(top.map { "\($0)" } ?? "none")")
+            // What a click at the top of the window, in the header, reaches.
+            if let header, let top {
+                let hit = frame.hitTest(frame.convert(NSPoint(x: top.midX, y: top.maxY - 6), from: nil))
+                check("a click at the window's top reaches the pane header", hit.map { $0 === header || $0.isDescendant(of: header) } ?? false,
+                      "\(hit.map { String(describing: type(of: $0)) } ?? "nothing")")
+            }
+            let place = buttons.convert(buttons.bounds, to: nil)
+            check("the window's buttons sit at the header's right end", !buttons.isHidden && top.map {
+                abs(place.maxX - $0.maxX) < 0.5 && abs(place.maxY - $0.maxY) < 0.5
+            } ?? false, "\(place)")
+            let mid = frame.convert(NSPoint(x: place.midX, y: place.midY), from: nil)
+            let hit = frame.hitTest(mid)
+            check("a click reaches the window's buttons", hit.map { $0 === buttons || $0.isDescendant(of: buttons) } ?? false,
+                  "\(hit.map { String(describing: type(of: $0)) } ?? "nothing")")
+        } else {
+            check("the window's buttons exist", false)
+        }
 
         // Dragging a session from the list onto the pane area.
         guard let pane = NSApp.windows.first(where: { $0.isVisible })?.contentView.flatMap(paneContainer)
@@ -560,6 +581,15 @@ final class SmokeTest {
             "\(narrow) -> \(underView.frame.width)")
         let wide = underView.frame.width
         lines.append("info list width: \(overlay.panel.frame.width), terminal \(narrow) -> \(wide)")
+        // The window's close, minimize and zoom buttons now lie over the
+        // pane header, which starts its text after them.
+        if let zoom = window.window?.standardWindowButton(.zoomButton) {
+            let controls = zoom.convert(zoom.bounds, to: nil)
+            check("the header leaves room for the window's controls", await wait(2) {
+                PaneChrome.shared.leading[0] >= controls.maxX
+            }, "\(PaneChrome.shared.leading[0]) < \(controls.maxX)")
+            snapshot("auto-hide")
+        }
         window.focusSidebar(.list)
         check("⌘L shows the list over the terminal", overlay.isShown && overlay.held && !overlay.panel.isHidden && underView.frame.width == wide)
         check("the list gets the keyboard", await wait(2) { overlay.hasFocus })
@@ -586,6 +616,8 @@ final class SmokeTest {
         window.setAutoHide(false)
         check("off again, the list is back in the split", await wait(2) { abs(underView.frame.width - narrow) <= 1 }
             && overlay.panel.superview == nil, "\(narrow) -> \(underView.frame.width)")
+        check("beside the list, the header needs no room for them", await wait(2) { PaneChrome.shared.leading[0] == 8 },
+              "\(PaneChrome.shared.leading[0])")
 
         for tab in ws.tabs {
             ws.close(tab.key)
@@ -1317,7 +1349,7 @@ final class SmokeTest {
         window.setGitShown(true)
         check("the Changes panel shows over the shell", window.isGitShown && app.validateMenuItem(changes))
         check("Open Git works from a shell in a repository", app.validateMenuItem(item))
-        let titleButtons = window.window?.titlebarAccessoryViewControllers.first { $0.layoutAttribute == .trailing }?.view
+        let titleButtons = window.windowButtons
         let buttonsWidth = titleButtons?.frame.width ?? 0
         app.openGit(nil)
         guard let tab = ws.tabs.first(where: { $0.key == key }), let git = tab.git else {
@@ -1332,7 +1364,7 @@ final class SmokeTest {
         } && !app.validateMenuItem(changes), "width \(window.gitPanelWidth)")
         app.toggleGit(nil)
         check("not even with ⇧⌘C", !window.isGitShown)
-        check("the title bar drops the Changes button", await wait(3) {
+        check("the window's buttons drop the Changes button", await wait(3) {
             (titleButtons?.frame.width ?? 0) < buttonsWidth - 20
         }, "\(buttonsWidth) -> \(titleButtons?.frame.width ?? 0)")
         check("it reads the repository, and its row is named after the branch", await wait(8) {
@@ -1387,8 +1419,10 @@ final class SmokeTest {
         }
 
         // The button in the bar opens the log, showing this repository. It
-        // comes third from the right, before Zed, Finder and the name "tab".
-        click(git.paneView, at: NSPoint(x: git.paneView.bounds.width - 102, y: 18))
+        // comes third from the right, before Zed, Finder and the name "tab",
+        // and the window's buttons at the bar's end.
+        let windowButtonsWidth = window.windowButtons?.frame.width ?? 0
+        click(git.paneView, at: NSPoint(x: git.paneView.bounds.width - windowButtonsWidth - 102, y: 18))
         check("the bar's button opens the git command log", await wait(3) {
             NSApp.windows.contains { $0.title == "Git Command Log" && $0.isVisible }
         })
@@ -1775,9 +1809,12 @@ final class SmokeTest {
               && buttons().first!.frame.maxX < buttons("zed").first!.frame.minX
               && buttons("zed").first!.frame.maxX < buttons("git").first!.frame.minX)
         let paneFrame = tab.content.paneView.frame
-        check("the buttons sit at the top right, above the terminal", buttons("git").first.map {
-            $0.frame.minY >= paneFrame.maxY && paneFrame.maxX - $0.frame.maxX < 12
-        } ?? false, "\(buttons("git").first?.frame ?? .zero) \(paneFrame)")
+        // Then a line, and the window's buttons at the right end.
+        let windowButtons = window.windowButtons?.frame ?? .zero
+        check("the buttons sit at the top right, above the terminal, before the window's", buttons("git").first.map {
+            $0.frame.minY >= paneFrame.maxY && abs(windowButtons.minX - $0.frame.maxX - (2 * PaneViewController.buttonsLineGap + 1)) < 0.5
+                && abs(windowButtons.maxX - paneFrame.maxX) < 0.5
+        } ?? false, "\(buttons("git").first?.frame ?? .zero) \(windowButtons) \(paneFrame)")
         buttons().first?.performClick(nil)
         check("note opens in a separate popup", await wait(3) { popup()?.isKeyWindow == true && !editors(in: popup()?.contentView).isEmpty })
         check("opening a note preserves the terminal's size", editors(in: window.window?.contentView).isEmpty && tab.content.paneView.frame == terminalFrame)
@@ -1824,6 +1861,7 @@ final class SmokeTest {
         buttons().first { $0.tag == 0 }?.performClick(nil)
         check("other pane opens and focuses the correct session's note", await wait(3) { ws.panes.focused == 0 && editors(in: popup()?.contentView).first?.string == markdown })
         check("switching notes keeps both texts", ws.notes.note(second)?.text == "# Review\n\nCheck the retry limit." && ws.notes.note(note.id)?.text == markdown)
+        snapshot("pane-split")
         app.closeCurrent(nil)
         snapshot("pane-actions")
         let orphan = ws.notes.create(for: SessionKey(.claude, "missing-session"), title: "Archived investigation", folder: folder)!
@@ -2057,6 +2095,10 @@ private func press(_ view: NSView, at point: NSPoint) {
 }
 
 @MainActor
+private func descendants(of view: NSView) -> [NSView] {
+    view.subviews + view.subviews.flatMap(descendants)
+}
+
 private func paneContainer(in view: NSView) -> PaneContainer? {
     if let pane = view as? PaneContainer { return pane }
     return view.subviews.lazy.compactMap(paneContainer).first
