@@ -17,15 +17,11 @@ struct GitSidebarView: View {
         GitReference.primaryLocalBranch(in: store.references)
     }
 
-    private var currentBranch: GitReference? {
-        store.references.first {
-            $0.kind == .localBranch && $0.isCurrent && $0 != primaryBranch
-        }
-    }
-
+    /// Every local branch but the primary one, the current branch included,
+    /// so it stays in its place in the tree (e.g. under `fix/`).
     private var remainingLocalBranches: [GitReference] {
         store.references.filter {
-            $0.kind == .localBranch && !$0.isCurrent && $0 != primaryBranch
+            $0.kind == .localBranch && $0 != primaryBranch
         }
     }
 
@@ -73,13 +69,6 @@ struct GitSidebarView: View {
                             reference: primaryBranch,
                             title: primaryBranch.name,
                             icon: primaryBranch.kind.icon
-                        )
-                    }
-                    if let currentBranch {
-                        ReferenceSidebarRow(
-                            reference: currentBranch,
-                            title: currentBranch.name,
-                            icon: currentBranch.kind.icon
                         )
                     }
                     ReferenceTreeRows(references: remainingLocalBranches)
@@ -544,8 +533,28 @@ private struct ReferenceTreeRows: View {
     private static let indentStep: CGFloat = 13
 
     @State private var expandedPaths: Set<String> = []
+    /// Folders the user closed by hand. A folder that holds the current
+    /// branch opens by itself, unless it is in here.
+    @State private var collapsedPaths: Set<String> = []
 
     let references: [GitReference]
+
+    /// The folders that hold the current branch, e.g. `fix` for
+    /// `fix/red-1234`. They start open so the current branch is in view.
+    private var currentBranchFolders: Set<String> {
+        guard let current = references.first(where: \.isCurrent) else { return [] }
+        let components = current.name.split(separator: "/", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard components.count > 1 else { return [] }
+        return Set((1..<components.count).map {
+            "\(current.kind.rawValue):" + components[0..<$0].joined(separator: "/")
+        })
+    }
+
+    private func isExpanded(_ node: ReferenceTreeNode) -> Bool {
+        expandedPaths.contains(node.id)
+            || currentBranchFolders.contains(node.id) && !collapsedPaths.contains(node.id)
+    }
 
     var body: some View {
         ForEach(rows(for: ReferenceTreeNode.build(from: references), depth: 0)) { row in
@@ -560,7 +569,7 @@ private struct ReferenceTreeRows: View {
                 ReferenceFolderRow(
                     node: row.node,
                     indent: indent(for: row.depth),
-                    isExpanded: expandedPaths.contains(row.node.id)
+                    isExpanded: isExpanded(row.node)
                 ) {
                     toggle(row.node)
                 }
@@ -571,7 +580,7 @@ private struct ReferenceTreeRows: View {
     private func rows(for nodes: [ReferenceTreeNode], depth: Int) -> [ReferenceTreeRow] {
         nodes.flatMap { node -> [ReferenceTreeRow] in
             let row = ReferenceTreeRow(node: node, depth: depth)
-            guard !node.children.isEmpty, expandedPaths.contains(node.id) else {
+            guard !node.children.isEmpty, isExpanded(node) else {
                 return [row]
             }
             return [row] + rows(for: node.children, depth: depth + 1)
@@ -583,10 +592,12 @@ private struct ReferenceTreeRows: View {
     }
 
     private func toggle(_ node: ReferenceTreeNode) {
-        if expandedPaths.contains(node.id) {
+        if isExpanded(node) {
             expandedPaths.remove(node.id)
+            collapsedPaths.insert(node.id)
         } else {
             expandedPaths.insert(node.id)
+            collapsedPaths.remove(node.id)
         }
     }
 }
